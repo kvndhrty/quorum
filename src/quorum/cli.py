@@ -14,7 +14,11 @@ from .messages import MessageBus
 
 app = typer.Typer(help="Quorum: an agentic ecosystem of specialists.", no_args_is_help=True)
 board_app = typer.Typer(help="Read and post to the public message board.", no_args_is_help=True)
+project_app = typer.Typer(help="Manage tracked projects.", no_args_is_help=True)
+agent_app = typer.Typer(help="Inspect and run agents.", no_args_is_help=True)
 app.add_typer(board_app, name="board")
+app.add_typer(project_app, name="project")
+app.add_typer(agent_app, name="agent")
 
 _HOME_OPT = typer.Option(None, "--home", help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum).")
 
@@ -76,6 +80,180 @@ def board_read(
                 typer.echo(f"[{created}] {t} <{msg.sender}> {msg.type}: {msg.payload.get('text', '')}")
     if empty and not as_json:
         typer.echo(f"no messages in the last {since}")
+
+
+@app.command()
+def up(
+    home: Optional[Path] = _HOME_OPT,
+    self_sandbox: bool = typer.Option(
+        False, "--self-sandbox", help="Apply a nono-py kernel sandbox to this process before starting."
+    ),
+) -> None:
+    """Run the supervisor in the foreground (background it with nohup/tmux)."""
+    from .config import load_config
+    from .supervisor import Supervisor
+
+    target = get_home(home)
+    config = load_config(target)
+    if self_sandbox:
+        from .sandbox import self_sandbox as apply_sandbox
+
+        apply_sandbox(target, config)
+    typer.echo(f"quorum supervisor starting (home: {target}) — Ctrl-C to stop")
+    Supervisor(target, config).run()
+
+
+@app.command()
+def status(home: Optional[Path] = _HOME_OPT) -> None:
+    """Show supervisor liveness, agent heartbeats, and project deadlines."""
+    from . import views
+
+    target = get_home(home)
+    sup = views.supervisor_status(target)
+    if sup["alive"]:
+        typer.secho(f"supervisor: running (pid {sup['pid']}, since {sup['started_at']})", fg="green")
+    else:
+        typer.secho("supervisor: not running", fg="yellow")
+
+    rows = views.agent_rows(target)
+    if rows:
+        typer.echo("\nagents:")
+        for r in rows:
+            marker = {"idle": "●", "running": "◐", "error": "✗", "paused": "‖"}.get(r["status"], "○")
+            line = f"  {marker} {r['name']:<12} {r['status']:<10} schedule: {r['schedule']}"
+            if r["last_end"]:
+                line += f"  last: {r['last_end']}"
+            if r["error"]:
+                line += f"  [{r['error']}]"
+            typer.echo(line)
+
+    projects = views.project_rows(target)
+    if projects:
+        typer.echo("\nprojects:")
+        for p in projects:
+            dl = ""
+            if p["deadline"]:
+                dl = f"  due {p['deadline']}"
+                if p["days_left"] is not None:
+                    dl += f" ({p['days_left']}d)" if p["days_left"] >= 0 else f" (OVERDUE {-p['days_left']}d)"
+            act = f"  active {p['last_activity']}" if p["last_activity"] else ""
+            typer.echo(f"  {p['slug']:<24}{dl}{act}")
+
+
+@project_app.command("add")
+def project_add(
+    path: Path,
+    name: Optional[str] = typer.Option(None, "--name", help="Display name (default: dir name)."),
+    deadline: Optional[str] = typer.Option(None, "--deadline", help="ISO date, e.g. 2026-09-15."),
+    tags: str = typer.Option("", "--tags", help="Comma-separated tags."),
+    notes: str = typer.Option("", "--notes"),
+    marker: bool = typer.Option(False, "--marker", help="Also write a .quorum.toml into the project dir."),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Register a project directory."""
+    from .projects import ProjectRegistry
+
+    registry = ProjectRegistry(get_home(home))
+    try:
+        project = registry.add(
+            path,
+            name=name,
+            deadline=deadline,
+            tags=[t.strip() for t in tags.split(",") if t.strip()],
+            notes=notes,
+            write_marker=marker,
+        )
+    except ValueError as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"registered project {project.slug} ({project.path})", fg="green")
+
+
+@project_app.command("list")
+def project_list(home: Optional[Path] = _HOME_OPT) -> None:
+    """List registered projects (marker-file fields merged in)."""
+    from . import views
+
+    rows = views.project_rows(get_home(home))
+    if not rows:
+        typer.echo("no projects registered — `quorum project add <dir>`")
+        return
+    for p in rows:
+        dl = f"  due {p['deadline']} ({p['days_left']}d)" if p["deadline"] else ""
+        tags = f"  [{', '.join(p['tags'])}]" if p["tags"] else ""
+        typer.echo(f"{p['slug']:<24} {p['name']}{dl}{tags}")
+
+
+@project_app.command("set")
+def project_set(
+    slug: str,
+    deadline: Optional[str] = typer.Option(None, "--deadline"),
+    notes: Optional[str] = typer.Option(None, "--notes"),
+    name: Optional[str] = typer.Option(None, "--name"),
+    tags: Optional[str] = typer.Option(None, "--tags", help="Comma-separated tags."),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Update a project's metadata in the registry."""
+    from .projects import ProjectRegistry
+
+    registry = ProjectRegistry(get_home(home))
+    try:
+        project = registry.update(
+            slug,
+            deadline=deadline,
+            notes=notes,
+            name=name,
+            tags=[t.strip() for t in tags.split(",") if t.strip()] if tags is not None else None,
+        )
+    except KeyError:
+        typer.secho(f"no project {slug!r}", fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"updated {project.slug}" + (f" (due {project.deadline})" if project.deadline else ""), fg="green")
+
+
+@project_app.command("remove")
+def project_remove(slug: str, home: Optional[Path] = _HOME_OPT) -> None:
+    """Unregister a project (its directory is untouched)."""
+    from .projects import ProjectRegistry
+
+    if ProjectRegistry(get_home(home)).remove(slug):
+        typer.echo(f"removed {slug}")
+    else:
+        typer.secho(f"no project {slug!r}", fg="red", err=True)
+        raise typer.Exit(1)
+
+
+@agent_app.command("list")
+def agent_list(home: Optional[Path] = _HOME_OPT) -> None:
+    """List configured agents and their last heartbeat."""
+    from . import views
+
+    for r in views.agent_rows(get_home(home)):
+        state = r["status"] + ("" if r["enabled"] else " (disabled)")
+        typer.echo(f"{r['name']:<14} type={r['type']:<20} {r['schedule']:<18} {state}")
+
+
+@agent_app.command("run-once")
+def agent_run_once(name: str, home: Optional[Path] = _HOME_OPT) -> None:
+    """Construct an agent and run a single tick (no supervisor needed)."""
+    from .agent import AgentContext
+    from .config import load_config
+    from .registry import AgentResolutionError, resolve
+
+    target = get_home(home)
+    config = load_config(target)
+    acfg = config.agents.get(name)
+    if acfg is None:
+        typer.secho(f"no agent {name!r} in config.toml", fg="red", err=True)
+        raise typer.Exit(1)
+    try:
+        cls = resolve(acfg.type, target)
+    except AgentResolutionError as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(1)
+    agent = cls(AgentContext(home=target, name=name, settings=acfg.settings, config=config))
+    agent.tick()
+    typer.secho(f"{name}: tick complete", fg="green")
 
 
 def _parse_window(text: str) -> timedelta:
