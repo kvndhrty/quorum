@@ -256,6 +256,27 @@ def agent_run_once(name: str, home: Optional[Path] = _HOME_OPT) -> None:
     typer.secho(f"{name}: tick complete", fg="green")
 
 
+@app.command()
+def brief(
+    date: Optional[str] = typer.Argument(None, help="Brief date (YYYY-MM-DD); default: latest."),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Print a daily brief (latest by default)."""
+    target = get_home(home)
+    briefs = sorted((target / "briefs").glob("*.md"))
+    if date:
+        path = target / "briefs" / f"{date}.md"
+        if not path.exists():
+            typer.secho(f"no brief for {date}", fg="red", err=True)
+            raise typer.Exit(1)
+    elif briefs:
+        path = briefs[-1]
+    else:
+        typer.echo("no briefs yet — run `quorum agent run-once scribe` or wait for the schedule")
+        raise typer.Exit(0)
+    typer.echo(path.read_text(encoding="utf-8"))
+
+
 def _parse_window(text: str) -> timedelta:
     units = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
     text = text.strip()
