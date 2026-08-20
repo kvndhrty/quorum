@@ -10,7 +10,7 @@ Purely deterministic.
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .. import fsio
@@ -124,7 +124,7 @@ class Tracker(Agent):
             except OSError:
                 continue
         last_iso = (
-            fsio.iso(datetime.fromtimestamp(newest, tz=timezone.utc)) if newest else None
+            fsio.iso(datetime.fromtimestamp(newest, tz=UTC)) if newest else None
         )
         return {
             "source": "mtime",

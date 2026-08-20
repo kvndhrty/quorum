@@ -28,7 +28,7 @@ class LLMBackend(Protocol):
 
 
 class LLMClient:
-    def __init__(self, backend: LLMBackend | None, config: "LLMConfig | None"):
+    def __init__(self, backend: LLMBackend | None, config: LLMConfig | None):
         self._backend = backend
         self._config = config
 
@@ -39,10 +39,12 @@ class LLMClient:
     @classmethod
     def from_config(
         cls,
-        llm_config: "LLMConfig | None",
+        llm_config: LLMConfig | None,
         agent_settings: dict | None = None,
         home: Path | None = None,
-    ) -> "LLMClient":
+        sandbox_config=None,
+        full_config=None,
+    ) -> LLMClient:
         """Build a client from the global [llm] section merged with per-agent
         overrides. settings.llm may be false (opt out), true (defaults), or a
         table of [llm]-shaped overrides."""
@@ -64,7 +66,12 @@ class LLMClient:
             return cls(ProxyBackend(config, home=home), config)
         from .cli_backend import CliBackend
 
-        return cls(CliBackend(config), config)
+        runner = None
+        if sandbox_config is not None and sandbox_config.use_nono and home is not None:
+            from ..sandbox import make_sandboxed_runner
+
+            runner = make_sandboxed_runner(home, full_config) if full_config else None
+        return cls(CliBackend(config, sandboxed_runner=runner), config)
 
     def complete(self, prompt: str) -> str | None:
         """Prompt -> completion, or None. Truncates oversized prompts

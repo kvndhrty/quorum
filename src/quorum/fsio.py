@@ -17,7 +17,7 @@ import re
 import secrets
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 def ulid(now: datetime | None = None) -> str:
     """A 26-char ULID: 48-bit ms timestamp + 80 random bits, lexicographically sortable."""
-    ts = int((now or datetime.now(timezone.utc)).timestamp() * 1000)
+    ts = int((now or datetime.now(UTC)).timestamp() * 1000)
     chars = []
     for _ in range(10):
         chars.append(_B32[ts & 0x1F])
@@ -38,22 +38,22 @@ def ulid(now: datetime | None = None) -> str:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def compact_ts(dt: datetime) -> str:
     """Timestamp for filenames; sorts chronologically."""
-    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return dt.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def parse_iso(s: str) -> datetime:
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -168,7 +168,9 @@ def acquire_pid_lock(path: Path, meta: dict[str, Any] | None = None) -> None:
             except (OSError, ValueError):
                 pid = -1
             if pid > 0 and _pid_alive(pid) and pid != os.getpid():
-                raise LockError(f"another instance is running (pid {pid}, lock {path})")
+                raise LockError(
+                    f"another instance is running (pid {pid}, lock {path})"
+                ) from None
             path.unlink(missing_ok=True)  # stale — take over
     raise LockError(f"could not acquire lock {path}")
 

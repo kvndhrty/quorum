@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,8 +23,8 @@ def test_tmp_files_invisible_to_scans(tmp_path: Path):
 
 
 def test_ulid_sorts_with_time():
-    t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    t2 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 1, tzinfo=UTC)
+    t2 = datetime(2026, 6, 1, tzinfo=UTC)
     assert fsio.ulid(t1) < fsio.ulid(t2)
     assert len(fsio.ulid()) == 26
 

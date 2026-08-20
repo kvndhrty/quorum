@@ -98,8 +98,8 @@ def test_archive_old_respects_retention_and_ttl(home: Path, clock):
     remaining = [m.payload["text"] for m in bus.read_topic("t")]
     assert remaining == ["fresh"]
     lines = [
-        json.loads(l)
+        json.loads(line)
         for archive in (home / "messages/archive").glob("*.jsonl.gz")
-        for l in gzip.open(archive, "rt")
+        for line in gzip.open(archive, "rt")
     ]
-    assert {l["payload"]["text"] for l in lines} == {"ancient", "short-lived"}
+    assert {line["payload"]["text"] for line in lines} == {"ancient", "short-lived"}

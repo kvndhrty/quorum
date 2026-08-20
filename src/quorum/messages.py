@@ -18,9 +18,10 @@ from __future__ import annotations
 import gzip
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -43,7 +44,7 @@ class Message(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _direct_xor_board(self) -> "Message":
+    def _direct_xor_board(self) -> Message:
         if (self.to is None) == (self.topic is None):
             raise ValueError("exactly one of 'to' or 'topic' must be set")
         self.payload.setdefault("text", "")
@@ -244,7 +245,7 @@ def _load(path: Path) -> Message | None:
 
 
 def _archive_one(archive_dir: Path, record: dict[str, Any], when: datetime | None = None) -> None:
-    when = when or datetime.now(timezone.utc)
+    when = when or datetime.now(UTC)
     archive_dir.mkdir(parents=True, exist_ok=True)
     path = archive_dir / f"{when:%Y-%m}.jsonl.gz"
     line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")

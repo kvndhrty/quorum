@@ -8,9 +8,10 @@ a context directly — no scheduler required.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from . import fsio
 from .messages import MessageBus
@@ -27,10 +28,10 @@ class AgentContext:
         home: Path,
         name: str,
         settings: dict[str, Any] | None = None,
-        config: "Config | None" = None,
+        config: Config | None = None,
         bus: MessageBus | None = None,
         projects: ProjectRegistry | None = None,
-        llm: "LLMClient | None" = None,
+        llm: LLMClient | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.home = Path(home)
@@ -46,7 +47,7 @@ class AgentContext:
     # -- LLM (optional) ---------------------------------------------------
 
     @property
-    def llm(self) -> "LLMClient":
+    def llm(self) -> LLMClient:
         """An LLMClient; when nothing is configured it is a disabled client
         whose complete() always returns None. Agents must handle None."""
         if self._llm is None:
@@ -56,6 +57,8 @@ class AgentContext:
                 self.config.llm if self.config else None,
                 agent_settings=self.settings,
                 home=self.home,
+                sandbox_config=self.config.sandbox if self.config else None,
+                full_config=self.config,
             )
         return self._llm
 

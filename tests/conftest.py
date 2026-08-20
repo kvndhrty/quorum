@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ class FakeClock:
     """Injectable clock: agents receive `now` as a callable by design."""
 
     def __init__(self, start: datetime | None = None):
-        self.current = start or datetime(2026, 8, 20, 12, 0, 0, tzinfo=timezone.utc)
+        self.current = start or datetime(2026, 8, 20, 12, 0, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self.current

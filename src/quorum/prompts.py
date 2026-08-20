@@ -25,7 +25,9 @@ def load(home: Path, name: str) -> str:
     try:
         return packaged.read_text(encoding="utf-8")
     except FileNotFoundError:
-        raise KeyError(f"no prompt template {name!r} (looked in {user_file} and packaged defaults)")
+        raise KeyError(
+            f"no prompt template {name!r} (looked in {user_file} and packaged defaults)"
+        ) from None
 
 
 def render(home: Path, name: str, **placeholders: str) -> str:

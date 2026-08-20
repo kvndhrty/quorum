@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from quorum import fsio  # noqa: E402
-from quorum.messages import MessageBus  # noqa: E402
-from quorum.projects import ProjectRegistry  # noqa: E402
-from quorum.web.app import create_app  # noqa: E402
+from quorum import fsio
+from quorum.messages import MessageBus
+from quorum.projects import ProjectRegistry
+from quorum.web.app import create_app
 
 
 @pytest.fixture

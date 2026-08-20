@@ -36,3 +36,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+ignore = ["B008"]  # typer.Option in defaults is the framework's idiom
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_web.py" = ["E402"]  # imports must follow pytest.importorskip

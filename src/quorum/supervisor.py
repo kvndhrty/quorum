@@ -27,7 +27,7 @@ from . import fsio
 from .agent import Agent, AgentContext
 from .config import Config, parse_schedule
 from .messages import MessageBus
-from .registry import AgentResolutionError, resolve
+from .registry import resolve
 
 MAX_CONSECUTIVE_FAILURES = 5
 LOCK_TOUCH_SECONDS = 60

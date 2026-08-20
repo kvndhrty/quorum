@@ -70,9 +70,9 @@ def create_app(home: Path) -> FastAPI:
         try:
             project = ProjectRegistry(home).update(slug, deadline=body.deadline, notes=body.notes)
         except KeyError:
-            raise HTTPException(404, f"no project {slug!r}")
+            raise HTTPException(404, f"no project {slug!r}") from None
         except ValueError as e:
-            raise HTTPException(422, str(e))
+            raise HTTPException(422, str(e)) from e
         return {"slug": project.slug, "deadline": project.deadline, "notes": project.notes}
 
     @app.post("/api/projects/{slug}/adopt")
@@ -83,7 +83,7 @@ def create_app(home: Path) -> FastAPI:
         try:
             project = ProjectRegistry(home).add(path)
         except ValueError as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         return {"slug": project.slug, "path": project.path}
 
     return app
