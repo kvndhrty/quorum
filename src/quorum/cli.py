@@ -223,6 +223,99 @@ def project_remove(slug: str, home: Optional[Path] = _HOME_OPT) -> None:
         raise typer.Exit(1)
 
 
+@project_app.command("adopt")
+def project_adopt(
+    slug: str,
+    deadline: Optional[str] = typer.Option(None, "--deadline"),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Register a project proposed by the scout agent."""
+    from .agents.scout import load_candidates
+    from .projects import ProjectRegistry
+
+    target = get_home(home)
+    candidates = load_candidates(target)
+    path = candidates.get(slug)
+    if path is None:
+        typer.secho(
+            f"no candidate {slug!r} — see proposals with `quorum board read projects`",
+            fg="red", err=True,
+        )
+        raise typer.Exit(1)
+    try:
+        project = ProjectRegistry(target).add(path, name=None, deadline=deadline)
+    except ValueError as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(1)
+    typer.secho(f"adopted {project.slug} ({project.path})", fg="green")
+
+
+@project_app.command("decline")
+def project_decline(slug: str, home: Optional[Path] = _HOME_OPT) -> None:
+    """Suppress a scout proposal permanently."""
+    from .agents import scout
+
+    scout.decline(get_home(home), slug)
+    typer.echo(f"declined {slug} — the scout won't propose it again")
+
+
+steward_app = typer.Typer(help="File steward operations.", no_args_is_help=True)
+app.add_typer(steward_app, name="steward")
+
+
+@steward_app.command("undo")
+def steward_undo(
+    last: int = typer.Option(1, "--last", help="How many recent moves to undo."),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Undo the steward's most recent file move(s)."""
+    from .agents.steward import undo_moves
+
+    undone = undo_moves(get_home(home), last=last)
+    if not undone:
+        typer.echo("nothing to undo")
+    for dest, src in undone:
+        typer.echo(f"moved back: {dest} -> {src}")
+
+
+@app.command()
+def web(
+    port: int = typer.Option(8787, "--port"),
+    home: Optional[Path] = _HOME_OPT,
+) -> None:
+    """Serve the local web dashboard on 127.0.0.1 (requires `quorum[web]`)."""
+    target = get_home(home)
+    try:
+        import uvicorn
+
+        from .web.app import create_app
+    except ImportError:
+        typer.secho(
+            "the web dashboard needs the [web] extra: uv tool install 'quorum[web]' "
+            "(or pip install 'quorum[web]')",
+            fg="red", err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(f"dashboard: http://127.0.0.1:{port}")
+    uvicorn.run(create_app(target), host="127.0.0.1", port=port, log_level="warning")
+
+
+@app.command()
+def tui(home: Optional[Path] = _HOME_OPT) -> None:
+    """Open the terminal dashboard (requires `quorum[tui]`)."""
+    target = get_home(home)
+    try:
+        from .tui.app import QuorumTUI
+    except ImportError:
+        typer.secho(
+            "the TUI needs the [tui] extra: uv tool install 'quorum[tui]' "
+            "(or pip install 'quorum[tui]')",
+            fg="red", err=True,
+        )
+        raise typer.Exit(1)
+    QuorumTUI(target).run()
+
+
 @agent_app.command("list")
 def agent_list(home: Optional[Path] = _HOME_OPT) -> None:
     """List configured agents and their last heartbeat."""

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quorum</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #66707f;
+    --line: #e3e6ea; --accent: #2f6fde; --ok: #2e9e5b; --warn: #c7841a; --bad: #c94141;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181f; --panel: #1c222b; --ink: #e8ebef; --muted: #97a1ae;
+      --line: #2b323d; --accent: #6ba0f5; --ok: #56b881; --warn: #d9a24a; --bad: #dd7373;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 6px; }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: .02em; }
+  #sup { font-size: 13px; color: var(--muted); }
+  #sup .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+              margin-right: 5px; background: var(--bad); }
+  #sup.alive .dot { background: var(--ok); }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+         gap: 16px; padding: 16px 24px 40px; max-width: 1500px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 14px 16px; min-width: 0; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+               color: var(--muted); margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
+  tr + tr td { border-top: 1px solid var(--line); }
+  .muted { color: var(--muted); }
+  .status-idle { color: var(--ok); } .status-running { color: var(--accent); }
+  .status-error, .status-paused { color: var(--bad); }
+  .status-never-ran { color: var(--muted); }
+  .due-soon { color: var(--warn); font-weight: 600; }
+  .overdue { color: var(--bad); font-weight: 600; }
+  ul { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+  li { padding: 5px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  li:last-child { border-bottom: 0; }
+  li .meta { color: var(--muted); font-size: 12px; }
+  form { display: flex; gap: 8px; margin-top: 10px; }
+  input, button { font: inherit; }
+  input[type=text] { flex: 1; background: var(--bg); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+           padding: 6px 12px; cursor: pointer; }
+  button.small { font-size: 12px; padding: 3px 9px; }
+  pre.brief { white-space: pre-wrap; font: 13px/1.5 ui-monospace, monospace;
+              margin: 0; overflow-x: auto; }
+  .editable { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>quorum</h1>
+  <span id="sup"><span class="dot"></span><span id="sup-text">checking…</span></span>
+</header>
+<main>
+  <section>
+    <h2>Projects</h2>
+    <table id="projects"></table>
+    <div id="candidates"></div>
+  </section>
+  <section>
+    <h2>Agents</h2>
+    <table id="agents"></table>
+  </section>
+  <section>
+    <h2>Board</h2>
+    <ul id="board"></ul>
+    <form id="post-form">
+      <input type="text" id="post-text" placeholder="post a note to #notes…" required>
+      <button>Post</button>
+    </form>
+  </section>
+  <section>
+    <h2>Latest brief</h2>
+    <pre class="brief" id="brief"></pre>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function refresh() {
+  let data;
+  try { data = await (await fetch("/api/overview")).json(); }
+  catch { $("sup-text").textContent = "dashboard unreachable"; return; }
+
+  const sup = data.supervisor || {};
+  $("sup").classList.toggle("alive", !!sup.alive);
+  $("sup-text").textContent = sup.alive
+    ? `supervisor running (pid ${sup.pid})` : "supervisor not running";
+
+  $("projects").innerHTML = (data.projects || []).map(p => {
+    let due = "";
+    if (p.deadline) {
+      const cls = p.days_left < 0 ? "overdue" : (p.days_left <= 3 ? "due-soon" : "");
+      const label = p.days_left < 0 ? `overdue ${-p.days_left}d` : `${p.days_left}d`;
+      due = `<span class="${cls}">${esc(p.deadline)} (${label})</span>`;
+    }
+    return `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.activity_summary || "")}</span></td>
+      <td><span class="editable" title="click to change deadline"
+        onclick="editDeadline('${esc(p.slug)}','${esc(p.deadline || "")}')">${due || '<span class="muted">no deadline</span>'}</span></td></tr>`;
+  }).join("") || `<tr><td class="muted">none registered</td></tr>`;
+
+  const cands = Object.entries(data.candidates || {});
+  $("candidates").innerHTML = cands.length
+    ? "<h2 style='margin-top:14px'>Scout proposals</h2>" + cands.map(([slug, path]) =>
+        `<li>${esc(slug)} <span class="meta">${esc(path)}</span>
+         <button class="small" onclick="adopt('${esc(slug)}')">Adopt</button></li>`).join("")
+    : "";
+
+  $("agents").innerHTML = (data.agents || []).map(a =>
+    `<tr><td>${esc(a.name)}</td>
+      <td class="status-${esc(a.status)}">${esc(a.status)}</td>
+      <td class="muted">${esc(a.schedule)}</td>
+      <td class="muted">${esc((a.last_end || "").replace("T"," ").replace("Z",""))}</td></tr>`
+  ).join("");
+
+  $("board").innerHTML = (data.board || []).slice().reverse().map(m =>
+    `<li>${esc(m.text)}<br><span class="meta">#${esc(m.topic)} · ${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))}</span></li>`
+  ).join("") || `<li class="muted">no messages yet</li>`;
+
+  const brief = await (await fetch("/api/brief/latest")).json();
+  $("brief").textContent = brief.markdown || "no brief yet";
+}
+
+async function adopt(slug) {
+  await fetch(`/api/projects/${slug}/adopt`, { method: "POST" });
+  refresh();
+}
+
+async function editDeadline(slug, current) {
+  const v = prompt("Deadline (YYYY-MM-DD, empty to keep):", current);
+  if (!v) return;
+  const r = await fetch(`/api/projects/${slug}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ deadline: v }),
+  });
+  if (!r.ok) alert((await r.json()).detail || "update failed");
+  refresh();
+}
+
+$("post-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("post-text").value.trim();
+  if (!text) return;
+  await fetch("/api/board/notes", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  $("post-text").value = "";
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
