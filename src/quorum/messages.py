@@ -1,0 +1,253 @@
+"""Filesystem message bus: a public board plus maildir-style direct inboxes.
+
+Board:  messages/board/<topic>/<utc>-<ULID>.json — append-only fan-out.
+        Filenames sort chronologically, so readers need no index; each
+        consumer keeps its own cursor (last filename seen), so any number
+        of readers coexist without coordination.
+Inbox:  messages/inbox/<agent>/new/ -> cur/ — a consumer claims a message
+        with os.rename(), which is atomic, so exactly one claimant wins
+        even across processes. Processed messages are acked (deleted after
+        being copied to the archive).
+
+Everything is a plain JSON file written via tmp+rename, so the whole bus is
+inspectable with ls/cat and works under a filesystem-only sandbox.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import os
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from . import fsio
+
+PROTOCOL_VERSION = 1
+
+
+class Message(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    v: int = PROTOCOL_VERSION
+    id: str = Field(default_factory=fsio.ulid)
+    sender: str = Field(alias="from")
+    to: str | None = None
+    topic: str | None = None
+    type: str = "note"
+    created_at: str = Field(default_factory=lambda: fsio.iso(fsio.utc_now()))
+    ttl_days: int | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _direct_xor_board(self) -> Message:
+        if (self.to is None) == (self.topic is None):
+            raise ValueError("exactly one of 'to' or 'topic' must be set")
+        self.payload.setdefault("text", "")
+        return self
+
+    @property
+    def created(self) -> datetime:
+        return fsio.parse_iso(self.created_at)
+
+    def filename(self) -> str:
+        return f"{fsio.compact_ts(self.created)}-{self.id}.json"
+
+    def dump(self) -> dict[str, Any]:
+        return self.model_dump(by_alias=True)
+
+
+class ClaimedMessage:
+    """A direct message moved to cur/; call ack() when fully processed."""
+
+    def __init__(self, message: Message, path: Path, archive_dir: Path):
+        self.message = message
+        self.path = path
+        self._archive_dir = archive_dir
+
+    def ack(self) -> None:
+        _archive_one(self._archive_dir, self.message.dump())
+        self.path.unlink(missing_ok=True)
+
+    def reject(self) -> None:
+        """Return the message to new/ for a later attempt."""
+        target = self.path.parent.parent / "new" / self.path.name
+        try:
+            os.rename(self.path, target)
+        except OSError:
+            pass
+
+
+class MessageBus:
+    def __init__(self, home: Path, now: Any = None):
+        self.home = Path(home)
+        self.board_dir = self.home / "messages" / "board"
+        self.inbox_dir = self.home / "messages" / "inbox"
+        self.archive_dir = self.home / "messages" / "archive"
+        self._now = now or fsio.utc_now
+
+    # -- writing ----------------------------------------------------------
+
+    def post(
+        self,
+        sender: str,
+        topic: str,
+        type: str = "note",
+        payload: dict[str, Any] | None = None,
+        text: str = "",
+        ttl_days: int | None = None,
+    ) -> Message:
+        """Broadcast to a board topic."""
+        payload = dict(payload or {})
+        if text:
+            payload["text"] = text
+        msg = Message.model_validate(
+            {
+                "from": sender,
+                "topic": topic,
+                "type": type,
+                "payload": payload,
+                "ttl_days": ttl_days,
+                "created_at": fsio.iso(self._now()),
+                "id": fsio.ulid(self._now()),
+            }
+        )
+        fsio.atomic_write_json(self.board_dir / topic / msg.filename(), msg.dump())
+        return msg
+
+    def send(
+        self,
+        sender: str,
+        to: str,
+        type: str = "note",
+        payload: dict[str, Any] | None = None,
+        text: str = "",
+    ) -> Message:
+        """Deliver directly into another agent's inbox."""
+        payload = dict(payload or {})
+        if text:
+            payload["text"] = text
+        msg = Message.model_validate(
+            {
+                "from": sender,
+                "to": to,
+                "type": type,
+                "payload": payload,
+                "created_at": fsio.iso(self._now()),
+                "id": fsio.ulid(self._now()),
+            }
+        )
+        inbox = self.inbox_dir / to
+        (inbox / "cur").mkdir(parents=True, exist_ok=True)
+        fsio.atomic_write_json(inbox / "new" / msg.filename(), msg.dump())
+        return msg
+
+    # -- board reading ----------------------------------------------------
+
+    def topics(self) -> list[str]:
+        if not self.board_dir.is_dir():
+            return []
+        return sorted(p.name for p in self.board_dir.iterdir() if p.is_dir())
+
+    def read_topic(
+        self,
+        topic: str,
+        since: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Message]:
+        """Chronological messages in a topic, optionally bounded."""
+        entries = fsio.sorted_entries(self.board_dir / topic)
+        if since is not None:
+            floor = fsio.compact_ts(since)
+            entries = [p for p in entries if p.name >= floor]
+        if limit is not None:
+            entries = entries[-limit:]
+        return [m for m in (_load(p) for p in entries) if m]
+
+    def read_after_cursor(self, topic: str, cursor: str | None) -> tuple[list[Message], str | None]:
+        """Messages newer than `cursor` (a filename); returns the new cursor.
+
+        This is how agents consume the board without marking it: each keeps
+        its own cursor in its private state file.
+        """
+        entries = fsio.sorted_entries(self.board_dir / topic)
+        if cursor:
+            entries = [p for p in entries if p.name > cursor]
+        msgs = [m for m in (_load(p) for p in entries) if m]
+        new_cursor = entries[-1].name if entries else cursor
+        return msgs, new_cursor
+
+    # -- inbox claiming ---------------------------------------------------
+
+    def claim(self, agent: str) -> Iterator[ClaimedMessage]:
+        """Yield direct messages for `agent`, each atomically claimed via rename."""
+        inbox = self.inbox_dir / agent
+        new, cur = inbox / "new", inbox / "cur"
+        cur.mkdir(parents=True, exist_ok=True)
+        for path in fsio.sorted_entries(new):
+            target = cur / path.name
+            try:
+                os.rename(path, target)  # atomic: exactly one claimant wins
+            except OSError:
+                continue
+            msg = _load(target)
+            if msg is None:
+                target.unlink(missing_ok=True)
+                continue
+            yield ClaimedMessage(msg, target, self.archive_dir)
+
+    # -- janitor ----------------------------------------------------------
+
+    def recover_stale_claims(self, grace: timedelta = timedelta(hours=1)) -> int:
+        """Move cur/ entries older than `grace` back to new/ (crashed consumer)."""
+        recovered = 0
+        cutoff = (self._now() - grace).timestamp()
+        if not self.inbox_dir.is_dir():
+            return 0
+        for inbox in self.inbox_dir.iterdir():
+            cur = inbox / "cur"
+            for path in fsio.sorted_entries(cur):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        os.rename(path, inbox / "new" / path.name)
+                        recovered += 1
+                except OSError:
+                    continue
+        return recovered
+
+    def archive_old(self, retention_days: int) -> int:
+        """Compact expired board messages into monthly gzip'd JSONL archives."""
+        archived = 0
+        now = self._now()
+        for topic in self.topics():
+            for path in fsio.sorted_entries(self.board_dir / topic):
+                msg = _load(path)
+                if msg is None:
+                    path.unlink(missing_ok=True)
+                    continue
+                keep_days = msg.ttl_days if msg.ttl_days is not None else retention_days
+                if msg.created < now - timedelta(days=keep_days):
+                    _archive_one(self.archive_dir, msg.dump(), when=msg.created)
+                    path.unlink(missing_ok=True)
+                    archived += 1
+        return archived
+
+
+def _load(path: Path) -> Message | None:
+    try:
+        return Message.model_validate(fsio.read_json(path))
+    except (OSError, ValueError):
+        return None
+
+
+def _archive_one(archive_dir: Path, record: dict[str, Any], when: datetime | None = None) -> None:
+    when = when or datetime.now(UTC)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / f"{when:%Y-%m}.jsonl.gz"
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    with gzip.open(path, "ab") as f:
+        f.write(line)
