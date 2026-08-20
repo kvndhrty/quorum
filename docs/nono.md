@@ -80,6 +80,25 @@ The supervisor stays unsandboxed, but every LLM CLI invocation runs through
   to their deterministic behavior) — quorum never silently runs the CLI
   unsandboxed.
 
+## Testing the integration in CI
+
+Two layers, wired up in `.github/workflows/ci.yml`:
+
+- **Glue tests (always run)** — `tests/test_sandbox.py` monkeypatches a fake
+  `nono_py` module, so capability derivation, the `sandboxed_exec` mapping,
+  and the fail-closed path are pinned down on any runner, with or without
+  nono installed.
+- **Enforcement tests (`-m nono_integration`)** — `tests/test_nono_integration.py`
+  installs the real `nono-py` wheel and asserts the kernel actually enforces
+  the derived capability set: writes inside `QUORUM_HOME` succeed,
+  out-of-capability writes fail, project dirs are read-only, Mode 3's stdin
+  staging round-trips under a real child sandbox, and Mode 2's
+  `self_sandbox` is exercised in a subprocess (since `nono_py.apply` is
+  irreversible for the calling process). These need Landlock (Linux ≥ 5.13
+  with the LSM enabled) or Seatbelt and self-skip elsewhere — check
+  `python -c "import nono_py; print(nono_py.support_info())"`. The dedicated
+  CI job asserts support before running so the tests can't silently skip.
+
 ## Future: managed LLM auth proxy
 
 nono-py ships a filtering proxy with credential injection

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --locked --all-extras
+      # Unit tests only; test_sandbox.py covers the nono glue with a fake
+      # nono_py (fail-closed behavior, capability derivation, exec mapping).
+      - run: uv run pytest -m "not nono_integration"
+
+  # Real sandbox enforcement: installs the actual nono-py wheel and verifies
+  # the kernel enforces the capability set quorum derives — allowed writes
+  # succeed, out-of-capability writes fail, project dirs are read-only, and
+  # Mode 2/3 work end-to-end. GitHub's ubuntu runners have Landlock enabled,
+  # and the support gate below fails loudly if that ever changes, so these
+  # tests can never silently self-skip in CI.
+  nono-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra nono
+      - name: Assert sandbox support on this runner
+        run: |
+          uv run python - <<'EOF'
+          import sys
+          import nono_py
+          info = nono_py.support_info()
+          print(info)
+          sys.exit(0 if info.is_supported else 1)
+          EOF
+      - run: uv run pytest -m nono_integration -v -ra
