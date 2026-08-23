@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -58,9 +59,16 @@ class Supervisor:
                     home=self.home, name=name, settings=acfg.settings, config=self.config
                 )
                 self.agents[name] = cls(ctx)
+                self._clear_load_error(name)
             except Exception as e:  # config errors must not kill startup
                 self.errors[name] = str(e)
                 log.error("agent %s failed to load: %s", name, e)
+                # Persist it: the views are pure file readers, so an agent that
+                # never got built would otherwise be indistinguishable from one
+                # that simply has not ticked yet.
+                self._write_heartbeat(
+                    name, status="error", error=f"failed to load: {e}", load_error=True
+                )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -91,9 +99,23 @@ class Supervisor:
             self._janitor()
             self._stop.wait()
         finally:
-            self.scheduler.shutdown(wait=True)
+            self._shutdown_scheduler()
             fsio.release_pid_lock(self.lock_path)
             log.info("supervisor stopped")
+
+    def _shutdown_scheduler(self) -> None:
+        """Shut the scheduler down without ever raising.
+
+        Startup can fail before (or during) scheduler.start() — APScheduler
+        imports its trigger plugins lazily, for one. A raise from this path
+        would replace the original traceback and skip the lock release,
+        leaving a stale supervisor.lock that makes `quorum status` report a
+        dead process as running.
+        """
+        try:
+            self.scheduler.shutdown(wait=True)
+        except Exception:
+            log.debug("scheduler shutdown skipped", exc_info=True)
 
     def _handle_signal(self, signum, frame) -> None:
         log.info("received signal %s, shutting down", signum)
@@ -184,6 +206,23 @@ class Supervisor:
             pass
         fsio.atomic_write_json(path, current)
 
+    def _clear_load_error(self, name: str) -> None:
+        """Drop a previous run's load failure once the agent builds again.
+
+        Without this a fixed config.toml would keep showing the old error
+        until the agent's first tick landed.
+        """
+        path = self.home / "state" / "agents" / name / "heartbeat.json"
+        try:
+            current = fsio.read_json(path)
+        except (OSError, ValueError):
+            return
+        if not current.pop("load_error", False):
+            return
+        current.pop("status", None)
+        current.pop("error", None)
+        fsio.atomic_write_json(path, current)
+
     # -- janitor -------------------------------------------------------------
 
     def _janitor(self) -> None:
@@ -200,7 +239,13 @@ def _setup_logging(home: Path) -> None:
     logdir = home / "logs"
     logdir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(logdir / "supervisor.log", maxBytes=2_000_000, backupCount=3)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    # UTC, in fsio.iso()'s shape: every other timestamp quorum writes is UTC,
+    # so a local-time log cannot be lined up against the board or heartbeats.
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"
+    )
+    formatter.converter = time.gmtime
+    handler.setFormatter(formatter)
     root = logging.getLogger("quorum")
     root.setLevel(logging.INFO)
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):

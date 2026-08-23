@@ -9,8 +9,9 @@ built around three commitments:
    `nohup` or tmux.
 2. **Everything is a plain file.** All state lives under one directory,
    `QUORUM_HOME`, as JSON/JSONL/TOML/Markdown. `ls` and `cat` are debuggers;
-   copying the directory migrates the whole system; a kernel sandbox profile
-   reduces to "rw on this one tree, ro on project dirs".
+   copying the directory migrates the whole system; the writable half of a
+   kernel sandbox profile reduces to "rw on this one tree, ro on project
+   dirs".
 3. **Degrade gracefully.** The LLM, the dashboards, and the sandbox are all
    optional. Every agent has deterministic no-LLM behavior; every view works
    with the supervisor stopped.
@@ -136,3 +137,20 @@ binary (recommended, zero code); `quorum up --self-sandbox` via nono-py
 `sandboxed_exec`. `quorum.sandbox` is the only module that touches nono-py,
 imports it lazily, and fails closed: if sandboxing was requested and nono-py
 is missing, LLM subprocesses do not run at all.
+
+The least-privilege claim is about **writes**. `build_capabilities` grants
+write on `QUORUM_HOME` and the steward's watch/dest directories, and nothing
+else — not even temp directories, since nono's `system_write_*` groups are
+deliberately left out. The read side is necessarily wider: modes 2 and 3 both
+exec, and no process can exec without reading the loader, the system
+libraries and the binary itself, so nono's own `system_read_*` policy groups
+are layered in (the same baseline the `nono run` binary uses in mode 1).
+Mode 2 additionally sandboxes the supervisor *before* it resolves agents, and
+builtins, plugins and APScheduler triggers all import lazily, so the
+interpreter's tree — prefixes, stdlib, site-packages, and the directory
+holding the `quorum` package, which an editable install puts outside every
+prefix — is granted read too, derived from `sys`/`sysconfig` at runtime.
+
+That read/write asymmetry is the design: a sandboxed quorum can see the
+machine it runs on, but the only durable marks it can leave are in the tree
+you pointed it at.

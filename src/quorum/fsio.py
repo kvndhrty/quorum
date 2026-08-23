@@ -138,7 +138,8 @@ class LockError(RuntimeError):
     pass
 
 
-def _pid_alive(pid: int) -> bool:
+def pid_alive(pid: int) -> bool:
+    """Whether `pid` still exists. EPERM means it does, just owned by someone else."""
     try:
         os.kill(pid, 0)
     except OSError as e:
@@ -167,7 +168,7 @@ def acquire_pid_lock(path: Path, meta: dict[str, Any] | None = None) -> None:
                 pid = int(existing.get("pid", -1))
             except (OSError, ValueError):
                 pid = -1
-            if pid > 0 and _pid_alive(pid) and pid != os.getpid():
+            if pid > 0 and pid_alive(pid) and pid != os.getpid():
                 raise LockError(
                     f"another instance is running (pid {pid}, lock {path})"
                 ) from None

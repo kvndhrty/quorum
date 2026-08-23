@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from quorum import fsio
 from quorum.agent import AgentContext
 from quorum.agents.steward import Steward, undo_moves
 from quorum.config import Config, LLMConfig
@@ -58,6 +59,71 @@ def test_apply_mode_moves_with_undo_and_collision(home: Path, clock, tmp_path: P
     assert undone and (watch / "a.pdf").read_text() == "one"
     assert not (papers / "a-1.pdf").exists()
     assert undo_moves(home, last=1) == []  # log consumed
+
+
+def test_flip_to_apply_acts_on_already_proposed_file(home: Path, clock, tmp_path: Path):
+    """The advertised workflow: propose, review the board, then set apply=true.
+
+    Nothing about the file changes in between, so a dedup keyed only on mtime
+    would skip it forever and the backlog would never move.
+    """
+    watch = tmp_path / "downloads"
+    papers = tmp_path / "papers"
+    watch.mkdir()
+    (watch / "paper.pdf").write_text("draft")
+    rules = [{"match": "*.pdf", "dest": str(papers)}]
+
+    make_steward(home, clock, {"watch": [str(watch)], "apply": False, "rules": rules}).tick()
+    assert [m.type for m in topic(home)] == ["steward.proposal"]
+
+    clock.advance(minutes=1)  # distinct timestamp so board filename order is deterministic
+    make_steward(home, clock, {"watch": [str(watch)], "apply": True, "rules": rules}).tick()
+
+    assert not (watch / "paper.pdf").exists()
+    assert (papers / "paper.pdf").read_text() == "draft"
+    assert [m.type for m in topic(home)] == ["steward.proposal", "steward.moved"]
+    undo_log = fsio.read_jsonl(home / "state" / "steward" / "undo.jsonl")
+    assert [r["dest"] for r in undo_log] == [str(papers / "paper.pdf")]
+
+
+def test_legacy_mtime_only_state_still_flips_to_apply(home: Path, clock, tmp_path: Path):
+    """State written before actions were tracked stored a bare mtime; an upgrade
+    must not leave those files wedged in proposed-forever limbo."""
+    watch = tmp_path / "downloads"
+    papers = tmp_path / "papers"
+    watch.mkdir()
+    stale = watch / "paper.pdf"
+    stale.write_text("draft")
+    fsio.atomic_write_json(
+        home / "state" / "agents" / "steward" / "state.json",
+        {"seen": {str(stale): stale.stat().st_mtime}},
+    )
+
+    settings = {
+        "watch": [str(watch)],
+        "apply": True,
+        "rules": [{"match": "*.pdf", "dest": str(papers)}],
+    }
+    make_steward(home, clock, settings).tick()
+    assert (papers / "paper.pdf").read_text() == "draft"
+
+
+def test_apply_mode_does_not_rescan_settled_file(home: Path, clock, tmp_path: Path):
+    """The dedup must still do its real job: an unmatched file is reported once
+    even in apply mode, not once per tick."""
+    watch = tmp_path / "dl"
+    watch.mkdir()
+    (watch / "mystery.xyz").write_text("?")
+    settings = {
+        "watch": [str(watch)],
+        "apply": True,
+        "rules": [{"match": "*.pdf", "dest": str(tmp_path / "p")}],
+    }
+    s = make_steward(home, clock, settings)
+    s.tick()
+    clock.advance(minutes=1)
+    s.tick()
+    assert len([m for m in topic(home) if m.type == "steward.unmatched"]) == 1
 
 
 def test_unmatched_reported_once_without_llm(home: Path, clock, tmp_path: Path):

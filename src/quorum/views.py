@@ -28,9 +28,14 @@ def supervisor_status(home: Path) -> dict[str, Any]:
         age = time.time() - lock.stat().st_mtime
     except (OSError, ValueError):
         return {"alive": False}
+    pid = meta.get("pid")
+    # The mtime heartbeat is only touched once a minute, so on its own it
+    # reports a supervisor that crashed seconds ago (leaving its lock behind)
+    # as running. Ask the OS whether the recorded pid is still there too.
+    alive = age < SUPERVISOR_STALE_AFTER and isinstance(pid, int) and fsio.pid_alive(pid)
     return {
-        "alive": age < SUPERVISOR_STALE_AFTER,
-        "pid": meta.get("pid"),
+        "alive": alive,
+        "pid": pid,
         "started_at": meta.get("started_at"),
         "lock_age_seconds": int(age),
     }
