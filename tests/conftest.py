@@ -21,10 +21,21 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class FakeClock:
-    """Injectable clock: agents receive `now` as a callable by design."""
+    """Injectable clock: agents receive `now` as a callable by design.
+
+    Anchored to real wall-clock time rather than a fixed date. Agents compare
+    their injected clock against real filesystem mtimes — the tracker's
+    staleness scan and the bus's stale-claim recovery both do — and that only
+    behaves the way it does in production when the two start out agreeing. A
+    hardcoded anchor bleeds a day of headroom for every day that passes since
+    it was written, so such a test passes on the day it is written and fails
+    silently later. Pass `start` when a test needs one specific instant.
+    """
 
     def __init__(self, start: datetime | None = None):
-        self.current = start or datetime(2026, 8, 20, 12, 0, 0, tzinfo=UTC)
+        # Whole seconds: quorum stores timestamps at second resolution
+        # (fsio.iso), so a sub-second anchor would not survive a round-trip.
+        self.current = start or datetime.now(UTC).replace(microsecond=0)
 
     def __call__(self) -> datetime:
         return self.current

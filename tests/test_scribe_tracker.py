@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 from quorum.agent import AgentContext
@@ -14,6 +15,12 @@ from quorum.projects import ProjectRegistry
 def make_ctx(home: Path, name: str, clock, settings=None, llm_cfg=None) -> AgentContext:
     config = Config(llm=llm_cfg)
     return AgentContext(home=home, name=name, settings=settings or {}, config=config, now=clock)
+
+
+def days_from_now(clock, days: int) -> str:
+    """A deadline relative to the injected clock. A literal date would rot the
+    moment real time passed it — same trap as a fixed clock anchor."""
+    return str(clock().date() + timedelta(days=days))
 
 
 # -- tracker ---------------------------------------------------------------
@@ -69,7 +76,7 @@ def test_tracker_git_scan(home: Path, clock, tmp_path: Path):
 def test_scribe_deterministic_brief(home: Path, clock, tmp_path: Path):
     pdir = tmp_path / "p"
     pdir.mkdir()
-    ProjectRegistry(home).add(pdir, name="Big Paper", deadline="2026-08-25")
+    ProjectRegistry(home).add(pdir, name="Big Paper", deadline=days_from_now(clock, 5))
     bus = MessageBus(home, now=clock)
     bus.post("sentinel", "reminders", "deadline.approaching", text="Big Paper due in 5 day(s)")
     bus.post("tracker", "projects", "project.stale", text="Old Thing has gone quiet")
@@ -88,7 +95,7 @@ def test_scribe_deterministic_brief(home: Path, clock, tmp_path: Path):
 
 
 def test_scribe_llm_narrative_prepended(home: Path, clock, tmp_path: Path, fake_llm):
-    ProjectRegistry(home).add(tmp_path, name="P", deadline="2026-08-30")
+    ProjectRegistry(home).add(tmp_path, name="P", deadline=days_from_now(clock, 10))
     llm_cfg = LLMConfig(
         executable=fake_llm[0], args=fake_llm[1:],
         env={"FAKE_LLM_MODE": "ok", "FAKE_LLM_OUTPUT": "A calm narrative about your day."},
@@ -101,7 +108,7 @@ def test_scribe_llm_narrative_prepended(home: Path, clock, tmp_path: Path, fake_
 
 
 def test_scribe_llm_failure_still_completes(home: Path, clock, tmp_path: Path, fake_llm):
-    ProjectRegistry(home).add(tmp_path, name="P2", deadline="2026-08-30")
+    ProjectRegistry(home).add(tmp_path, name="P2", deadline=days_from_now(clock, 10))
     llm_cfg = LLMConfig(executable=fake_llm[0], args=fake_llm[1:], env={"FAKE_LLM_MODE": "fail"})
     Scribe(make_ctx(home, "scribe", clock, llm_cfg=llm_cfg)).tick()
     brief = (home / "briefs" / f"{clock().date()}.md").read_text()
