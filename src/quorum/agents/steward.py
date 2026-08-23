@@ -6,6 +6,11 @@ the board. With apply=true it moves files — never deletes, never overwrites
 (collision gets a numeric suffix) — and records every move in
 state/steward/undo.jsonl, which `quorum steward undo` replays backward.
 
+Per-file state records *what* was done, not just when: an unchanged file is
+never re-proposed tick after tick, but flipping apply=false to apply=true
+reconsiders files that were only ever proposed, so the advertised
+propose-then-apply workflow actually acts on the backlog.
+
 Files matching no rule are left alone. If an LLM is configured, unmatched
 files can be classified against the rule destinations (the reply must
 exactly name a destination, otherwise the file is skipped); without one they
@@ -31,7 +36,7 @@ class Steward(Agent):
         rules = self.ctx.settings.get("rules", [])
         apply = bool(self.ctx.settings.get("apply", False))
         state = self.ctx.load_state()
-        seen = state.setdefault("seen", {})  # path -> mtime already handled
+        seen = state.setdefault("seen", {})  # path -> {"mtime": float, "action": str}
 
         for directory in watch:
             if not directory.is_dir():
@@ -44,7 +49,8 @@ class Steward(Agent):
                 except OSError:
                     continue
                 key = str(entry)
-                if seen.get(key) == mtime:
+                record = _record(seen.get(key))
+                if self._settled(record, mtime, apply):
                     continue
                 dest = self._match(entry, rules)
                 via_llm = False
@@ -52,13 +58,13 @@ class Steward(Agent):
                     dest = self._classify(entry, rules)
                     via_llm = dest is not None
                 if dest is None:
-                    if key not in seen:
+                    if record is None:
                         self.ctx.bus.post(
                             self.name, "steward", "steward.unmatched",
                             text=f"no rule matches {entry.name} (in {directory})",
                             payload={"file": str(entry)},
                         )
-                    seen[key] = mtime
+                    seen[key] = {"mtime": mtime, "action": "unmatched"}
                     continue
                 if apply:
                     moved_to = self._move(entry, dest)
@@ -77,11 +83,23 @@ class Steward(Agent):
                         payload={"src": str(entry), "dest": str(dest), "via_llm": via_llm},
                     )
                     self.ctx.log_action("steward.proposal", text)
-                    seen[key] = mtime
+                    seen[key] = {"mtime": mtime, "action": "proposed"}
 
         # forget entries whose files are gone, so state stays bounded
         state["seen"] = {k: v for k, v in seen.items() if Path(k).exists()}
         self.ctx.save_state(state)
+
+    def _settled(self, record: dict | None, mtime: float, apply: bool) -> bool:
+        """True when the file is unchanged *and* this mode has nothing left to do.
+
+        A proposal only settles a file while apply is off; once apply is on the
+        proposal is unfinished business and the file must be reconsidered. An
+        unmatched file settles either way — no rule matched it, and re-asking the
+        classifier every tick would burn an LLM call per junk file per hour.
+        """
+        if record is None or record["mtime"] != mtime:
+            return False
+        return not (apply and record["action"] == "proposed")
 
     def _match(self, entry: Path, rules: list[dict]) -> Path | None:
         for rule in rules:
@@ -124,6 +142,17 @@ class Steward(Agent):
             {"at": fsio.iso(self.ctx.now()), "src": str(src), "dest": str(target)},
         )
         return target
+
+
+def _record(value: object) -> dict | None:
+    """Normalize a `seen` entry. State written before actions were tracked held a
+    bare mtime; read it as a proposal, which is the reading that lets an upgrade
+    heal itself — apply=true acts on the backlog, apply=false stays quiet."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    return {"mtime": value, "action": "proposed"}
 
 
 def undo_moves(home: Path, last: int = 1) -> list[tuple[str, str]]:
