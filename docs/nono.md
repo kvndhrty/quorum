@@ -4,7 +4,10 @@
 security primitives (Landlock on Linux ≥ 5.13, Seatbelt on macOS). Quorum is
 designed to be a well-behaved tenant: all durable state lives in one tree
 (`QUORUM_HOME`), project directories are only read, and inter-agent
-messaging is pure file I/O — so a least-privilege profile is short.
+messaging is pure file I/O — so the *writable* half of a least-privilege
+profile is short. The read side additionally has to cover the things any
+process needs in order to run at all; see
+[what the capability set grants](#what-the-capability-set-grants).
 
 Quorum runs fine without nono. With it, pick one of three modes.
 
@@ -56,10 +59,15 @@ quorum up --self-sandbox
 ```
 
 Before the scheduler starts, quorum builds a `CapabilitySet` from your
-resolved config — rw `QUORUM_HOME`, ro each registered project, rw steward
-watch/dest dirs, `block_network()` unless `[llm]` is configured — and calls
-`nono_py.apply()`. This is **irreversible for the process** and covers all
-children, including LLM subprocesses.
+resolved config (see [what the capability set grants](#what-the-capability-set-grants))
+and calls `nono_py.apply()`. This is **irreversible for the process** and
+covers all children, including LLM subprocesses.
+
+Because `apply()` happens first, everything the supervisor imports *later* —
+the builtin agents, your `plugins/` modules, APScheduler's trigger plugins,
+which are all imported lazily — is imported under the sandbox. That is why
+the interpreter's own tree is part of the grant; without it the supervisor
+dies at startup with `No module named 'quorum.agents'`.
 
 ## Mode 3 — sandbox only the LLM subprocesses
 
@@ -73,12 +81,51 @@ The supervisor stays unsandboxed, but every LLM CLI invocation runs through
 
 - `sandboxed_exec` cannot pipe stdin, so with `[llm].input = "stdin"` the
   prompt is staged as a file under `QUORUM_HOME/state/llm/` and redirected
-  via `/bin/sh`. `input = "argv"` avoids the shell hop and is recommended
-  under nono.
+  via `/bin/sh`. `input = "argv"` avoids the shell hop; both work.
+- The child's working directory is pinned to `QUORUM_HOME`. `sandboxed_exec`
+  otherwise inherits quorum's own cwd, which is usually outside the
+  capability set, and a shell that cannot `getcwd()` starts by printing
+  errors on stderr.
 - **Fail-closed**: if `use_nono = true` but nono-py is missing or the
   platform is unsupported, LLM calls return no completion (agents fall back
   to their deterministic behavior) — quorum never silently runs the CLI
   unsandboxed.
+
+## What the capability set grants
+
+Modes 2 and 3 share one derivation (`quorum.sandbox.build_capabilities`).
+
+**Writable** — and this is the whole of it:
+
+- `QUORUM_HOME`
+- the steward's `watch` directories and rule `dest` directories
+
+**Readable:**
+
+- each registered project directory (tracker and scout only read them)
+- the configured `[llm].executable`, resolved through `PATH` so a bare name
+  like `claude` becomes an absolute path the child can actually exec
+- this interpreter's tree — `sys.prefix`, `sys.base_prefix`, the stdlib and
+  site-packages, and the directory holding the `quorum` package itself (an
+  editable checkout puts it outside every prefix). All derived at runtime,
+  never hardcoded
+- nono's own `system_read_macos` / `system_read_linux` policy groups: the
+  loader, system libraries, `/dev`, trust stores. This is the same baseline
+  the `nono run` binary applies in Mode 1
+
+Network is blocked unless `[llm]` is configured.
+
+The system and interpreter paths are **read-only additions**. They are not
+optional generosity: a process cannot exec anything at all without reading
+the loader and the binary, so omitting them makes Mode 3 fail every LLM call
+(Linux: `nono: exec failed: Permission denied`) and Mode 2 fail at startup.
+If nono-py cannot supply that baseline, `build_capabilities` raises
+`SandboxUnavailable` rather than returning a set in which nothing can run.
+
+Note that `system_write_*` is deliberately *not* included, so temp
+directories stay read-only and the confinement claim above holds: outside
+`QUORUM_HOME` and the steward's directories, a sandboxed quorum can look but
+not touch.
 
 ## Testing the integration in CI
 
@@ -91,11 +138,13 @@ Two layers, wired up in `.github/workflows/ci.yml`:
 - **Enforcement tests (`-m nono_integration`)** — `tests/test_nono_integration.py`
   installs the real `nono-py` wheel and asserts the kernel actually enforces
   the derived capability set: writes inside `QUORUM_HOME` succeed,
-  out-of-capability writes fail, project dirs are read-only, Mode 3's stdin
-  staging round-trips under a real child sandbox, and Mode 2's
-  `self_sandbox` is exercised in a subprocess (since `nono_py.apply` is
-  irreversible for the calling process). These need Landlock (Linux ≥ 5.13
-  with the LSM enabled) or Seatbelt and self-skip elsewhere — check
+  out-of-capability writes fail, project dirs are read-only, system binaries
+  can actually be exec'd, a real LLM completion round-trips through
+  `LLMClient` under a child sandbox, and Mode 2's `self_sandbox` is exercised
+  in a subprocess (since `nono_py.apply` is irreversible for the calling
+  process) — including the lazy imports that happen after `apply()`. These
+  need Landlock (Linux ≥ 5.13 with the LSM enabled) or Seatbelt and self-skip
+  elsewhere — check
   `python -c "import nono_py; print(nono_py.support_info())"`. The dedicated
   CI job asserts support before running so the tests can't silently skip.
 

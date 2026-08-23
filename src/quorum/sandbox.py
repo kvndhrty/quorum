@@ -13,6 +13,17 @@ This is the only module that imports nono-py, and only inside functions, so
 installations without the [nono] extra never pay for it. If the user asked
 for sandboxing and nono-py is missing, we fail loud rather than silently
 running unsandboxed.
+
+Why the capability set is wider than "QUORUM_HOME plus project dirs": a
+process cannot exec *anything* without reading the loader, the system
+libraries it links against, and the binary itself, and modes 2 and 3 both
+need that. Mode 2 additionally keeps importing Python after apply() — the
+builtin agents and APScheduler's trigger plugins are imported lazily — so it
+needs the interpreter's own tree readable. Every one of those additions is
+READ-only and comes from nono's own `system_read_*` policy groups (the same
+baseline the `nono run` binary uses in mode 1) or is derived from this
+interpreter at runtime. Write access stays exactly where it was: QUORUM_HOME,
+plus the steward's watch and destination directories.
 """
 
 from __future__ import annotations
@@ -20,7 +31,10 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import shutil
 import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +42,11 @@ if TYPE_CHECKING:
     from .config import Config
 
 log = logging.getLogger("quorum.sandbox")
+
+# nono ships a policy describing the read-only paths an executable needs in
+# order to run at all (loader, libc, /dev, trust stores...). Both platform
+# variants are requested; resolve_groups keeps the ones that apply here.
+SYSTEM_READ_GROUPS = ("system_read_macos", "system_read_linux")
 
 
 class SandboxUnavailable(RuntimeError):
@@ -47,10 +66,70 @@ def _import_nono():
         ) from e
 
 
+def _add_system_reads(nono_py, caps) -> None:
+    """Layer nono's own baseline of system read paths onto `caps`.
+
+    Without this a sandboxed child cannot exec at all: Linux reports
+    `nono: exec failed: Permission denied`, macOS fails to open the dynamic
+    loader. Fails closed — a sandbox that cannot run the program it is
+    wrapping is a misconfiguration worth surfacing, not one to paper over.
+    """
+    try:
+        policy = nono_py.load_embedded_policy()
+        policy.resolve_groups(list(SYSTEM_READ_GROUPS), caps)
+    except Exception as e:
+        raise SandboxUnavailable(
+            f"could not resolve nono's system read policy ({e}); without it no "
+            "sandboxed process can exec. Check the installed nono-py version."
+        ) from e
+
+
+def _python_runtime_paths() -> set[str]:
+    """Directories this interpreter must read to keep importing after apply().
+
+    Mode 2 sandboxes the supervisor before it resolves agents, and both the
+    builtin agents and APScheduler's trigger plugins import lazily, so the
+    venv, the base interpreter and the stdlib all have to stay readable.
+    Derived rather than hardcoded so it follows venvs, uv-managed CPythons
+    and editable checkouts (where the package sits outside sys.prefix).
+    """
+    candidates = {
+        sys.prefix,
+        sys.base_prefix,
+        sysconfig.get_path("stdlib"),
+        sysconfig.get_path("purelib"),
+        sysconfig.get_path("platlib"),
+        # The tree holding the quorum package itself — for an editable install
+        # that is the checkout's src/, which no prefix above covers.
+        str(Path(__file__).resolve().parent.parent),
+    }
+    executable = Path(sys.executable)
+    if executable.exists():
+        candidates.add(str(executable.resolve().parent))
+    return {c for c in candidates if c and Path(c).is_dir()}
+
+
+def _llm_executable(config: Config) -> Path | None:
+    """The configured LLM CLI as an absolute path, or None if unset/not found.
+
+    `[llm].executable` is usually a bare name (`claude`, `codex`), so it is
+    resolved against PATH here: the sandbox grants access to paths, and a
+    name the child cannot resolve is a name it cannot run.
+    """
+    if config.llm is None or not config.llm.executable:
+        return None
+    found = shutil.which(config.llm.executable)
+    return Path(found).resolve() if found else None
+
+
 def build_capabilities(home: Path, config: Config):
-    """A least-privilege CapabilitySet derived from the resolved config:
-    rw on QUORUM_HOME, ro on project dirs, rw on steward watch/dest dirs,
-    network blocked unless an LLM CLI is configured."""
+    """A least-privilege CapabilitySet derived from the resolved config.
+
+    Writable: QUORUM_HOME and the steward's watch/destination directories.
+    Readable: project dirs, the configured LLM executable, this interpreter's
+    tree, and nono's system-read baseline. Network is blocked unless an LLM
+    CLI is configured.
+    """
     nono_py = _import_nono()
     from .projects import ProjectRegistry
 
@@ -68,8 +147,19 @@ def build_capabilities(home: Path, config: Config):
             dest = rule.get("dest")
             if dest:
                 caps.allow_path(str(Path(dest).expanduser()), nono_py.AccessMode.READ_WRITE)
+
+    _add_system_reads(nono_py, caps)
+    for path in _python_runtime_paths():
+        caps.allow_path(path, nono_py.AccessMode.READ)
+    executable = _llm_executable(config)
+    if executable is not None:
+        # allow_file, not allow_path: the latter rejects non-directories, and
+        # granting the whole containing directory would be needlessly wide.
+        caps.allow_file(str(executable), nono_py.AccessMode.READ)
+
     if config.llm is None or not config.llm.executable:
         caps.block_network()
+    caps.deduplicate()
     return caps
 
 
@@ -79,6 +169,13 @@ def self_sandbox(home: Path, config: Config) -> None:
     caps = build_capabilities(home, config)
     nono_py.apply(caps)
     log.info("self-sandbox applied via nono-py (Landlock/Seatbelt)")
+
+
+def _text(stream) -> str:
+    """nono-py hands back bytes; the subprocess.run contract we advertise is text."""
+    if isinstance(stream, bytes | bytearray):
+        return bytes(stream).decode("utf-8", "replace")
+    return stream or ""
 
 
 def make_sandboxed_runner(home: Path, config: Config):
@@ -91,7 +188,11 @@ def make_sandboxed_runner(home: Path, config: Config):
 
     sandboxed_exec has no stdin piping, so stdin-mode prompts are staged as a
     private file under QUORUM_HOME and redirected via /bin/sh. argv-mode
-    ([llm].input = "argv") avoids the shell hop and is recommended under nono.
+    ([llm].input = "argv") avoids the shell hop and is slightly cheaper.
+
+    cwd is pinned to QUORUM_HOME: sandboxed_exec otherwise inherits the
+    parent's working directory, which is normally outside the capability set,
+    and a shell that cannot getcwd() starts by printing errors to stderr.
     """
     home = Path(home)
 
@@ -116,13 +217,18 @@ def make_sandboxed_runner(home: Path, config: Config):
             else:
                 env_list, inherit = [(k, str(v)) for k, v in env.items()], False
             result = nono_py.sandboxed_exec(
-                caps, command, timeout_secs=timeout, env=env_list, inherit_env=inherit
+                caps,
+                command,
+                cwd=str(home),
+                timeout_secs=timeout,
+                env=env_list,
+                inherit_env=inherit,
             )
         finally:
             if prompt_file is not None:
                 prompt_file.unlink(missing_ok=True)
         return subprocess.CompletedProcess(
-            list(argv), result.exit_code, stdout=result.stdout, stderr=result.stderr
+            list(argv), result.exit_code, stdout=_text(result.stdout), stderr=_text(result.stderr)
         )
 
     return run
