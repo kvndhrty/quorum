@@ -88,6 +88,23 @@ class AgentContext:
         )
 
 
+def write_heartbeat(home: Path, name: str, **fields: Any) -> None:
+    """Merge `fields` into an agent's heartbeat file.
+
+    Heartbeats are the only record of an agent having run, so both the
+    supervisor and `quorum agent run-once` write them: an agent exercised by
+    hand would otherwise keep reading as never-ran in every dashboard.
+    """
+    path = Path(home) / "state" / "agents" / name / "heartbeat.json"
+    current: dict[str, Any] = {}
+    try:
+        current = fsio.read_json(path)
+    except (OSError, ValueError):
+        pass
+    current.update(fields)
+    fsio.atomic_write_json(path, current)
+
+
 class Agent:
     """Base class for all agents. Subclass, set `default_schedule` if you
     like, and implement tick(). Ticks must tolerate being re-run."""

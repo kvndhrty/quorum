@@ -11,6 +11,9 @@ never re-proposed tick after tick, but flipping apply=false to apply=true
 reconsiders files that were only ever proposed, so the advertised
 propose-then-apply workflow actually acts on the backlog.
 
+A move that fails is retried a bounded number of times and reported twice at
+most — once when it first fails and once when the steward gives up.
+
 Files matching no rule are left alone. If an LLM is configured, unmatched
 files can be classified against the rule destinations (the reply must
 exactly name a destination, otherwise the file is skipped); without one they
@@ -26,6 +29,12 @@ from pathlib import Path
 
 from .. import fsio
 from ..agent import Agent
+
+# A move can fail for a reason that clears on its own (a full disk, a
+# destination on a volume that is briefly unmounted), so retrying is worth it —
+# but the retry has to be bounded, or a permanently unwritable destination puts
+# a steward.error on the board every tick for as long as the file exists.
+MAX_MOVE_ATTEMPTS = 3
 
 
 class Steward(Agent):
@@ -67,15 +76,18 @@ class Steward(Agent):
                     seen[key] = {"mtime": mtime, "action": "unmatched"}
                     continue
                 if apply:
-                    moved_to = self._move(entry, dest)
-                    if moved_to is not None:
-                        text = f"moved {entry.name} -> {moved_to}"
-                        self.ctx.bus.post(
-                            self.name, "steward", "steward.moved", text=text,
-                            payload={"src": str(entry), "dest": str(moved_to), "via_llm": via_llm},
-                        )
-                        self.ctx.log_action("steward.moved", text)
-                        seen.pop(key, None)
+                    try:
+                        moved_to = self._move(entry, dest)
+                    except OSError as e:
+                        seen[key] = self._note_move_failure(entry, record, mtime, e)
+                        continue
+                    text = f"moved {entry.name} -> {moved_to}"
+                    self.ctx.bus.post(
+                        self.name, "steward", "steward.moved", text=text,
+                        payload={"src": str(entry), "dest": str(moved_to), "via_llm": via_llm},
+                    )
+                    self.ctx.log_action("steward.moved", text)
+                    seen.pop(key, None)
                 else:
                     text = f"proposal: move {entry.name} -> {dest} (set apply=true or move it yourself)"
                     self.ctx.bus.post(
@@ -95,11 +107,39 @@ class Steward(Agent):
         A proposal only settles a file while apply is off; once apply is on the
         proposal is unfinished business and the file must be reconsidered. An
         unmatched file settles either way — no rule matched it, and re-asking the
-        classifier every tick would burn an LLM call per junk file per hour.
+        classifier every tick would burn an LLM call per junk file per hour. A
+        failed move settles only once its retry budget is spent.
         """
         if record is None or record["mtime"] != mtime:
             return False
-        return not (apply and record["action"] == "proposed")
+        action = record["action"]
+        if action == "failed":
+            return record.get("attempts", 0) >= MAX_MOVE_ATTEMPTS
+        return not (apply and action == "proposed")
+
+    def _note_move_failure(self, entry: Path, record: dict | None, mtime: float, error) -> dict:
+        """Record a failed move, reporting it at most twice per version of a file.
+
+        Once on the first failure, so the board shows the problem, and once when
+        the budget runs out, so the silence that follows is explained rather
+        than looking like the steward quietly forgot.
+        """
+        prior = record.get("attempts", 0) if record and record["mtime"] == mtime else 0
+        attempts = prior + 1
+        if attempts == 1:
+            self.ctx.bus.post(
+                self.name, "steward", "steward.error",
+                text=f"failed to move {entry.name}: {error}",
+                payload={"src": str(entry), "attempts": attempts},
+            )
+        elif attempts >= MAX_MOVE_ATTEMPTS:
+            self.ctx.bus.post(
+                self.name, "steward", "steward.error",
+                text=f"giving up on {entry.name} after {attempts} attempts: {error} "
+                     "(fix the destination, then touch the file to retry)",
+                payload={"src": str(entry), "attempts": attempts, "gave_up": True},
+            )
+        return {"mtime": mtime, "action": "failed", "attempts": attempts}
 
     def _match(self, entry: Path, rules: list[dict]) -> Path | None:
         for rule in rules:
@@ -121,22 +161,17 @@ class Steward(Agent):
         answer = answer.strip().splitlines()[0].strip()
         return Path(answer) if answer in destinations else None
 
-    def _move(self, src: Path, dest_dir: Path) -> Path | None:
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            target = dest_dir / src.name
-            stem, suffix = target.stem, target.suffix
-            n = 1
-            while target.exists():
-                target = dest_dir / f"{stem}-{n}{suffix}"
-                n += 1
-            shutil.move(str(src), str(target))
-        except OSError as e:
-            self.ctx.bus.post(
-                self.name, "steward", "steward.error",
-                text=f"failed to move {src.name}: {e}", payload={"src": str(src)},
-            )
-            return None
+    def _move(self, src: Path, dest_dir: Path) -> Path:
+        """Move one file, raising OSError on failure so the caller can decide
+        whether this is worth another attempt."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = dest_dir / src.name
+        stem, suffix = target.stem, target.suffix
+        n = 1
+        while target.exists():
+            target = dest_dir / f"{stem}-{n}{suffix}"
+            n += 1
+        shutil.move(str(src), str(target))
         fsio.append_jsonl(
             self.ctx.home / "state" / "steward" / "undo.jsonl",
             {"at": fsio.iso(self.ctx.now()), "src": str(src), "dest": str(target)},

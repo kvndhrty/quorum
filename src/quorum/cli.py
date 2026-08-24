@@ -329,7 +329,7 @@ def agent_list(home: Path | None = _HOME_OPT) -> None:
 @agent_app.command("run-once")
 def agent_run_once(name: str, home: Path | None = _HOME_OPT) -> None:
     """Construct an agent and run a single tick (no supervisor needed)."""
-    from .agent import AgentContext
+    from .agent import AgentContext, write_heartbeat
     from .config import load_config
     from .registry import AgentResolutionError, resolve
 
@@ -345,7 +345,31 @@ def agent_run_once(name: str, home: Path | None = _HOME_OPT) -> None:
         typer.secho(str(e), fg="red", err=True)
         raise typer.Exit(1) from None
     agent = cls(AgentContext(home=target, name=name, settings=acfg.settings, config=config))
-    agent.tick()
+    # Write the same heartbeat the supervisor would, so a hand-run agent stops
+    # reading as never-ran in `quorum status` and the dashboards.
+    started = fsio.utc_now()
+    write_heartbeat(target, name, status="running", last_start=fsio.iso(started))
+    try:
+        agent.tick()
+    except Exception as e:
+        write_heartbeat(
+            target,
+            name,
+            status="error",
+            last_start=fsio.iso(started),
+            last_end=fsio.iso(fsio.utc_now()),
+            error=f"{type(e).__name__}: {e}",
+        )
+        raise
+    ended = fsio.utc_now()
+    write_heartbeat(
+        target,
+        name,
+        status="idle",
+        last_start=fsio.iso(started),
+        last_end=fsio.iso(ended),
+        duration_ms=int((ended - started).total_seconds() * 1000),
+    )
     typer.secho(f"{name}: tick complete", fg="green")
 
 
