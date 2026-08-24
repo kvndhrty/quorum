@@ -14,6 +14,11 @@ uv run ruff check .             # lint (line-length 100; E4,E7,E9,F,I,UP,B)
 uv run quorum <cmd>             # run the CLI from a checkout
 ```
 
+The PyPI distribution is `quorum-orchestrator` (plain `quorum` was taken); the
+import name and CLI command stay `quorum`. Releases: bump `version` in
+pyproject.toml, tag `vX.Y.Z`, push the tag — `.github/workflows/release.yml`
+builds with uv and publishes to PyPI via trusted publishing (OIDC, no token).
+
 `tests/test_nono_integration.py` self-skips when nono-py is missing or the platform
 lacks Landlock/Seatbelt; a dedicated CI job asserts support so it can never silently
 skip there. `test_web.py` needs the `web` extra (it `importorskip`s FastAPI).
