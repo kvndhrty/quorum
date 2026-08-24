@@ -25,7 +25,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import fsio
-from .agent import Agent, AgentContext
+from .agent import Agent, AgentContext, write_heartbeat
 from .config import Config, parse_schedule
 from .messages import MessageBus
 from .registry import resolve
@@ -191,20 +191,13 @@ class Supervisor:
         )
 
     def _write_heartbeat(self, name: str, **fields) -> None:
-        path = self.home / "state" / "agents" / name / "heartbeat.json"
-        current = {}
-        try:
-            current = fsio.read_json(path)
-        except (OSError, ValueError):
-            pass
-        current.update(fields)
         try:
             job = self.scheduler.get_job(name)
             if job and job.next_run_time:
-                current["next_run"] = fsio.iso(job.next_run_time)
+                fields["next_run"] = fsio.iso(job.next_run_time)
         except Exception:
             pass
-        fsio.atomic_write_json(path, current)
+        write_heartbeat(self.home, name, **fields)
 
     def _clear_load_error(self, name: str) -> None:
         """Drop a previous run's load failure once the agent builds again.

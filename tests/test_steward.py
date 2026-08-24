@@ -4,7 +4,7 @@ from pathlib import Path
 
 from quorum import fsio
 from quorum.agent import AgentContext
-from quorum.agents.steward import Steward, undo_moves
+from quorum.agents.steward import MAX_MOVE_ATTEMPTS, Steward, undo_moves
 from quorum.config import Config, LLMConfig
 from quorum.messages import MessageBus
 
@@ -176,3 +176,65 @@ def test_llm_offlist_answer_is_skipped(home: Path, clock, tmp_path: Path, fake_l
     make_steward(home, clock, settings, llm_cfg=llm_cfg).tick()
     assert (watch / "mystery.dat").exists()  # not moved anywhere
     assert not (tmp_path / "papers").exists()
+
+
+def test_failed_move_is_retried_then_abandoned(home: Path, clock, tmp_path: Path, monkeypatch):
+    """A move that keeps failing must not put steward.error on the board every
+    tick: report once, retry a bounded number of times, then say so and stop."""
+    watch = tmp_path / "downloads"
+    watch.mkdir()
+    (watch / "a.pdf").write_text("one")
+    settings = {
+        "watch": [str(watch)],
+        "apply": True,
+        "rules": [{"match": "*.pdf", "dest": str(tmp_path / "papers")}],
+    }
+    s = make_steward(home, clock, settings)
+
+    def boom(*args, **kwargs):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr("quorum.agents.steward.shutil.move", boom)
+
+    for _ in range(6):  # well past the budget
+        clock.advance(hours=1)  # distinct timestamps keep board order deterministic
+        s.tick()
+
+    errors = [m for m in topic(home) if m.type == "steward.error"]
+    assert len(errors) == 2, [m.payload["text"] for m in errors]
+    assert errors[0].payload["attempts"] == 1
+    assert errors[1].payload["gave_up"] is True
+    assert errors[1].payload["attempts"] == MAX_MOVE_ATTEMPTS
+    assert (watch / "a.pdf").exists()  # never moved, never deleted
+
+
+def test_touching_an_abandoned_file_restarts_its_retry_budget(
+    home: Path, clock, tmp_path: Path, monkeypatch
+):
+    watch = tmp_path / "downloads"
+    papers = tmp_path / "papers"
+    watch.mkdir()
+    (watch / "a.pdf").write_text("one")
+    settings = {
+        "watch": [str(watch)],
+        "apply": True,
+        "rules": [{"match": "*.pdf", "dest": str(papers)}],
+    }
+    s = make_steward(home, clock, settings)
+
+    def boom(*args, **kwargs):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr("quorum.agents.steward.shutil.move", boom)
+    for _ in range(MAX_MOVE_ATTEMPTS + 2):
+        clock.advance(hours=1)
+        s.tick()
+    assert len([m for m in topic(home) if m.type == "steward.error"]) == 2
+
+    # the destination becomes writable again and the file is touched
+    monkeypatch.undo()
+    clock.advance(hours=1)
+    (watch / "a.pdf").write_text("one, changed")
+    s.tick()
+    assert (papers / "a.pdf").exists()
+    assert [m.type for m in topic(home)][-1] == "steward.moved"
