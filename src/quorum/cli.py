@@ -13,6 +13,13 @@ import typer
 
 from . import fsio
 from . import home as home_mod
+from .actor import (
+    DEFAULT_MAX_ACTIONS_PER_RUN,
+    MANAGER_CAP_ENV,
+    MANAGER_RUN_ENV,
+    current_actor,
+    journal_path,
+)
 from .messages import MessageBus
 
 app = typer.Typer(
@@ -65,29 +72,24 @@ def _manager_guard(
 ) -> None:
     """Auto-journal (and rate-cap) actions taken by the manager's harness.
 
-    Manager runs carry QUORUM_ACTOR=manager and a QUORUM_MANAGER_RUN id in
-    their environment; every mutating CLI command routes through here, so
-    the journal is ground truth — not the model's self-report — and it is
-    what the next digest feeds back to prevent degenerate loops. The only
-    rail is rate: a per-run action cap. Choice is never second-guessed.
+    Manager runs carry the actor env tag (see actor.py): the actor identity,
+    a per-run id, and the action cap the manager resolved from its settings.
+    Every mutating CLI command routes through here, so the journal is ground
+    truth — not the model's self-report — and it is what the next digest
+    feeds back to prevent degenerate loops. The only rail is rate: a per-run
+    action cap. Choice is never second-guessed.
     """
-    from .agents.manager import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
-
-    is_manager = os.environ.get("QUORUM_ACTOR") == "manager"
-    if not is_manager and not always_journal:
+    actor = current_actor()
+    if actor != "manager" and not always_journal:
         return
-    run = os.environ.get("QUORUM_MANAGER_RUN", "") if is_manager else ""
-    if is_manager and run:
-        cap = DEFAULT_MAX_ACTIONS_PER_RUN
+    run = os.environ.get(MANAGER_RUN_ENV, "") if actor == "manager" else ""
+    if run:
         try:
-            config = _load_config(home)
-            for acfg in config.agents.values():
-                if acfg.type == "manager":
-                    cap = int(acfg.settings.get("max_actions_per_run", cap))
-                    break
-        except typer.Exit:
-            pass
-        used = len([e for e in fsio.read_jsonl(journal_path(home)) if e.get("run") == run])
+            cap = int(os.environ.get(MANAGER_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
+        except ValueError:
+            cap = DEFAULT_MAX_ACTIONS_PER_RUN
+        # this run's entries sit at the journal's end, well inside the tail window
+        used = len([e for e in fsio.read_jsonl_tail(journal_path(home)) if e.get("run") == run])
         if used >= cap:
             typer.secho(
                 f"action refused: manager action cap ({cap}) reached for this run — "
@@ -98,7 +100,7 @@ def _manager_guard(
     entry = {
         "at": fsio.iso(fsio.utc_now()),
         "run": run,
-        "actor": "manager" if is_manager else "user",
+        "actor": actor,
         "action": action,
     }
     if target:
@@ -353,6 +355,8 @@ def task_report(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    _manager_guard(target, "task.report", target=task.short_id, target_status=task.status,
+                   args=status)
     tasks_mod.report(target, task.id, status=status, text=text, pr_url=pr_url)
     typer.echo(f"task {task.short_id}: {status}" + (f" ({pr_url})" if pr_url else ""))
 
@@ -403,8 +407,7 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
     task = _resolve_task(target, task_id)
     _manager_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
                    args=text[:80])
-    sender = "manager" if os.environ.get("QUORUM_ACTOR") == "manager" else "user"
-    MessageBus(target).send(sender, inbox_name(task.id), type="guidance", text=text)
+    MessageBus(target).send(current_actor(), inbox_name(task.id), type="guidance", text=text)
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
 
 
@@ -446,8 +449,8 @@ def board_post(
     """Post a message to a board topic."""
     target = get_home(home)
     _manager_guard(target, "board.post", args=f"{topic}: {text[:80]}")
-    if sender == "user" and os.environ.get("QUORUM_ACTOR") == "manager":
-        sender = "manager"
+    if sender == "user":
+        sender = current_actor()  # a manager-tagged call attributes itself
     msg = MessageBus(target).post(sender=sender, topic=topic, type=type, text=text)
     typer.echo(f"posted {msg.id} to {topic}")
 
@@ -493,7 +496,9 @@ def project_add(
     """Register a project directory (tasks run against registered projects)."""
     from .projects import ProjectRegistry
 
-    registry = ProjectRegistry(get_home(home))
+    target = get_home(home)
+    _manager_guard(target, "project.add", args=str(path))
+    registry = ProjectRegistry(target)
     try:
         project = registry.add(
             path,
@@ -535,7 +540,9 @@ def project_set(
     """Update a project's metadata in the registry."""
     from .projects import ProjectRegistry
 
-    registry = ProjectRegistry(get_home(home))
+    target = get_home(home)
+    _manager_guard(target, "project.set", target=slug)
+    registry = ProjectRegistry(target)
     try:
         project = registry.update(
             slug,
@@ -554,7 +561,9 @@ def project_remove(slug: str, home: Path | None = _HOME_OPT) -> None:
     """Unregister a project (its directory is untouched)."""
     from .projects import ProjectRegistry
 
-    if ProjectRegistry(get_home(home)).remove(slug):
+    target = get_home(home)
+    _manager_guard(target, "project.remove", target=slug)
+    if ProjectRegistry(target).remove(slug):
         typer.echo(f"removed {slug}")
     else:
         raise _fail(f"no project {slug!r}") from None
@@ -716,9 +725,7 @@ def manager_journal(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Print the manager's recent action journal (auto-recorded, per-run tagged)."""
-    from .agents.manager import journal_path
-
-    entries = fsio.read_jsonl(journal_path(get_home(home)))[-lines:]
+    entries = fsio.read_jsonl_tail(journal_path(get_home(home)), limit=lines)
     if not entries:
         typer.echo("no manager actions recorded yet")
         return

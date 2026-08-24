@@ -22,6 +22,7 @@ next run's prompt.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -221,7 +222,7 @@ def report(
 
 
 def read_transcript_tail(home: Path, task_id: str, limit: int = 40) -> list[dict]:
-    return fsio.read_jsonl(transcript_path(home, task_id))[-limit:]
+    return fsio.read_jsonl_tail(transcript_path(home, task_id), limit=limit)
 
 
 def read_reports(home: Path, task_id: str, limit: int | None = None) -> list[dict]:
@@ -237,3 +238,21 @@ def runner_alive(home: Path, task_id: str) -> bool:
     except (OSError, ValueError):
         return False
     return pid > 0 and fsio.pid_alive(pid)
+
+
+def last_activity(home: Path, task_id: str) -> datetime | None:
+    """The newest sign of life: transcript, reports, or the runner lock."""
+    newest = None
+    for path in (
+        transcript_path(home, task_id),
+        reports_path(home, task_id),
+        runner_lock_path(home, task_id),
+    ):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    if newest is None:
+        return None
+    return datetime.fromtimestamp(newest, tz=UTC)

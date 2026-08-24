@@ -162,6 +162,36 @@ def read_jsonl(path: Path) -> list[Any]:
     return out
 
 
+def read_jsonl_tail(path: Path, limit: int | None = None, max_bytes: int = 256 * 1024) -> list[Any]:
+    """The last `limit` entries of a jsonl file, reading at most `max_bytes`.
+
+    The bounded companion to read_jsonl for append-only logs that grow without
+    limit (transcripts, the manager journal): tailing one must not cost a full
+    read + parse of its history. A line straddling the window boundary is
+    dropped, like a torn line.
+    """
+    if not path.exists():
+        return []
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        start = max(0, f.tell() - max_bytes)
+        f.seek(start)
+        data = f.read()
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if start > 0:
+        lines = lines[1:]  # the window almost surely opened mid-line
+    out: list[Any] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out[-limit:] if limit else out
+
+
 def sorted_entries(dirpath: Path, suffix: str = ".json") -> list[Path]:
     """Non-tmp files in a directory, lexicographic (= chronological for our names)."""
     if not dirpath.is_dir():

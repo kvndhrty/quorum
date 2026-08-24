@@ -136,8 +136,9 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    only after a successful run; a crash rejects them back to `new/`.
 3. **One harness run** over `prompts/manager.md` + the digest, synchronous,
    cwd = `QUORUM_HOME`, bounded by `run_timeout_seconds`, stdout streamed to
-   `state/manager/transcript.jsonl`. The env carries `QUORUM_ACTOR=manager`
-   and a per-run `QUORUM_MANAGER_RUN` id.
+   `state/manager/transcript.jsonl`. The env carries the actor tag
+   (`actor.py`): `QUORUM_ACTOR=manager`, a per-run `QUORUM_MANAGER_RUN` id,
+   and the resolved action cap in `QUORUM_MANAGER_ACTION_CAP`.
 
 The harness acts with full authority through the quorum CLI — `task
 add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`, `quorum

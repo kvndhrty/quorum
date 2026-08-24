@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 from . import fsio, prompts
+from .actor import strip_actor_env
 from .config import Config, HarnessConfig
 from .messages import MessageBus
 from .projects import ProjectRegistry
@@ -127,8 +128,37 @@ def build_harness_argv(harness: HarnessConfig, prompt: str, session: str | None 
     return argv
 
 
-def build_argv(harness: HarnessConfig, task: Task, prompt: str) -> list[str]:
-    return build_harness_argv(harness, prompt, task.session)
+def stream_transcript(
+    proc: subprocess.Popen,
+    transcript: Path,
+    *,
+    extra: dict | None = None,
+    on_event=None,
+    now=fsio.utc_now,
+) -> None:
+    """Stream a harness process's stdout into a transcript.jsonl, line by line.
+
+    Each non-empty line becomes one entry: `{"at": ..., **extra}` plus either
+    `event` (parsed JSON, also passed to `on_event`) or `line` (raw text).
+    Both the task runner and the manager write transcripts through here, so
+    every reader (`read_transcript_tail`, the digest, `task tail`) sees one
+    entry shape.
+    """
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        entry: dict = {"at": fsio.iso(now()), **(extra or {})}
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            entry["line"] = line
+        else:
+            entry["event"] = event
+            if on_event is not None:
+                on_event(event)
+        fsio.append_jsonl(transcript, entry)
 
 
 def run_task(home: Path, config: Config, task_prefix: str) -> int:
@@ -158,14 +188,10 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
             apply_task_sandbox(home, config, task, workdir)
         guidance = claim_guidance(home, task.id)
         prompt = compose_prompt(home, task, workdir, guidance)
-        argv = build_argv(harness, task, prompt)
+        argv = build_harness_argv(harness, prompt, task.session)
 
-        env = {**os.environ, **harness.env, "QUORUM_HOME": str(home)}
-        # The task harness acts as itself, not as whoever launched it: a
-        # manager-initiated run must not leak the manager's actor identity
-        # (its quorum calls would be journaled and capped as manager actions).
-        env.pop("QUORUM_ACTOR", None)
-        env.pop("QUORUM_MANAGER_RUN", None)
+        # The task harness acts as itself, not as whoever launched it.
+        env = strip_actor_env({**os.environ, **harness.env, "QUORUM_HOME": str(home)})
         started = fsio.utc_now()
         proc = subprocess.Popen(
             argv,
@@ -176,26 +202,17 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
             bufsize=1,
             env=env,
         )
-        transcript = transcript_path(home, task.id)
         session = task.session
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            entry: dict = {"at": fsio.iso(fsio.utc_now())}
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                entry["line"] = line
-            else:
-                entry["event"] = event
-                if session is None and isinstance(event, dict):
-                    found = _find_session_id(event)
-                    if found:
-                        session = found
-                        store.update(task.id, session=session)
-            fsio.append_jsonl(transcript, entry)
+
+        def capture_session(event: object) -> None:
+            nonlocal session
+            if session is None and isinstance(event, dict):
+                found = _find_session_id(event)
+                if found:
+                    session = found
+                    store.update(task.id, session=found)
+
+        stream_transcript(proc, transcript_path(home, task.id), on_event=capture_session)
         exit_code = proc.wait()
 
         run = TaskRun(
@@ -218,12 +235,9 @@ def launch_detached(home: Path, task_id: str) -> int:
     home = Path(home)
     log_path = runner_log_path(home, task_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "QUORUM_HOME": str(home)}
     # The detached child re-invokes `quorum task run`; that inner invocation
-    # is infrastructure, not a second manager action — strip the actor tag
-    # so it is neither journaled again nor charged against the action cap.
-    env.pop("QUORUM_ACTOR", None)
-    env.pop("QUORUM_MANAGER_RUN", None)
+    # is infrastructure, not a second manager action.
+    env = strip_actor_env({**os.environ, "QUORUM_HOME": str(home)})
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home)],

@@ -75,8 +75,10 @@ below govern nearly every change:
   statuses, runner liveness, quiet time, report/transcript tails, the manager's own
   action journal with then-vs-now outcomes, user directives from the `manager`
   inbox), renders `prompts/manager.md`, and runs the configured harness
-  synchronously (cwd=home, `QUORUM_ACTOR=manager` + per-run `QUORUM_MANAGER_RUN`
-  in env, bounded by `run_timeout_seconds`, stdout → `state/manager/transcript.jsonl`).
+  synchronously (cwd=home, tagged with the `actor.py` env protocol —
+  `QUORUM_ACTOR=manager`, per-run `QUORUM_MANAGER_RUN`, the resolved cap in
+  `QUORUM_MANAGER_ACTION_CAP` — bounded by `run_timeout_seconds`, stdout →
+  `state/manager/transcript.jsonl`).
   The harness acts via the quorum CLI; the CLI's `_manager_guard` auto-journals
   every mutating action to `state/manager/journal.jsonl` and enforces the per-run
   action cap (`max_actions_per_run`) — the only rail, a rate limit, never a veto.
@@ -94,6 +96,11 @@ below govern nearly every change:
 - `views.py` — the shared read-model assembled purely from files; `quorum status`, the
   web app, and the TUI are all pure readers of it (the TUI/web's one write affordance
   is nudging a task, via the same bus call as the CLI).
+- `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
+  as. The manager tags the harness it spawns (`manager_env`), the CLI resolves
+  `current_actor()` for journaling and message attribution, and the runner
+  `strip_actor_env`s spawned children so they act as themselves. Also owns the
+  manager action journal's path.
 - `registry.py` — resolves an agent `type` string: builtin short name (only `manager`),
   else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small

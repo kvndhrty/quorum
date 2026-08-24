@@ -26,53 +26,30 @@ import json
 import os
 import subprocess
 import threading
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from .. import fsio, tasks
+from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path, manager_env
 from ..agent import Agent
-from ..runner import build_harness_argv
+from ..runner import build_harness_argv, resolve_harness, stream_transcript
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 300
-DEFAULT_MAX_ACTIONS_PER_RUN = 20
 
 TRANSCRIPT_TAIL_LINES = 10
 JOURNAL_TAIL_ENTRIES = 15
 RECENT_TERMINAL_HOURS = 24
 
 
-def journal_path(home: Path) -> Path:
-    return Path(home) / "state" / "manager" / "journal.jsonl"
-
-
 def transcript_path(home: Path) -> Path:
     return Path(home) / "state" / "manager" / "transcript.jsonl"
 
 
-def last_activity(home: Path, task_id: str) -> datetime | None:
-    """The newest sign of life: transcript, reports, or the runner lock."""
-    newest = None
-    for path in (
-        tasks.transcript_path(home, task_id),
-        tasks.reports_path(home, task_id),
-        tasks.runner_lock_path(home, task_id),
-    ):
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        newest = mtime if newest is None else max(newest, mtime)
-    if newest is None:
-        return None
-    return datetime.fromtimestamp(newest, tz=UTC)
-
-
-def build_digest(home: Path, store: tasks.TaskStore, now: datetime, directives: list[str]) -> str:
+def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directives: list[str]) -> str:
     """The manager's whole world, compiled from files. Pure and greppable:
     task lines look like `- [status] shortid ...` so both models and tests
     can parse them."""
     home = Path(home)
-    all_tasks = store.list()
     active = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
 
@@ -81,7 +58,7 @@ def build_digest(home: Path, store: tasks.TaskStore, now: datetime, directives: 
         lines.append("(none)")
     for t in active:
         alive = tasks.runner_alive(home, t.id)
-        seen = last_activity(home, t.id)
+        seen = tasks.last_activity(home, t.id)
         quiet = f"{int((now - seen).total_seconds() // 60)}m" if seen else "never-ran"
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
@@ -109,7 +86,7 @@ def build_digest(home: Path, store: tasks.TaskStore, now: datetime, directives: 
         lines.append("")
 
     lines.append("## Your recent actions (journal)")
-    entries = fsio.read_jsonl(journal_path(home))[-JOURNAL_TAIL_ENTRIES:]
+    entries = fsio.read_jsonl_tail(journal_path(home), limit=JOURNAL_TAIL_ENTRIES)
     if not entries:
         lines.append("(none yet)")
     store_by_short = {t.short_id: t for t in all_tasks}
@@ -117,9 +94,12 @@ def build_digest(home: Path, store: tasks.TaskStore, now: datetime, directives: 
         target = e.get("target") or ""
         then = e.get("target_status") or "-"
         now_status = store_by_short[target].status if target in store_by_short else "-"
-        changed = "" if then in ("-", now_status) else " (changed)"
-        if then == now_status and then != "-":
+        if then == "-":
+            changed = ""
+        elif then == now_status:
             changed = " (UNCHANGED since)"
+        else:
+            changed = " (changed)"
         line = f"- [{e.get('at', '')}] {e.get('action', '')} target={target or '-'}"
         if e.get("args"):
             line += f" args={str(e['args'])[:100]}"
@@ -142,18 +122,17 @@ class Manager(Agent):
 
     def tick(self) -> None:
         home = self.ctx.home
-        store = tasks.TaskStore(home)
-        active = [t for t in store.list() if t.status not in tasks.TERMINAL_STATUSES]
-        pending = fsio.sorted_entries(self.ctx.bus.inbox_dir / "manager" / "new")
-        if not active and not pending:
+        all_tasks = tasks.TaskStore(home).list()
+        active = any(t.status not in tasks.TERMINAL_STATUSES for t in all_tasks)
+        claimed = list(self.ctx.bus.claim("manager"))
+        if not active and not claimed:
             return  # nothing to manage; don't spend a harness run on an idle home
 
-        claimed = list(self.ctx.bus.claim("manager"))
         directives = [
             f"[{c.message.created_at}] {c.message.payload.get('text', '')}" for c in claimed
         ]
         try:
-            digest = build_digest(home, store, self.ctx.now(), directives)
+            digest = build_digest(home, all_tasks, self.ctx.now(), directives)
             prompt = self.ctx.prompt("manager", digest=digest)
             self._run_harness(prompt)
         except BaseException:
@@ -169,24 +148,23 @@ class Manager(Agent):
     def _resolve_harness(self):
         config = self.ctx.config
         name = self.ctx.settings.get("harness") or (config.tasks.default_harness if config else "")
-        harness = config.harness.get(name) if (config and name) else None
-        if harness is None:
+        if not config or not name:
             raise RuntimeError(
-                f"manager has no usable harness (looked for [harness.{name or '?'}] in "
-                "config.toml) — supervision is halted until one is configured"
+                "manager has no usable harness (set [agents.manager.settings].harness or "
+                "[tasks].default_harness in config.toml) — supervision is halted until then"
             )
-        return harness
+        return resolve_harness(config, name)
 
     def _run_harness(self, prompt: str) -> None:
         harness = self._resolve_harness()
         run_id = fsio.ulid()
         timeout = float(self.ctx.settings.get("run_timeout_seconds", DEFAULT_RUN_TIMEOUT_SECONDS))
+        cap = int(self.ctx.settings.get("max_actions_per_run", DEFAULT_MAX_ACTIONS_PER_RUN))
         env = {
             **os.environ,
             **harness.env,
             "QUORUM_HOME": str(self.ctx.home),
-            "QUORUM_ACTOR": "manager",
-            "QUORUM_MANAGER_RUN": run_id,
+            **manager_env(run_id, cap),
         }
         argv = build_harness_argv(harness, prompt)
         transcript = transcript_path(self.ctx.home)
@@ -200,20 +178,12 @@ class Manager(Agent):
             env=env,
         )
 
-        def pump() -> None:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                if not line:
-                    continue
-                entry: dict = {"at": fsio.iso(fsio.utc_now()), "run": run_id}
-                try:
-                    entry["event"] = json.loads(line)
-                except json.JSONDecodeError:
-                    entry["line"] = line
-                fsio.append_jsonl(transcript, entry)
-
-        reader = threading.Thread(target=pump, daemon=True)
+        reader = threading.Thread(
+            target=stream_transcript,
+            args=(proc, transcript),
+            kwargs={"extra": {"run": run_id}, "now": self.ctx.now},
+            daemon=True,
+        )
         reader.start()
         try:
             code = proc.wait(timeout=timeout)

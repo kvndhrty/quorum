@@ -26,7 +26,9 @@ from test_tasks import make_repo
 FAKE = str(Path(__file__).parent / "bin" / "fake_harness.py")
 
 
-def write_config(home: Path, manager_mode: str, extra_settings: str = "") -> None:
+def write_config(
+    home: Path, manager_mode: str, extra_settings: str = "", run_timeout_seconds: int = 60
+) -> None:
     (home / "config.toml").write_text(
         "[tasks]\n"
         'default_harness = "tasktool"\n'
@@ -42,7 +44,7 @@ def write_config(home: Path, manager_mode: str, extra_settings: str = "") -> Non
         "auto_pause = false\n"
         "[agents.manager.settings]\n"
         'harness = "mgr"\n'
-        "run_timeout_seconds = 60\n"
+        f"run_timeout_seconds = {run_timeout_seconds}\n"
         f"{extra_settings}"
     )
 
@@ -135,12 +137,7 @@ def test_failed_harness_raises_and_returns_directives(home: Path, clock, project
 
 
 def test_hung_harness_is_killed_at_the_run_timeout(home: Path, clock, project: str):
-    write_config(home, "hang", extra_settings="")
-    (home / "config.toml").write_text(
-        (home / "config.toml").read_text().replace(
-            "run_timeout_seconds = 60", "run_timeout_seconds = 1"
-        )
-    )
+    write_config(home, "hang", run_timeout_seconds=1)
     TaskStore(home).add(project, "x", "tasktool")
     with pytest.raises(RuntimeError, match="timed out"):
         make_manager(home, clock).tick()
@@ -169,7 +166,7 @@ def test_digest_liveness_quiet_time_and_journal_outcomes(home: Path, clock, proj
          "action": "task.nudge", "target": stuck.short_id, "target_status": "executing"},
     )
 
-    digest = build_digest(home, store, clock(), directives=["focus on stuck work"])
+    digest = build_digest(home, store.list(), clock(), directives=["focus on stuck work"])
 
     assert f"- [queued] {queued.short_id}" in digest
     assert "runner=dead" in digest
