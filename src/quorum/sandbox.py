@@ -22,14 +22,14 @@ builtin agents and APScheduler's trigger plugins are imported lazily — so it
 needs the interpreter's own tree readable. Every one of those additions is
 READ-only and comes from nono's own `system_read_*` policy groups (the same
 baseline the `nono run` binary uses in mode 1) or is derived from this
-interpreter at runtime. Write access stays exactly where it was: QUORUM_HOME,
-plus the steward's watch and destination directories.
+interpreter at runtime. Write access stays exactly where it was: QUORUM_HOME, plus any
+watch/dest directories agents declare in their settings.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import shlex
 import shutil
 import subprocess
@@ -37,6 +37,8 @@ import sys
 import sysconfig
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from . import fsio
 
 if TYPE_CHECKING:
     from .config import Config
@@ -109,6 +111,39 @@ def _python_runtime_paths() -> set[str]:
     return {c for c in candidates if c and Path(c).is_dir()}
 
 
+def _apply_profile_file(nono_py, caps, config: Config) -> dict:
+    """Merge the user's own nono-style profile into `caps`.
+
+    `[sandbox].profile_file` points at the same JSON shape a `nono run`
+    profile uses ({"fs_read": [...], "fs_write": [...], "network": [...]}),
+    so one hand-written profile serves all three sandbox modes. Grants are
+    *added* to what quorum derives — the derivation stays the floor that
+    keeps quorum itself functional. Fails closed on an unreadable or invalid
+    file: a profile the user asked for that cannot load must not silently
+    narrow (or skip) the sandbox they expected.
+    """
+    if not config.sandbox.profile_file:
+        return {}
+    path = Path(config.sandbox.profile_file).expanduser()
+    try:
+        with open(path, encoding="utf-8") as f:
+            profile = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise SandboxUnavailable(f"could not load [sandbox].profile_file {path}: {e}") from e
+    if not isinstance(profile, dict):
+        raise SandboxUnavailable(f"[sandbox].profile_file {path} must be a JSON object")
+    for key, mode in (("fs_write", nono_py.AccessMode.READ_WRITE), ("fs_read", nono_py.AccessMode.READ)):
+        for entry in profile.get(key, []):
+            p = Path(str(entry)).expanduser()
+            if p.is_file():
+                caps.allow_file(str(p), mode)
+            elif p.is_dir():
+                caps.allow_path(str(p), mode)
+            else:
+                log.warning("sandbox profile %s: %s path %s does not exist; skipped", path, key, p)
+    return profile
+
+
 def _llm_executable(config: Config) -> Path | None:
     """The configured LLM CLI as an absolute path, or None if unset/not found.
 
@@ -125,7 +160,7 @@ def _llm_executable(config: Config) -> Path | None:
 def build_capabilities(home: Path, config: Config):
     """A least-privilege CapabilitySet derived from the resolved config.
 
-    Writable: QUORUM_HOME and the steward's watch/destination directories.
+    Writable: QUORUM_HOME and any watch/dest directories agents declare.
     Readable: project dirs, the configured LLM executable, this interpreter's
     tree, and nono's system-read baseline. Network is blocked unless an LLM
     CLI is configured.
@@ -156,8 +191,10 @@ def build_capabilities(home: Path, config: Config):
         # allow_file, not allow_path: the latter rejects non-directories, and
         # granting the whole containing directory would be needlessly wide.
         caps.allow_file(str(executable), nono_py.AccessMode.READ)
+    profile = _apply_profile_file(nono_py, caps, config)
 
-    if config.llm is None or not config.llm.executable:
+    needs_network = (config.llm is not None and config.llm.executable) or profile.get("network")
+    if not needs_network:
         caps.block_network()
     caps.deduplicate()
     return caps
@@ -169,6 +206,59 @@ def self_sandbox(home: Path, config: Config) -> None:
     caps = build_capabilities(home, config)
     nono_py.apply(caps)
     log.info("self-sandbox applied via nono-py (Landlock/Seatbelt)")
+
+
+def build_task_capabilities(home: Path, config: Config, task, workdir: Path):
+    """A CapabilitySet for one task run.
+
+    Writable: QUORUM_HOME (reports, transcript, locks), the run's working
+    directory, the project's own .git (a worktree shares the main repo's
+    object store, so commits write there), and any [sandbox].task_write
+    extras. Readable: the interpreter tree, nono's system-read baseline, the
+    first argv element of the harness when it resolves on PATH, and
+    [sandbox].task_read extras. Network stays open — a coding harness is
+    assumed to need its API.
+    """
+    from .projects import ProjectRegistry
+
+    nono_py = _import_nono()
+    caps = nono_py.CapabilitySet()
+    caps.allow_path(str(home), nono_py.AccessMode.READ_WRITE)
+    caps.allow_path(str(workdir), nono_py.AccessMode.READ_WRITE)
+    project = ProjectRegistry(home).get(task.project)
+    if project is not None and (project.dir / ".git").is_dir():
+        caps.allow_path(str(project.dir / ".git"), nono_py.AccessMode.READ_WRITE)
+    for extra in config.sandbox.task_write:
+        p = Path(extra).expanduser()
+        if p.exists():
+            caps.allow_path(str(p), nono_py.AccessMode.READ_WRITE)
+    for extra in config.sandbox.task_read:
+        p = Path(extra).expanduser()
+        if p.exists():
+            caps.allow_path(str(p), nono_py.AccessMode.READ)
+    harness = config.harness.get(task.harness)
+    if harness is not None:
+        found = shutil.which(harness.start[0])
+        if found:
+            caps.allow_file(str(Path(found).resolve()), nono_py.AccessMode.READ)
+    _apply_profile_file(nono_py, caps, config)
+    _add_system_reads(nono_py, caps)
+    for path in _python_runtime_paths():
+        caps.allow_path(path, nono_py.AccessMode.READ)
+    caps.deduplicate()
+    return caps
+
+
+def apply_task_sandbox(home: Path, config: Config, task, workdir: Path) -> None:
+    """Irreversibly sandbox the current task-runner process and its harness.
+
+    Called by the runner when [sandbox].use_nono is set; fails closed via
+    SandboxUnavailable when nono-py is missing.
+    """
+    nono_py = _import_nono()
+    caps = build_task_capabilities(home, config, task, workdir)
+    nono_py.apply(caps)
+    log.info("task sandbox applied for %s (workdir %s)", task.short_id, workdir)
 
 
 def _text(stream) -> str:
@@ -205,7 +295,10 @@ def make_sandboxed_runner(home: Path, config: Config):
             if input:
                 staging = home / "state" / "llm"
                 staging.mkdir(parents=True, exist_ok=True)
-                prompt_file = staging / f"prompt-{os.getpid()}.txt"
+                # ULID, not pid: scheduler threads share one pid, and two
+                # agents prompting in the same tick window must not clobber
+                # (or unlink) each other's staged prompt.
+                prompt_file = staging / f"prompt-{fsio.ulid()}.txt"
                 prompt_file.write_text(input, encoding="utf-8")
                 command = [
                     "/bin/sh", "-c",

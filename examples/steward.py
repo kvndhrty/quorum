@@ -1,10 +1,26 @@
-"""File steward: keeps watched directories (a downloads folder, a papers
-inbox) organized according to user rules.
+"""File steward — the worked example of a quorum plugin agent.
+
+Keeps watched directories (a downloads folder, a papers inbox) organized
+according to user rules. To use it: copy this file into
+`QUORUM_HOME/plugins/` and add to config.toml:
+
+    [agents.steward]
+    type = "steward:Steward"
+    schedule = "every 1h"
+    [agents.steward.settings]
+    watch = ["~/Downloads"]
+    apply = false             # false = propose on the board; true = move files
+    rules = [{ match = "*.pdf", dest = "~/papers/inbox" }]
+
+It demonstrates the whole plugin contract: settings, idempotent ticks with
+state-based dedupe, board posts, `log_action`, LLM-with-deterministic-
+fallback, and bounded retries. Test it with `quorum agent run-once steward`.
 
 Safe by default: with apply=false (the default) it only posts proposals to
 the board. With apply=true it moves files — never deletes, never overwrites
 (collision gets a numeric suffix) — and records every move in
-state/steward/undo.jsonl, which `quorum steward undo` replays backward.
+state/steward/undo.jsonl, which `undo_moves()` below replays backward, e.g.
+    python -c "import steward, pathlib; steward.undo_moves(pathlib.Path('~/.quorum').expanduser(), last=1)"
 
 Per-file state records *what* was done, not just when: an unchanged file is
 never re-proposed tick after tick, but flipping apply=false to apply=true
@@ -27,8 +43,18 @@ import json
 import shutil
 from pathlib import Path
 
-from .. import fsio
-from ..agent import Agent
+from quorum import fsio
+from quorum.agent import Agent
+
+CLASSIFY_PROMPT = """\
+You are a file steward organizing a user's directory. Choose the best
+destination for this file, or SKIP if none clearly fits.
+
+File: {filename}
+
+Allowed destinations (reply with exactly one line, verbatim, or SKIP):
+{destinations}
+"""
 
 # A move can fail for a reason that clears on its own (a full disk, a
 # destination on a volume that is briefly unmounted), so retrying is worth it —
@@ -152,8 +178,8 @@ class Steward(Agent):
         if not self.ctx.llm.enabled:
             return None
         destinations = sorted({str(Path(r["dest"]).expanduser()) for r in rules if r.get("dest")})
-        prompt = self.ctx.prompt(
-            "steward-classify", filename=entry.name, destinations="\n".join(destinations)
+        prompt = CLASSIFY_PROMPT.format(
+            filename=entry.name, destinations="\n".join(destinations)
         )
         answer = self.ctx.llm.complete(prompt)
         if answer is None:

@@ -20,16 +20,30 @@ DEFAULT_CONFIG = """\
 timezone = "local"        # display only; stored timestamps are always UTC
 retention_days = 30       # board messages older than this are archived
 
-[projects]
-# Directories the scout agent scans for unregistered projects (git repos or
-# dirs containing a .quorum.toml marker). Proposals appear on the board;
-# confirm with `quorum project adopt <slug>`.
-workspace_roots = []
+[tasks]
+worktree = true           # run each task in its own git worktree under QUORUM_HOME
+stall_minutes = 15        # quiet for this long = the monitor pokes the task
+max_resumes = 3           # resume attempts before a task is marked blocked
+default_harness = ""      # e.g. "claude" — used when `quorum task add` has no --harness
 
-# Uncomment to give agents an LLM. `executable` is any CLI that takes a prompt
-# and prints a completion: `claude` with args=["-p"], `codex` with args=["exec"],
-# `llm`, `ollama` with args=["run", "llama3.2"], ...
-# All agents degrade gracefully when this section is absent.
+# A harness is any coding-agent CLI that takes a prompt and works autonomously
+# in the current directory. "{prompt}" and "{session}" are substituted; a
+# template without "{prompt}" gets the prompt appended as the last argument.
+# `resume` is optional — quorum captures a session_id from JSON output when
+# the harness emits one. See docs/guide.md for autonomy/permission flags.
+#[harness.claude]
+#start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose"]
+#resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose"]
+
+#[harness.codex]
+#start = ["codex", "exec", "{prompt}"]
+
+#[harness.opencode]
+#start = ["opencode", "run", "{prompt}"]
+
+# Uncomment to give the monitor an LLM for smarter stall triage and nudges.
+# `executable` is any CLI that takes a prompt and prints a completion.
+# Everything degrades gracefully when this section is absent.
 #[llm]
 #backend = "cli"
 #executable = "claude"
@@ -39,34 +53,24 @@ workspace_roots = []
 #max_prompt_chars = 24000
 
 [sandbox]
-use_nono = false          # true: run LLM subprocesses under nono-py sandboxed_exec
-profile = ""              # optional nono profile name, used by docs/tooling
+use_nono = false          # true: sandbox task runs + LLM subprocesses via nono-py
+profile = ""              # optional nono profile name (used with `nono run`)
+#profile_file = "~/.config/nono/profiles/quorum.json"  # your own nono-style
+#                         # JSON profile (fs_read/fs_write/network), merged
+#                         # into the grants quorum derives for modes 2 and 3
+#task_read  = []          # extra read grants for sandboxed task runs
+#task_write = ["~/.claude"]  # harness state dirs need write (claude: ~/.claude)
 
-[agents.tracker]
-type = "tracker"
-schedule = "every 30m"
+[agents.monitor]
+type = "monitor"
+schedule = "every 2m"
 
-[agents.sentinel]
-type = "sentinel"
-schedule = "cron 0 8 * * *"
-[agents.sentinel.settings]
-tiers = [14, 7, 3, 1, 0]
-
-[agents.steward]
-type = "steward"
-schedule = "every 1h"
-[agents.steward.settings]
-watch = []                # e.g. ["~/Downloads"]
-apply = false             # false = propose moves on the board; true = perform them
-rules = []                # e.g. [{ match = "*.pdf", dest = "~/papers/inbox" }]
-
-[agents.scribe]
-type = "scribe"
-schedule = "cron 30 17 * * *"
-
-[agents.scout]
-type = "scout"
-schedule = "cron 15 9 * * *"
+# Plugin agents: drop a .py file into QUORUM_HOME/plugins/ and point a stanza
+# at it (see docs/guide.md; examples/steward.py in the quorum repo is a
+# complete worked example):
+#[agents.steward]
+#type = "steward:Steward"
+#schedule = "every 1h"
 """
 
 SUBDIRS = [
@@ -76,9 +80,8 @@ SUBDIRS = [
     "messages/inbox",
     "messages/archive",
     "state/agents",
-    "state/projects",
-    "state/steward",
-    "briefs",
+    "tasks",
+    "worktrees",
     "logs",
     "plugins",
 ]

@@ -28,15 +28,17 @@
          gap: 16px; padding: 16px 24px 40px; max-width: 1500px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
             padding: 14px 16px; min-width: 0; }
+  section.wide { grid-column: 1 / -1; }
   section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
                color: var(--muted); margin: 0 0 10px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
   tr + tr td { border-top: 1px solid var(--line); }
   .muted { color: var(--muted); }
-  .status-idle { color: var(--ok); } .status-running { color: var(--accent); }
-  .status-error, .status-paused { color: var(--bad); }
-  .status-never-ran { color: var(--muted); }
+  .status-idle, .status-done { color: var(--ok); }
+  .status-running, .task-running { color: var(--accent); }
+  .status-error, .status-paused, .status-blocked { color: var(--bad); }
+  .status-never-ran, .status-queued, .status-cancelled { color: var(--muted); }
   .due-soon { color: var(--warn); font-weight: 600; }
   .overdue { color: var(--bad); font-weight: 600; }
   ul { list-style: none; margin: 0; padding: 0; font-size: 14px; }
@@ -50,9 +52,14 @@
   button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
            padding: 6px 12px; cursor: pointer; }
   button.small { font-size: 12px; padding: 3px 9px; }
-  pre.brief { white-space: pre-wrap; font: 13px/1.5 ui-monospace, monospace;
-              margin: 0; overflow-x: auto; }
+  .task-row { cursor: pointer; }
+  #task-detail { margin-top: 10px; display: none; }
+  pre.tail { white-space: pre-wrap; font: 12px/1.5 ui-monospace, monospace;
+             margin: 6px 0 0; max-height: 320px; overflow: auto;
+             background: var(--bg); border: 1px solid var(--line);
+             border-radius: 6px; padding: 8px 10px; }
   .editable { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+  a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -61,14 +68,25 @@
   <span id="sup"><span class="dot"></span><span id="sup-text">checking…</span></span>
 </header>
 <main>
-  <section>
-    <h2>Projects</h2>
-    <table id="projects"></table>
-    <div id="candidates"></div>
+  <section class="wide">
+    <h2>Tasks</h2>
+    <table id="tasks"></table>
+    <div id="task-detail">
+      <div id="task-detail-head" class="muted"></div>
+      <pre class="tail" id="task-tail"></pre>
+      <form id="nudge-form">
+        <input type="text" id="nudge-text" placeholder="guidance for this task…" required>
+        <button>Nudge</button>
+      </form>
+    </div>
   </section>
   <section>
     <h2>Agents</h2>
     <table id="agents"></table>
+  </section>
+  <section>
+    <h2>Projects</h2>
+    <table id="projects"></table>
   </section>
   <section>
     <h2>Board</h2>
@@ -78,14 +96,11 @@
       <button>Post</button>
     </form>
   </section>
-  <section>
-    <h2>Latest brief</h2>
-    <pre class="brief" id="brief"></pre>
-  </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let selectedTask = null;
 
 async function refresh() {
   let data;
@@ -97,24 +112,17 @@ async function refresh() {
   $("sup-text").textContent = sup.alive
     ? `supervisor running (pid ${sup.pid})` : "supervisor not running";
 
-  $("projects").innerHTML = (data.projects || []).map(p => {
-    let due = "";
-    if (p.deadline) {
-      const cls = p.days_left < 0 ? "overdue" : (p.days_left <= 3 ? "due-soon" : "");
-      const label = p.days_left < 0 ? `overdue ${-p.days_left}d` : `${p.days_left}d`;
-      due = `<span class="${cls}">${esc(p.deadline)} (${label})</span>`;
-    }
-    return `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.activity_summary || "")}</span></td>
-      <td><span class="editable" title="click to change deadline"
-        onclick="editDeadline('${esc(p.slug)}','${esc(p.deadline || "")}')">${due || '<span class="muted">no deadline</span>'}</span></td></tr>`;
-  }).join("") || `<tr><td class="muted">none registered</td></tr>`;
-
-  const cands = Object.entries(data.candidates || {});
-  $("candidates").innerHTML = cands.length
-    ? "<h2 style='margin-top:14px'>Scout proposals</h2>" + cands.map(([slug, path]) =>
-        `<li>${esc(slug)} <span class="meta">${esc(path)}</span>
-         <button class="small" onclick="adopt('${esc(slug)}')">Adopt</button></li>`).join("")
-    : "";
+  $("tasks").innerHTML = (data.tasks || []).map(t => {
+    const cls = t.running ? "task-running" : `status-${esc(t.status)}`;
+    const status = esc(t.status) + (t.running ? " ▶" : "");
+    const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
+    return `<tr class="task-row" onclick="selectTask('${esc(t.id)}')">
+      <td class="muted">${esc(t.id_short)}</td>
+      <td><b>${esc(t.project)}</b><br><span class="muted">${esc((t.last_report || t.prompt).slice(0, 90))}</span></td>
+      <td class="${cls}">${status}</td>
+      <td class="muted">${esc(t.harness)}</td>
+      <td>${pr}</td></tr>`;
+  }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`;
 
   $("agents").innerHTML = (data.agents || []).map(a =>
     `<tr><td>${esc(a.name)}</td>
@@ -123,17 +131,42 @@ async function refresh() {
       <td class="muted">${esc((a.last_end || "").replace("T"," ").replace("Z",""))}</td></tr>`
   ).join("");
 
+  $("projects").innerHTML = (data.projects || []).map(p => {
+    let due = "";
+    if (p.deadline) {
+      const cls = p.days_left < 0 ? "overdue" : (p.days_left <= 3 ? "due-soon" : "");
+      const label = p.days_left < 0 ? `overdue ${-p.days_left}d` : `${p.days_left}d`;
+      due = `<span class="${cls}">${esc(p.deadline)} (${label})</span>`;
+    }
+    return `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.path)}</span></td>
+      <td><span class="editable" title="click to change deadline"
+        onclick="editDeadline('${esc(p.slug)}','${esc(p.deadline || "")}')">${due || '<span class="muted">no deadline</span>'}</span></td></tr>`;
+  }).join("") || `<tr><td class="muted">none registered</td></tr>`;
+
   $("board").innerHTML = (data.board || []).slice().reverse().map(m =>
     `<li>${esc(m.text)}<br><span class="meta">#${esc(m.topic)} · ${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))}</span></li>`
   ).join("") || `<li class="muted">no messages yet</li>`;
 
-  const brief = await (await fetch("/api/brief/latest")).json();
-  $("brief").textContent = brief.markdown || "no brief yet";
+  if (selectedTask) renderTaskDetail();
 }
 
-async function adopt(slug) {
-  await fetch(`/api/projects/${slug}/adopt`, { method: "POST" });
-  refresh();
+async function selectTask(id) {
+  selectedTask = (selectedTask === id) ? null : id;
+  $("task-detail").style.display = selectedTask ? "block" : "none";
+  if (selectedTask) renderTaskDetail();
+}
+
+async function renderTaskDetail() {
+  let t;
+  try { t = await (await fetch(`/api/tasks/${selectedTask}`)).json(); }
+  catch { return; }
+  $("task-detail-head").textContent =
+    `task ${t.id.slice(0, 8).toLowerCase()} · ${t.status}${t.running ? " · running" : ""} · ${t.workdir || ""}`;
+  const lines = (t.transcript || []).map(e =>
+    e.line !== undefined ? e.line : JSON.stringify(e.event).slice(0, 200));
+  const reports = (t.reports || []).map(r => `» [${r.status}] ${r.text}`);
+  $("task-tail").textContent =
+    [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
 }
 
 async function editDeadline(slug, current) {
@@ -146,6 +179,17 @@ async function editDeadline(slug, current) {
   if (!r.ok) alert((await r.json()).detail || "update failed");
   refresh();
 }
+
+$("nudge-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("nudge-text").value.trim();
+  if (!text || !selectedTask) return;
+  await fetch(`/api/tasks/${selectedTask}/nudge`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  $("nudge-text").value = "";
+});
 
 $("post-form").addEventListener("submit", async (e) => {
   e.preventDefault();

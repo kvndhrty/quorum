@@ -88,6 +88,15 @@ class AgentContext:
         )
 
 
+def tick_lock_path(home: Path, name: str) -> Path:
+    """Per-agent tick lock, held for the duration of one tick.
+
+    Taken by both the supervisor's tick wrapper and `quorum agent run-once`,
+    so a hand-run tick and a scheduled one can never interleave and clobber
+    each other's load_state()/save_state()."""
+    return Path(home) / "state" / "agents" / name / "tick.lock"
+
+
 def write_heartbeat(home: Path, name: str, **fields: Any) -> None:
     """Merge `fields` into an agent's heartbeat file.
 

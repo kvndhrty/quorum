@@ -138,3 +138,87 @@ def test_failed_load_is_visible_in_agent_rows(home: Path):
     row = next(r for r in views.agent_rows(home, fixed) if r["name"] == "ghost")
     assert row["status"] == "never-ran"
     assert row["error"] is None
+
+
+def test_control_inbox_pause_resume_run_now(home: Path):
+    (home / "plugins" / "ctl.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Ctl(Agent):\n"
+        "    def tick(self):\n"
+        "        pass\n"
+    )
+    config = write_config(home, '[agents.ctl]\ntype = "ctl:Ctl"\nschedule = "every 1h"\n')
+    sup = Supervisor(home, config)
+    sup.scheduler.start(paused=True)
+    try:
+        sup._schedule_agent("ctl", sup.agents["ctl"])
+        bus = MessageBus(home)
+
+        bus.send("user", "supervisor", type="agent.pause", payload={"agent": "ctl"})
+        sup._control()
+        assert sup.scheduler.get_job("ctl").next_run_time is None
+        hb = fsio.read_json(home / "state/agents/ctl/heartbeat.json")
+        assert hb["status"] == "paused"
+
+        sup._failures["ctl"] = 3
+        bus.send("user", "supervisor", type="agent.resume", payload={"agent": "ctl"})
+        sup._control()
+        assert sup.scheduler.get_job("ctl").next_run_time is not None
+        assert sup._failures["ctl"] == 0  # manual resume clears the auto-pause counter
+
+        before = sup.scheduler.get_job("ctl").next_run_time
+        bus.send("user", "supervisor", type="agent.run-now", payload={"agent": "ctl"})
+        sup._control()
+        assert sup.scheduler.get_job("ctl").next_run_time < before
+
+        # unknown agent: logged, acked, never raises
+        bus.send("user", "supervisor", type="agent.pause", payload={"agent": "ghost"})
+        sup._control()
+        inbox = bus.inbox_dir / "supervisor"
+        assert fsio.sorted_entries(inbox / "new") == []
+        assert fsio.sorted_entries(inbox / "cur") == []
+    finally:
+        sup.scheduler.shutdown(wait=False)
+
+
+def test_scheduled_tick_skips_when_lock_held_elsewhere(home: Path):
+    (home / "plugins" / "lk.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Lk(Agent):\n"
+        "    def tick(self):\n"
+        "        self.ctx.bus.post(self.name, 'lk', text='ran')\n"
+    )
+    config = write_config(home, '[agents.lk]\ntype = "lk:Lk"\nschedule = "every 1h"\n')
+    sup = Supervisor(home, config)
+
+    lock = home / "state" / "agents" / "lk" / "tick.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text('{"pid": 1}\n')  # a live foreign pid: run-once in flight
+    sup.run_agent_tick("lk")
+    assert MessageBus(home).read_topic("lk") == []  # tick was skipped
+
+    lock.unlink()
+    sup.run_agent_tick("lk")
+    assert len(MessageBus(home).read_topic("lk")) == 1
+
+
+def test_pause_landing_mid_tick_survives_the_completion_write(home: Path):
+    """A pause applied while a tick is in flight must still read as paused
+    after the tick's final heartbeat write — the paused job never runs again,
+    so nothing else would ever correct the file."""
+    (home / "plugins" / "slow.py").write_text(
+        "from quorum.agent import Agent\n"
+        "from quorum import fsio\n"
+        "class Slow(Agent):\n"
+        "    def tick(self):\n"
+        "        # a pause command lands while this tick is running\n"
+        "        from quorum.agent import write_heartbeat\n"
+        "        write_heartbeat(self.ctx.home, self.name, status='paused', error='paused by user')\n"
+    )
+    config = write_config(home, '[agents.slow]\ntype = "slow:Slow"\nschedule = "every 1h"\n')
+    sup = Supervisor(home, config)
+    sup.run_agent_tick("slow")
+
+    hb = fsio.read_json(home / "state/agents/slow/heartbeat.json")
+    assert hb["status"] == "paused"      # not clobbered back to idle
+    assert hb["last_end"]                # timing fields still recorded
