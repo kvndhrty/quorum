@@ -47,6 +47,11 @@ def quorum(*args) -> subprocess.CompletedProcess:
     )
 
 
+def task_id_from(prompt: str) -> str | None:
+    m = re.search(r"Task ID: (\S+)", prompt)
+    return m.group(1) if m else None
+
+
 def main() -> int:
     mode = os.environ.get("FAKE_HARNESS_MODE", "echo")
     if mode == "fail":
@@ -62,11 +67,11 @@ def main() -> int:
     print(f"CWD| {os.getcwd()}")
 
     if mode == "report":
-        m = re.search(r"Task ID: (\S+)", prompt)
-        if not m:
+        task_id = task_id_from(prompt)
+        if not task_id:
             print("no task id found in prompt", file=sys.stderr)
             return 4
-        argv = ["task", "report", m.group(1),
+        argv = ["task", "report", task_id,
                 "--status", os.environ.get("FAKE_HARNESS_STATUS", "done"),
                 "finished by fake harness"]
         pr_url = os.environ.get("FAKE_HARNESS_PR_URL")
@@ -96,11 +101,11 @@ def main() -> int:
         watchdog.start()
         post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
         if post == "nudge":
-            m = re.search(r"Task ID: (\S+)", prompt)
-            if not m:
+            task_id = task_id_from(prompt)
+            if not task_id:
                 print("no task id found in prompt", file=sys.stderr)
                 return 4
-            quorum("task", "nudge", m.group(1), "switch to the fallback plan")
+            quorum("task", "nudge", task_id, "switch to the fallback plan")
         elif post == "tell":
             quorum("manager", "tell", "pause new launches until tests pass")
         print(json.dumps({"type": "result", "subtype": "success"}), flush=True)

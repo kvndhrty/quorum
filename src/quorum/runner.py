@@ -36,6 +36,7 @@ import os
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import fsio, prompts
@@ -59,10 +60,8 @@ class RunnerError(RuntimeError):
     """A run could not start; the message is fit to show a CLI user."""
 
 
-INJECT_STREAM_JSON = "stream-json"
-
-# How often the guidance pump checks the inbox during a live run. Module-level
-# so tests can shrink it; nudges are human-paced, so seconds are fine.
+# How often the guidance pump checks the inbox during a live run. Read at
+# wait time so tests can shrink it; nudges are human-paced, so seconds are fine.
 GUIDANCE_POLL_SECONDS = 2.0
 
 
@@ -84,14 +83,18 @@ class GuidancePump:
     nothing is waiting in the inbox — so a run naturally extends while
     guidance keeps arriving and ends at the first idle turn boundary.
     Anything arriving after close stays in `new/` for the next run.
+
+    The lock guards only the counters and the closed flag; inbox and stdin
+    I/O runs outside it (there is one delivering thread), so a `result`
+    event on the transcript thread never waits on filesystem work. A claim
+    is counted *before* its write so the close condition can't fire while a
+    message is in flight.
     """
 
-    def __init__(self, home: Path, inbox: str, stdin, *, poll_seconds: float | None = None):
+    def __init__(self, home: Path, inbox: str, stdin):
         self._bus = MessageBus(home)
         self._inbox = inbox
-        self._new_dir = self._bus.inbox_dir / inbox / "new"
         self._stdin = stdin
-        self._poll = GUIDANCE_POLL_SECONDS if poll_seconds is None else poll_seconds
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._closed = False
@@ -114,41 +117,47 @@ class GuidancePump:
         """The run is over (or being torn down): stop polling, close stdin."""
         self._stop.set()
         self._thread.join(timeout=5)
-        with self._lock:
-            self._close_locked()
+        self._close()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
             self._deliver_pending()
-            self._stop.wait(self._poll)
+            self._stop.wait(GUIDANCE_POLL_SECONDS)
 
     def _deliver_pending(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            for claimed in self._bus.claim(self._inbox):
-                turn = {
-                    "type": "user",
-                    "message": {
-                        "role": "user",
-                        "content": [{"type": "text", "text": guidance_note(claimed.message)}],
-                    },
-                }
-                try:
-                    self._stdin.write(json.dumps(turn) + "\n")
-                    self._stdin.flush()
-                except (OSError, ValueError):
-                    claimed.reject()  # harness is gone; back to new/ for the next run
-                    self._close_locked()
+        for claimed in self._bus.claim(self._inbox):
+            with self._lock:
+                if self._closed:
+                    claimed.reject()
                     return
                 self._delivered += 1
-                claimed.ack()
+            turn = {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": guidance_note(claimed.message)}],
+                },
+            }
+            try:
+                self._stdin.write(json.dumps(turn) + "\n")
+                self._stdin.flush()
+            except (OSError, ValueError):
+                with self._lock:
+                    self._delivered -= 1
+                claimed.reject()  # harness is gone; back to new/ for the next run
+                self._close()
+                return
+            claimed.ack()
 
     def _maybe_close_locked(self) -> None:
         if self._closed:
             return
         answered = self._results >= 1 + self._delivered
-        if answered and not fsio.sorted_entries(self._new_dir):
+        if answered and not self._bus.pending(self._inbox):
+            self._close_locked()
+
+    def _close(self) -> None:
+        with self._lock:
             self._close_locked()
 
     def _close_locked(self) -> None:
@@ -159,6 +168,25 @@ class GuidancePump:
             except OSError:
                 pass
         self._stop.set()
+
+
+@contextmanager
+def guidance_pump(home: Path, inbox: str, harness: HarnessConfig, proc: subprocess.Popen):
+    """Attach a GuidancePump to a live harness run when its config opts in.
+
+    The one seam for inject-mode lifecycle: yields the started pump (or None
+    for a harness without `inject`) and stops it on exit. Callers pipe the
+    process's stdin iff `harness.inject` is set.
+    """
+    if not harness.inject:
+        yield None
+        return
+    pump = GuidancePump(home, inbox, proc.stdin)
+    pump.start()
+    try:
+        yield pump
+    finally:
+        pump.stop()
 
 
 def resolve_harness(config: Config, name: str) -> HarnessConfig:
@@ -309,35 +337,29 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         proc = subprocess.Popen(
             argv,
             cwd=str(workdir),
-            stdin=subprocess.PIPE if harness.inject == INJECT_STREAM_JSON else None,
+            stdin=subprocess.PIPE if harness.inject else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
         )
-        pump = None
-        if harness.inject == INJECT_STREAM_JSON:
-            pump = GuidancePump(home, inbox_name(task.id), proc.stdin)
-            pump.start()
         session = task.session
 
-        def on_event(event: object) -> None:
-            nonlocal session
-            if session is None and isinstance(event, dict):
-                found = _find_session_id(event)
-                if found:
-                    session = found
-                    store.update(task.id, session=found)
-            if pump is not None:
-                pump.on_event(event)
+        with guidance_pump(home, inbox_name(task.id), harness, proc) as pump:
 
-        try:
+            def on_event(event: object) -> None:
+                nonlocal session
+                if session is None and isinstance(event, dict):
+                    found = _find_session_id(event)
+                    if found:
+                        session = found
+                        store.update(task.id, session=found)
+                if pump is not None:
+                    pump.on_event(event)
+
             stream_transcript(proc, transcript_path(home, task.id), on_event=on_event)
             exit_code = proc.wait()
-        finally:
-            if pump is not None:
-                pump.stop()
 
         run = TaskRun(
             started_at=fsio.iso(started), ended_at=fsio.iso(fsio.utc_now()), exit_code=exit_code

@@ -368,6 +368,7 @@ def task_inbox(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Read guidance sent to a task. Without --claim, messages are only peeked."""
+    from .runner import guidance_note
     from .tasks import inbox_name
 
     target = get_home(home)
@@ -376,8 +377,7 @@ def task_inbox(
     if claim:
         found = False
         for claimed in bus.claim(inbox_name(task.id)):
-            msg = claimed.message
-            typer.echo(f"[from {msg.sender} at {msg.created_at}] {msg.payload.get('text', '')}")
+            typer.echo(guidance_note(claimed.message))
             claimed.ack()
             found = True
         if not found:

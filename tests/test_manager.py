@@ -31,7 +31,7 @@ def write_config(
     manager_mode: str,
     extra_settings: str = "",
     run_timeout_seconds: int = 60,
-    mgr_extra: str = "",
+    mgr_inject: bool = False,
 ) -> None:
     (home / "config.toml").write_text(
         "[tasks]\n"
@@ -42,8 +42,8 @@ def write_config(
         "[harness.mgr]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
         f'env = {{ FAKE_HARNESS_MODE = "{manager_mode}" }}\n'
-        f"{mgr_extra}"
-        "[agents.manager]\n"
+        + ('inject = "stream-json"\n' if mgr_inject else "")
+        + "[agents.manager]\n"
         'type = "manager"\n'
         'schedule = "every 5m"\n'
         "auto_pause = false\n"
@@ -125,7 +125,7 @@ def test_mid_run_directive_reaches_a_live_manager_run(
     tick (the fake posts the tell itself mid-run, for determinism)."""
     monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
     monkeypatch.setenv("FAKE_HARNESS_INJECT_POST", "tell")
-    write_config(home, "inject", mgr_extra='inject = "stream-json"\n')
+    write_config(home, "inject", mgr_inject=True)
     TaskStore(home).add(project, "x", "tasktool")  # something active, so the tick runs
 
     make_manager(home, clock).tick()
