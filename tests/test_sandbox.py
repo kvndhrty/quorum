@@ -240,3 +240,70 @@ def test_unresolvable_llm_executable_is_not_granted(home: Path, fake_nono):
 
     caps = build_capabilities(home, Config(llm=LLMConfig(executable="definitely-not-on-path")))
     assert caps.files == []
+
+
+def test_profile_file_grants_are_merged(home: Path, fake_nono, tmp_path: Path):
+    """[sandbox].profile_file: the user's own nono-style profile is additive —
+    its fs_read/fs_write land in the capability set alongside the derived
+    grants, and a non-empty network list keeps the network open."""
+    import json
+
+    from quorum.sandbox import build_capabilities
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    secret = tmp_path / "token.txt"
+    secret.write_text("t")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "fs_write": [str(shared)],
+        "fs_read": [str(secret), str(tmp_path / "missing")],
+        "network": ["api.example.com"],
+    }))
+
+    config = Config(sandbox=SandboxConfig(use_nono=True, profile_file=str(profile)))
+    caps = build_capabilities(home, config)
+
+    assert (str(shared), FakeAccessMode.READ_WRITE) in caps.paths
+    assert (str(secret), FakeAccessMode.READ) in caps.files  # files via allow_file
+    assert not any("missing" in p for p, _ in caps.paths)  # nonexistent: skipped
+    assert (str(home), FakeAccessMode.READ_WRITE) in caps.paths  # derived floor stays
+    assert caps.network_blocked is False  # profile's network list keeps it open
+
+    # without a profile and without [llm], the network is blocked as before
+    caps2 = build_capabilities(home, Config(sandbox=SandboxConfig(use_nono=True)))
+    assert caps2.network_blocked is True
+
+
+def test_profile_file_reaches_task_capabilities(home: Path, fake_nono, tmp_path: Path):
+    import json
+
+    from quorum.sandbox import build_task_capabilities
+    from quorum.tasks import TaskStore
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"fs_write": [str(shared)]}))
+    config = Config(sandbox=SandboxConfig(use_nono=True, profile_file=str(profile)))
+    task = TaskStore(home).add("proj", "x", "fake")
+    workdir = tmp_path / "wt"
+    workdir.mkdir()
+
+    caps = build_task_capabilities(home, config, task, workdir)
+    assert (str(shared), FakeAccessMode.READ_WRITE) in caps.paths
+    assert (str(workdir), FakeAccessMode.READ_WRITE) in caps.paths
+
+
+def test_unreadable_profile_file_fails_closed(home: Path, fake_nono, tmp_path: Path):
+    from quorum.sandbox import build_capabilities
+
+    config = Config(sandbox=SandboxConfig(use_nono=True, profile_file=str(tmp_path / "nope.json")))
+    with pytest.raises(SandboxUnavailable, match="profile_file"):
+        build_capabilities(home, config)
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json {")
+    config = Config(sandbox=SandboxConfig(use_nono=True, profile_file=str(bad)))
+    with pytest.raises(SandboxUnavailable, match="profile_file"):
+        build_capabilities(home, config)

@@ -1,7 +1,7 @@
 [project]
 name = "quorum"
 version = "0.1.0"
-description = "An agentic ecosystem of specialists: always-on, file-based agents for busy researchers."
+description = "Bring-your-own-harness orchestration for long-running coding tasks: file-based, sandboxable, monitored."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Kevin Doherty" }]

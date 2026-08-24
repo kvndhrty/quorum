@@ -26,10 +26,45 @@ class LLMConfig(BaseModel):
 class SandboxConfig(BaseModel):
     use_nono: bool = False
     profile: str = ""
+    # A user-authored nono-style JSON profile ({"fs_read": [...], "fs_write":
+    # [...], "network": [...]}) merged into the capability sets quorum derives
+    # for self-sandbox and task runs — the same file works with the nono
+    # binary (mode 1) and with nono-py (modes 2/3).
+    profile_file: str = ""
+    # Extra grants for sandboxed task runs. Real harnesses keep their own
+    # state outside the worktree (claude: ~/.claude, codex: ~/.codex) and
+    # exec helper tools; grant those here.
+    task_read: list[str] = Field(default_factory=list)
+    task_write: list[str] = Field(default_factory=list)
 
 
-class ProjectsConfig(BaseModel):
-    workspace_roots: list[str] = Field(default_factory=list)
+class HarnessConfig(BaseModel):
+    """One [harness.<name>] table: how to invoke a coding harness CLI.
+
+    `start` and `resume` are argv templates; "{prompt}" and "{session}" are
+    substituted element-wise (a template with no "{prompt}" gets the prompt
+    appended as the final argument). `resume` is optional — without it, or
+    without a captured session id, every run uses `start`; the worktree
+    persists between runs, so a fresh session still sees prior progress.
+    """
+
+    start: list[str]
+    resume: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("start")
+    @classmethod
+    def _nonempty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("harness 'start' argv must not be empty")
+        return v
+
+
+class TasksConfig(BaseModel):
+    worktree: bool = True
+    stall_minutes: int = 15
+    max_resumes: int = 3
+    default_harness: str = ""
 
 
 class QuorumSection(BaseModel):
@@ -81,7 +116,8 @@ class Config(BaseModel):
     quorum: QuorumSection = Field(default_factory=QuorumSection)
     llm: LLMConfig | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
-    projects: ProjectsConfig = Field(default_factory=ProjectsConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
+    harness: dict[str, HarnessConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
 

@@ -15,6 +15,7 @@ from .config import Config, ConfigError, load_config
 from .messages import MessageBus
 from .projects import ProjectRegistry
 from .supervisor import LOCK_TOUCH_SECONDS
+from .tasks import TaskStore, read_reports, runner_alive
 
 SUPERVISOR_STALE_AFTER = LOCK_TOUCH_SECONDS * 3
 
@@ -75,24 +76,38 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
 def project_rows(home: Path) -> list[dict[str, Any]]:
     registry = ProjectRegistry(home)
     today = fsio.utc_now().date()
+    return [
+        {
+            "slug": p.slug,
+            "name": p.name,
+            "path": p.path,
+            "tags": p.tags,
+            "deadline": p.deadline,
+            "days_left": p.days_left(today),
+            "notes": p.notes,
+        }
+        for p in registry.list()
+    ]
+
+
+def task_rows(home: Path) -> list[dict[str, Any]]:
     rows = []
-    for p in registry.list():
-        status: dict[str, Any] = {}
-        try:
-            status = fsio.read_json(home / "state" / "projects" / p.slug / "status.json")
-        except (OSError, ValueError):
-            pass
+    for t in TaskStore(home).list():
+        last = read_reports(home, t.id, limit=1)
         rows.append(
             {
-                "slug": p.slug,
-                "name": p.name,
-                "path": p.path,
-                "tags": p.tags,
-                "deadline": p.deadline,
-                "days_left": p.days_left(today),
-                "notes": p.notes,
-                "last_activity": status.get("last_activity_at"),
-                "activity_summary": status.get("summary"),
+                "id": t.id,
+                "id_short": t.short_id,
+                "project": t.project,
+                "prompt": t.prompt,
+                "status": t.status,
+                "harness": t.harness,
+                "running": runner_alive(home, t.id),
+                "resumes": t.resumes,
+                "pr_url": t.pr_url,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "last_report": last[-1].get("text", "") if last else "",
             }
         )
     return rows
@@ -129,6 +144,7 @@ def overview(home: Path) -> dict[str, Any]:
         "home": str(home),
         "supervisor": supervisor_status(home),
         "agents": agent_rows(home, config),
+        "tasks": task_rows(home),
         "projects": project_rows(home),
         "board": board_tail(home),
         "actions": recent_actions(home),

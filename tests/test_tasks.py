@@ -1,0 +1,206 @@
+"""Task substrate and runner tests: the store, one full harness run, guidance
+injection, session capture/resume, and the cooperative report channel."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from quorum import fsio, tasks
+from quorum.config import load_config
+from quorum.messages import MessageBus
+from quorum.projects import ProjectRegistry
+from quorum.runner import RunnerError, run_task
+from quorum.tasks import TaskStore
+
+TESTS_BIN = Path(__file__).parent / "bin"
+FAKE = str(TESTS_BIN / "fake_harness.py")
+
+
+def make_repo(tmp_path: Path, name: str = "proj") -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
+            check=True, capture_output=True,
+        )
+    git("init", "-q")
+    (repo / "README.md").write_text("hello")
+    git("add", ".")
+    git("commit", "-qm", "init")
+    return repo
+
+
+def harness_config(home: Path, extra: str = "") -> None:
+    body = (
+        "[tasks]\n"
+        'default_harness = "fake"\n'
+        "[harness.fake]\n"
+        f'start = ["{sys.executable}", "{FAKE}"]\n'
+        f'resume = ["{sys.executable}", "{FAKE}", "--resumed", "{{session}}"]\n'
+        f"{extra}"
+    )
+    (home / "config.toml").write_text(body)
+
+
+@pytest.fixture
+def project(home: Path, tmp_path: Path) -> str:
+    repo = make_repo(tmp_path)
+    ProjectRegistry(home).add(repo, name="proj")
+    return "proj"
+
+
+def transcript_text(home: Path, task_id: str) -> str:
+    lines = []
+    for e in fsio.read_jsonl(tasks.transcript_path(home, task_id)):
+        lines.append(e.get("line") or json.dumps(e.get("event")))
+    return "\n".join(lines)
+
+
+# -- store ----------------------------------------------------------------
+
+
+def test_store_add_resolve_and_prefix(home: Path):
+    store = TaskStore(home)
+    t1 = store.add("proj", "do a thing", "fake")
+    t2 = store.add("proj", "another", "fake")
+    assert store.resolve(t1.id).id == t1.id
+    assert store.resolve(t1.short_id).id == t1.id  # case-insensitive suffix handle
+    assert store.resolve(t2.short_id).id == t2.id  # same-instant tasks stay distinct
+    with pytest.raises(KeyError):
+        store.resolve("zzzzzz")
+    shared = t1.id[:2]  # ULIDs minted the same second share their prefix
+    assert t2.id.startswith(shared)
+    with pytest.raises(ValueError):
+        store.resolve(shared)
+
+
+def test_report_updates_status_and_board(home: Path):
+    store = TaskStore(home)
+    t = store.add("proj", "x", "fake")
+    tasks.report(home, t.short_id, status="executing", text="working on it")
+    tasks.report(home, t.id, status="pr", text="opened", pr_url="https://example.com/pr/1")
+    fresh = store.get(t.id)
+    assert fresh.status == "pr" and fresh.pr_url == "https://example.com/pr/1"
+    assert [r["status"] for r in tasks.read_reports(home, t.id)] == ["executing", "pr"]
+    board = MessageBus(home).read_topic(tasks.BOARD_TOPIC)
+    assert [m.type for m in board] == ["task.executing", "task.pr"]
+
+
+# -- runner ---------------------------------------------------------------
+
+
+def test_run_creates_worktree_and_streams_transcript(home: Path, project: str, tmp_path: Path):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "improve the README", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    fresh = TaskStore(home).get(task.id)
+    workdir = Path(fresh.workdir)
+    assert workdir == tasks.worktree_path(home, task.id) and workdir.is_dir()
+    branches = subprocess.run(
+        ["git", "-C", str(tmp_path / "proj"), "branch", "--list", f"quorum/{task.short_id}"],
+        capture_output=True, text=True,
+    ).stdout
+    assert f"quorum/{task.short_id}" in branches
+
+    text = transcript_text(home, task.id)
+    assert f"Task ID: {task.short_id}" in text  # preamble reached the harness
+    assert "improve the README" in text  # so did the task prompt
+    assert f"CWD| {workdir}" in text  # and it ran in the worktree
+    assert fresh.session == "sess-fake-123"  # captured from the JSON stream
+    assert len(fresh.runs) == 1 and fresh.runs[0].exit_code == 0
+
+
+def test_guidance_is_claimed_and_injected(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    bus = MessageBus(home)
+    bus.send("monitor", tasks.inbox_name(task.id), type="nudge", text="try the other approach")
+
+    run_task(home, config, task.id)
+
+    assert "try the other approach" in transcript_text(home, task.id)
+    assert fsio.sorted_entries(bus.inbox_dir / tasks.inbox_name(task.id) / "new") == []
+
+
+def test_resume_template_used_once_session_known(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    run_task(home, config, task.id)  # captures the session id
+    run_task(home, config, task.id)
+
+    entries = fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    argvs = [e["event"]["argv"] for e in entries if "event" in e and "argv" in e.get("event", {})]
+    assert "--resumed" not in argvs[0]
+    assert argvs[1][0] == "--resumed" and argvs[1][1] == "sess-fake-123"
+
+
+def test_harness_reports_back_through_the_cli(home: Path, project: str, monkeypatch):
+    """The cooperative return channel end to end: the harness subprocess calls
+    `python -m quorum task report` against QUORUM_HOME and the task's status,
+    reports file, and board all reflect it."""
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "report")
+    monkeypatch.setenv("FAKE_HARNESS_PR_URL", "https://example.com/pr/9")
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "done"
+    assert fresh.pr_url == "https://example.com/pr/9"
+    assert any(m.type == "task.done" for m in MessageBus(home).read_topic(tasks.BOARD_TOPIC))
+
+
+def test_failing_harness_records_exit_code_and_no_status_change(home: Path, project: str, monkeypatch):
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "fail")
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    assert run_task(home, config, task.id) == 3
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "queued"  # the runner never sets status itself
+    assert fresh.runs[0].exit_code == 3
+
+
+def test_no_worktree_runs_in_project_dir(home: Path, project: str, tmp_path: Path):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake", use_worktree=False)
+    run_task(home, config, task.id)
+    assert f"CWD| {(tmp_path / 'proj').resolve()}" in transcript_text(home, task.id)
+
+
+def test_missing_harness_and_unknown_task_fail_loud(home: Path, project: str):
+    (home / "config.toml").write_text("")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "ghost")
+    with pytest.raises(RunnerError, match="no \\[harness.ghost\\]"):
+        run_task(home, config, task.id)
+    with pytest.raises(RunnerError, match="no task matching"):
+        run_task(home, config, "zzzz")
+
+
+def test_second_concurrent_run_is_refused(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    lock = tasks.runner_lock_path(home, task.id)
+    # a live *foreign* pid: our own would read as a stale same-process lock
+    lock.write_text('{"pid": 1}\n')
+    try:
+        with pytest.raises(RunnerError, match="already has a live run"):
+            run_task(home, config, task.id)
+    finally:
+        lock.unlink()

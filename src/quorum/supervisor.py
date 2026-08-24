@@ -25,13 +25,14 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import fsio
-from .agent import Agent, AgentContext, write_heartbeat
+from .agent import Agent, AgentContext, tick_lock_path, write_heartbeat
 from .config import Config, parse_schedule
 from .messages import MessageBus
 from .registry import resolve
 
 MAX_CONSECUTIVE_FAILURES = 5
 LOCK_TOUCH_SECONDS = 60
+CONTROL_POLL_SECONDS = 15
 
 log = logging.getLogger("quorum.supervisor")
 
@@ -88,6 +89,13 @@ class Supervisor:
                 trigger="interval",
                 seconds=LOCK_TOUCH_SECONDS,
             )
+            self.scheduler.add_job(
+                self._control,
+                id="_control",
+                trigger="interval",
+                seconds=CONTROL_POLL_SECONDS,
+                coalesce=True,
+            )
             self.scheduler.start()
             for name, err in self.errors.items():
                 self.bus.post(
@@ -137,6 +145,20 @@ class Supervisor:
     def run_agent_tick(self, name: str) -> None:
         """Crash-isolating wrapper around one agent tick."""
         agent = self.agents[name]
+        lock = tick_lock_path(self.home, name)
+        try:
+            fsio.acquire_pid_lock(lock, meta={"role": "tick", "agent": name})
+        except fsio.LockError:
+            # someone is ticking this agent by hand (`quorum agent run-once`);
+            # skipping is safe — ticks are idempotent and the schedule returns
+            log.info("agent %s tick skipped: tick lock held elsewhere", name)
+            return
+        try:
+            self._run_agent_tick_locked(name, agent)
+        finally:
+            fsio.release_pid_lock(lock)
+
+    def _run_agent_tick_locked(self, name: str, agent: Agent) -> None:
         started = fsio.utc_now()
         self._write_heartbeat(name, status="running", last_start=fsio.iso(started))
         try:
@@ -145,7 +167,7 @@ class Supervisor:
             err = traceback.format_exc()
             log.error("agent %s tick failed:\n%s", name, err)
             self._failures[name] = self._failures.get(name, 0) + 1
-            self._write_heartbeat(
+            self._finish_heartbeat(
                 name,
                 status="error",
                 last_start=fsio.iso(started),
@@ -165,13 +187,30 @@ class Supervisor:
             return
         self._failures[name] = 0
         ended = fsio.utc_now()
-        self._write_heartbeat(
+        self._finish_heartbeat(
             name,
             status="idle",
             last_start=fsio.iso(started),
             last_end=fsio.iso(ended),
             duration_ms=int((ended - started).total_seconds() * 1000),
         )
+
+    def _finish_heartbeat(self, name: str, **fields) -> None:
+        """End-of-tick heartbeat write that respects an external pause.
+
+        A `quorum agent pause` (or auto-pause) that lands while a tick is in
+        flight writes status="paused"; the tick's completion write must not
+        clobber that back to idle/error, or every dashboard would show a
+        paused agent as healthy forever (the paused job never runs again to
+        correct it). Timing fields still land either way.
+        """
+        try:
+            current = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
+        except (OSError, ValueError):
+            current = {}
+        if current.get("status") == "paused":
+            fields.pop("status", None)
+        self._write_heartbeat(name, **fields)
 
     def _pause_agent(self, name: str) -> None:
         try:
@@ -215,6 +254,41 @@ class Supervisor:
         current.pop("status", None)
         current.pop("error", None)
         fsio.atomic_write_json(path, current)
+
+    # -- control channel ------------------------------------------------------
+
+    def _control(self) -> None:
+        """Apply `quorum agent pause|resume|run-now` commands from the
+        supervisor's inbox. This is the only runtime lever that doesn't
+        require editing config.toml and restarting."""
+        for claimed in self.bus.claim("supervisor"):
+            msg = claimed.message
+            name = (msg.payload or {}).get("agent", "")
+            try:
+                self._apply_control(msg.type, name)
+            except Exception:
+                log.error("control command %s(%s) failed:\n%s", msg.type, name, traceback.format_exc())
+            claimed.ack()
+
+    def _apply_control(self, command: str, name: str) -> None:
+        job = self.scheduler.get_job(name)
+        if job is None:
+            log.warning("control command %s for unknown/unscheduled agent %r", command, name)
+            return
+        if command == "agent.pause":
+            job.pause()
+            self._write_heartbeat(name, status="paused", error="paused by user")
+            log.info("agent %s paused by user", name)
+        elif command == "agent.resume":
+            self._failures[name] = 0
+            job.resume()
+            self._write_heartbeat(name, status="idle", error=None)
+            log.info("agent %s resumed by user", name)
+        elif command == "agent.run-now":
+            job.modify(next_run_time=fsio.utc_now())
+            log.info("agent %s scheduled to run now", name)
+        else:
+            log.warning("unknown control command %r", command)
 
     # -- janitor -------------------------------------------------------------
 

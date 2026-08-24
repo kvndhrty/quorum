@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uv sync --all-extras            # dev setup (extras: web, tui, nono)
 uv run pytest                   # full suite
-uv run pytest tests/test_steward.py::test_apply_mode_moves_with_undo_and_collision
+uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs
 uv run pytest -m nono_integration -v      # real kernel sandbox tests (need [nono] + Landlock/Seatbelt)
 uv run ruff check .             # lint (line-length 100; E4,E7,E9,F,I,UP,B)
@@ -18,20 +18,27 @@ uv run quorum <cmd>             # run the CLI from a checkout
 lacks Landlock/Seatbelt; a dedicated CI job asserts support so it can never silently
 skip there. `test_web.py` needs the `web` extra (it `importorskip`s FastAPI).
 
-## Architecture
+## What quorum is
+
+Bring-your-own-harness orchestration for long-running coding tasks: the user
+registers projects, queues tasks in plain English, and a configured harness CLI
+(claude / codex / opencode / anything) executes each task as a sequence of *runs*
+in a per-task git worktree. Quorum ships the manager (a monitor agent) and the
+comms substrate (file-based board + inboxes), **not** prescriptive worker agents.
 
 Read `docs/architecture.md` first — it is the design record. The three invariants
 below govern nearly every change:
 
 1. **No privileged infrastructure.** `quorum up` is one ordinary foreground process
-   hosting an APScheduler `BackgroundScheduler`. No cron, systemd, daemonization, root,
-   or open ports (the web dashboard is opt-in, localhost-only).
+   hosting an APScheduler `BackgroundScheduler`; task runs are detached child
+   processes (they survive supervisor restarts). No cron, systemd, daemonization,
+   root, or open ports (the web dashboard is opt-in, localhost-only).
 2. **All state is plain files** under `QUORUM_HOME` (resolution: `--home` > `$QUORUM_HOME`
    > `./quorum-home` if present > `~/.quorum`). No database. Adding new durable state
    means adding a file layout, documented in `docs/architecture.md`.
-3. **Degrade gracefully.** LLM, dashboards, and sandbox are all optional. Every
-   LLM-using agent must have deterministic no-LLM behavior; every view must work with
-   the supervisor stopped.
+3. **Degrade gracefully.** LLM, dashboards, and sandbox are all optional. The monitor
+   works without an LLM; every view works with the supervisor stopped; a harness that
+   ignores the report protocol is still monitored passively.
 
 ### Layers
 
@@ -42,55 +49,83 @@ below govern nearly every change:
   `open(...,'w')`** — readers must never observe a partial file.
 - `messages.py` — one `Message` schema over two channels: an append-only board
   (`messages/board/<topic>/`, filenames `<utc-compact>-<ULID>.json` so lexicographic
-  order is chronological and no index exists) and maildir-style inboxes
-  (`new/` → `cur/` claimed by `os.rename`, so exactly one claimant wins). Board consumers
-  hold their own cursor in private state; the board itself carries no consumption marks.
-  Exactly one of `to`/`topic` is set, and `payload.text` always exists so any reader can
-  render any message.
+  order is chronological) and maildir-style inboxes (`new/` → `cur/` claimed by
+  `os.rename`, so exactly one claimant wins). Task guidance (`task-<id>` inboxes) and
+  the supervisor control channel both ride this; no new transports.
+- `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
+  `report()` (the harness's return channel), path helpers shared by runner/monitor/
+  views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`
+  (`done`/`blocked`/`cancelled`) mean anything to quorum. `short_id` is the ULID's
+  random *tail* (the head is a same-instant-shared timestamp); `resolve()` accepts
+  unique prefixes or suffixes.
+- `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
+  `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
+  (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
+  `[harness.<name>]` argv template → stream stdout to `transcript.jsonl`, capturing
+  `session_id`. The runner **never sets task status**. `launch_detached` spawns
+  `python -m quorum task run` in a new session.
+- `agents/monitor.py` — the only builtin: launches queued tasks (with a bootstrap
+  grace window), warns + nudges on stalls, resumes dead runs up to `max_resumes`,
+  then marks `blocked`. Nudges go into the task inbox; LLM-drafted when configured,
+  canned otherwise.
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single
   seam through which agents touch the world: `ctx.bus`, `ctx.projects`, `ctx.llm`,
   `ctx.prompt()`, `ctx.load_state()/save_state()`, `ctx.log_action()`, `ctx.now()`.
   Agents take a clock as a callable — use `ctx.now()`, never `datetime.now()`.
+  `tick_lock_path` is held by both the supervisor wrapper and `agent run-once`.
 - `supervisor.py` — one scheduler job per enabled agent, wrapped by `run_agent_tick`
-  for crash isolation: heartbeat files, an `agent.error` post to the `system` topic, and
-  auto-pause after `MAX_CONSECUTIVE_FAILURES` (5). An hourly janitor archives expired
-  board messages and returns crash-orphaned `cur/` claims to `new/`.
+  for crash isolation: heartbeat files, an `agent.error` post to the `system` topic,
+  auto-pause after `MAX_CONSECUTIVE_FAILURES` (5). A 15s `_control` job claims the
+  `supervisor` inbox (`quorum agent pause|resume|run-now`). An hourly janitor archives
+  expired board messages and returns crash-orphaned `cur/` claims to `new/`.
 - `views.py` — the shared read-model assembled purely from files; `quorum status`, the
-  web app, and the TUI are all pure readers of it.
-- `registry.py` — resolves an agent `type` string: builtin short name, else `module:Class`
-  with `QUORUM_HOME/plugins` prepended to `sys.path`. Third-party agents need no packaging.
-- `llm/` — `LLMBackend` is a one-method protocol. `LLMClient.complete()` **never raises**;
-  `None` means "no LLM today". No module outside `llm/` may assume the `cli` backend
-  (`proxy` is a reserved seam for a future credential-injecting localhost proxy).
+  web app, and the TUI are all pure readers of it (the TUI/web's one write affordance
+  is nudging a task, via the same bus call as the CLI).
+- `registry.py` — resolves an agent `type` string: builtin short name (only `monitor`),
+  else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
+- `llm/` — `LLMBackend` is a one-method protocol for quorum's *own* small completions
+  (monitor nudges) — task harnesses are not LLM backends. `LLMClient.complete()`
+  **never raises**; `None` means "no LLM today". No module outside `llm/` may assume
+  the `cli` backend (`proxy` is a reserved seam).
 - `sandbox.py` — the *only* module that imports `nono_py`, always lazily and inside
-  functions. It **fails closed**: if sandboxing was requested and nono-py is absent,
-  LLM subprocesses do not run at all rather than running unsandboxed.
+  functions. It **fails closed**. `build_capabilities` (supervisor/LLM) blocks network
+  unless `[llm]` is set; `build_task_capabilities` (per-run) grants the worktree, the
+  project's `.git` (shared object store), and `[sandbox].task_read/task_write` extras,
+  with network open.
 - `config.py` — `config.toml` is user-owned and **quorum never writes it back**; machine
-  state goes to JSON. Schedules are validated by regex and translated to APScheduler
-  trigger kwargs by `parse_schedule`.
+  state goes to JSON. `[harness.<name>]` tables are argv templates; `[tasks]` holds
+  worktree/stall/resume defaults. Schedules are validated by regex and translated to
+  APScheduler trigger kwargs by `parse_schedule`.
 - `projects.py` — `projects/<slug>.json` is canonical, but a `.quorum.toml` marker inside
-  the project directory merges over it at read time. `ProjectRegistry` is the single merge
-  point; agents and views must go through it, and must only ever *read* project dirs.
+  the project directory merges over it at read time. Agents and views must go through
+  `ProjectRegistry` and must only ever *read* project dirs — task writes happen in
+  worktrees.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
-  `default_prompts/`; deleting a file restores the default. `format_map` with a
-  missing-key-preserving dict, so stray braces in data don't explode.
+  `default_prompts/` (`task-preamble`, `monitor-nudge`); deleting a file restores the
+  default. `format_map` with a missing-key-preserving dict.
+- `examples/steward.py` — the one shipped example plugin (file organizer with undo),
+  loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
+  true. Not a builtin; users copy it into `plugins/`.
 
 ### Adding an agent
 
-Builtins are registered in `agents/__init__.py::BUILTIN_NAMES` (lazy import by dotted
-`module.Class`) and usually get a stanza in `home.py::DEFAULT_CONFIG`. `docs/writing-agents.md`
-is the user-facing contract and doubles as the checklist: idempotent `tick()`, dedupe
-repeat announcements through `load_state()/save_state()`, raising is safe.
+Builtins live in `agents/__init__.py::BUILTIN_NAMES` (currently just `monitor`) —
+prefer plugins unless quorum itself needs the behavior. The user-facing contract is
+`docs/guide.md#writing-your-own-agents`: idempotent `tick()`, dedupe repeat
+announcements through `load_state()/save_state()`, raising is safe.
 
 ### Testing idioms
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME` in `tmp_path`, exported via
-`$QUORUM_HOME`), `clock` (a `FakeClock` passed as `AgentContext(now=...)`), and `fake_llm`
-(argv for `tests/bin/fake_llm.py`, whose behavior is driven by `FAKE_LLM_MODE` /
-`FAKE_LLM_OUTPUT`). Agents are tested by constructing an `AgentContext` directly — no
-scheduler. `test_sandbox.py` injects a fake `nono_py` module via `sys.modules` so the glue
-is pinned down installation-independently; `test_nono_integration.py` exercises the real
-kernel enforcement.
+`$QUORUM_HOME`), `clock` (a `FakeClock` passed as `AgentContext(now=...)`), and `fake_llm`.
+`tests/bin/fake_harness.py` is a fake coding harness (echoes argv/prompt, emits a
+`session_id`, `report` mode calls `python -m quorum task report` — the full cooperative
+loop). Runner tests build real git repos; monitor tests monkeypatch
+`quorum.runner.launch_detached` and fabricate locks/mtimes (a "live" runner is a lock
+holding pid 1 — never `os.getpid()`, which same-process lock takeover treats as stale).
+`test_sandbox.py` injects a fake `nono_py` via `sys.modules`; `test_nono_integration.py`
+exercises real kernel enforcement.
 
-Docs are part of the deliverable here: a change to the file layout, message protocol, or
-sandbox modes should update `docs/architecture.md` (or `docs/nono.md`) in the same commit.
+Docs are part of the deliverable here: a change to the file layout, message protocol,
+task/run lifecycle, or sandbox modes should update `docs/architecture.md` (and the
+user-facing `docs/guide.md`) in the same commit.
