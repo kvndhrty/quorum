@@ -46,9 +46,15 @@ Tell quorum how to invoke your harness (uncomment in `~/.quorum/config.toml`):
 default_harness = "claude"
 
 [harness.claude]
-start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose"]
-resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose"]
+start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
+resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
 ```
+
+(Runs are unattended, so the harness needs permission to act without asking —
+the scoped `--allowedTools` list covers editing, git, the PR, and quorum's
+progress protocol, without a blanket permission bypass.)
 
 Register a repo and queue work:
 

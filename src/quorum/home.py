@@ -30,10 +30,17 @@ default_harness = ""      # e.g. "claude" — used when `quorum task add` has no
 # in the current directory. "{prompt}" and "{session}" are substituted; a
 # template without "{prompt}" gets the prompt appended as the last argument.
 # `resume` is optional — quorum captures a session_id from JSON output when
-# the harness emits one. See docs/guide.md for autonomy/permission flags.
+# the harness emits one.
+#
+# Runs are unattended, so the harness needs permission to act without asking —
+# otherwise it stalls silently on its first denied tool call. Prefer a scoped
+# allowlist covering the report protocol (Bash(quorum:*)) and the work itself
+# over blanket permission bypasses. See docs/guide.md#harnesses.
 #[harness.claude]
-#start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose"]
-#resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose"]
+#start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
+#          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
+#resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
+#          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
 
 #[harness.codex]
 #start = ["codex", "exec", "{prompt}"]
