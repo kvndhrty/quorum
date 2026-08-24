@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,3 +59,42 @@ def test_pid_lock_conflict_and_stale_takeover(tmp_path: Path):
     fsio.acquire_pid_lock(lock)  # takes over
     fsio.release_pid_lock(lock)
     assert not lock.exists()
+
+
+def test_ulid_is_monotonic_within_one_millisecond():
+    """Board filenames carry only second resolution, so ULIDs are what order
+    two messages posted in the same tick. Redrawing the tail would make that a
+    coin flip."""
+    instant = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
+    ids = [fsio.ulid(instant) for _ in range(50)]
+    assert ids == sorted(ids)
+    assert len(set(ids)) == len(ids)
+    assert {len(i) for i in ids} == {26}
+
+
+def test_ulid_orders_across_instants_and_leaves_a_backwards_clock_alone():
+    first = fsio.ulid(datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC))
+    later = fsio.ulid(datetime(2026, 8, 24, 12, 0, 1, tzinfo=UTC))
+    assert later > first
+    # `now` is injectable and homes are independent, so an earlier timestamp
+    # must not be silently dragged forward to preserve global monotonicity.
+    assert fsio.ulid(datetime(2020, 1, 1, tzinfo=UTC)) < first
+
+
+def test_ulid_is_unique_across_threads_at_one_instant():
+    """The supervisor mints IDs from several scheduler threads at once."""
+    instant = datetime(2026, 8, 24, 12, 0, 0, tzinfo=UTC)
+    minted: list[str] = []
+    lock = threading.Lock()
+
+    def work() -> None:
+        got = [fsio.ulid(instant) for _ in range(200)]
+        with lock:
+            minted.extend(got)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(minted)) == 1600

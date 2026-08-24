@@ -76,7 +76,6 @@ def test_flip_to_apply_acts_on_already_proposed_file(home: Path, clock, tmp_path
     make_steward(home, clock, {"watch": [str(watch)], "apply": False, "rules": rules}).tick()
     assert [m.type for m in topic(home)] == ["steward.proposal"]
 
-    clock.advance(minutes=1)  # distinct timestamp so board filename order is deterministic
     make_steward(home, clock, {"watch": [str(watch)], "apply": True, "rules": rules}).tick()
 
     assert not (watch / "paper.pdf").exists()
@@ -197,7 +196,7 @@ def test_failed_move_is_retried_then_abandoned(home: Path, clock, tmp_path: Path
     monkeypatch.setattr("quorum.agents.steward.shutil.move", boom)
 
     for _ in range(6):  # well past the budget
-        clock.advance(hours=1)  # distinct timestamps keep board order deterministic
+        clock.advance(hours=1)  # an hourly agent really does tick an hour apart
         s.tick()
 
     errors = [m for m in topic(home) if m.type == "steward.error"]

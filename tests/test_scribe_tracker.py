@@ -47,7 +47,6 @@ def test_tracker_mtime_scan_and_stale_transitions(home: Path, clock, tmp_path: P
     # touch the project (mtime aligned to the fake clock) -> active again
     import os
 
-    clock.advance(minutes=1)  # distinct timestamp so board filename order is deterministic
     (pdir / "new.txt").write_text("fresh")
     os.utime(pdir / "new.txt", (clock().timestamp(), clock().timestamp()))
     tracker.tick()
