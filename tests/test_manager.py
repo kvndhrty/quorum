@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from quorum import fsio, tasks
+from quorum import fsio, runner, tasks
 from quorum.agent import AgentContext
 from quorum.agents.manager import Manager, build_digest, journal_path, transcript_path
 from quorum.config import load_config
@@ -27,7 +27,11 @@ FAKE = str(Path(__file__).parent / "bin" / "fake_harness.py")
 
 
 def write_config(
-    home: Path, manager_mode: str, extra_settings: str = "", run_timeout_seconds: int = 60
+    home: Path,
+    manager_mode: str,
+    extra_settings: str = "",
+    run_timeout_seconds: int = 60,
+    mgr_extra: str = "",
 ) -> None:
     (home / "config.toml").write_text(
         "[tasks]\n"
@@ -38,6 +42,7 @@ def write_config(
         "[harness.mgr]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
         f'env = {{ FAKE_HARNESS_MODE = "{manager_mode}" }}\n'
+        f"{mgr_extra}"
         "[agents.manager]\n"
         'type = "manager"\n'
         'schedule = "every 5m"\n'
@@ -110,6 +115,27 @@ def test_full_loop_launch_nudge_journal_and_directives(home: Path, clock, projec
     nudges = fsio.sorted_entries(bus.inbox_dir / tasks.inbox_name(task.id) / "new")
     assert len(nudges) == 1
     assert fsio.read_json(nudges[0])["from"] == "manager"
+
+
+def test_mid_run_directive_reaches_a_live_manager_run(
+    home: Path, clock, project: str, monkeypatch
+):
+    """`quorum manager tell` while a tick's harness is in flight: the pump
+    forwards the directive as a user turn instead of holding it for the next
+    tick (the fake posts the tell itself mid-run, for determinism)."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_INJECT_POST", "tell")
+    write_config(home, "inject", mgr_extra='inject = "stream-json"\n')
+    TaskStore(home).add(project, "x", "tasktool")  # something active, so the tick runs
+
+    make_manager(home, clock).tick()
+
+    raw = transcript_path(home).read_text()
+    assert "pause new launches until tests pass" in raw  # delivered into the live run
+    assert '"role": "user"' in raw  # ...as a stream-json user turn
+    bus = MessageBus(home)
+    assert fsio.sorted_entries(bus.inbox_dir / "manager" / "new") == []
+    assert fsio.sorted_entries(bus.inbox_dir / "manager" / "cur") == []
 
 
 def test_action_cap_refuses_and_bounds_the_journal(home: Path, clock, project: str):

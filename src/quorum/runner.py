@@ -11,8 +11,14 @@ A run is the unit of control for a generic harness. The runner:
 4. composes the prompt (preamble teaching the report/inbox protocol + the
    task prompt + guidance) and spawns the configured harness argv,
 5. streams stdout into `transcript.jsonl` line by line, capturing a
-   `session_id` if the harness emits one (enables `resume` templates),
+   `session_id` (or codex `thread_id`) if the harness emits one (enables
+   `resume` templates),
 6. records the run's exit in task.json and releases the lock.
+
+A harness with `inject = "stream-json"` additionally gets guidance *during*
+the run: the runner holds its stdin open and a `GuidancePump` forwards inbox
+messages as stream-json user turns, closing stdin at the first idle turn
+boundary so the run still ends on its own.
 
 The runner never sets a task's status: status is whatever the harness last
 reported via `quorum task report`. A run that exits without reporting is the
@@ -29,12 +35,13 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from . import fsio, prompts
 from .actor import strip_actor_env
 from .config import Config, HarnessConfig
-from .messages import MessageBus
+from .messages import Message, MessageBus
 from .projects import ProjectRegistry
 from .tasks import (
     Task,
@@ -50,6 +57,108 @@ from .tasks import (
 
 class RunnerError(RuntimeError):
     """A run could not start; the message is fit to show a CLI user."""
+
+
+INJECT_STREAM_JSON = "stream-json"
+
+# How often the guidance pump checks the inbox during a live run. Module-level
+# so tests can shrink it; nudges are human-paced, so seconds are fine.
+GUIDANCE_POLL_SECONDS = 2.0
+
+
+class GuidancePump:
+    """Forwards inbox messages into a live harness over stream-json stdin.
+
+    For a harness with `inject = "stream-json"` the runner spawns it with a
+    pipe on stdin and holds the pipe open; a background thread polls the
+    given inbox and writes each claimed message as a stream-json user turn
+    (`{"type": "user", "message": {...}}`), which the harness queues and
+    picks up at its next turn boundary. This is the Claude Code
+    `--input-format stream-json` protocol; the harness's argv template must
+    include the matching flags.
+
+    A stream-json harness runs until stdin closes, so ending the run is the
+    pump's job too. The protocol emits one `result` event per completed user
+    turn (the argv prompt is the first). The pump counts results against
+    deliveries and closes stdin once every delivered turn has its result and
+    nothing is waiting in the inbox — so a run naturally extends while
+    guidance keeps arriving and ends at the first idle turn boundary.
+    Anything arriving after close stays in `new/` for the next run.
+    """
+
+    def __init__(self, home: Path, inbox: str, stdin, *, poll_seconds: float | None = None):
+        self._bus = MessageBus(home)
+        self._inbox = inbox
+        self._new_dir = self._bus.inbox_dir / inbox / "new"
+        self._stdin = stdin
+        self._poll = GUIDANCE_POLL_SECONDS if poll_seconds is None else poll_seconds
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._closed = False
+        self._delivered = 0
+        self._results = 0
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def on_event(self, event: object) -> None:
+        """Called for every parsed stdout event; watches for turn boundaries."""
+        if not (isinstance(event, dict) and event.get("type") == "result"):
+            return
+        with self._lock:
+            self._results += 1
+            self._maybe_close_locked()
+
+    def stop(self) -> None:
+        """The run is over (or being torn down): stop polling, close stdin."""
+        self._stop.set()
+        self._thread.join(timeout=5)
+        with self._lock:
+            self._close_locked()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._deliver_pending()
+            self._stop.wait(self._poll)
+
+    def _deliver_pending(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            for claimed in self._bus.claim(self._inbox):
+                turn = {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": guidance_note(claimed.message)}],
+                    },
+                }
+                try:
+                    self._stdin.write(json.dumps(turn) + "\n")
+                    self._stdin.flush()
+                except (OSError, ValueError):
+                    claimed.reject()  # harness is gone; back to new/ for the next run
+                    self._close_locked()
+                    return
+                self._delivered += 1
+                claimed.ack()
+
+    def _maybe_close_locked(self) -> None:
+        if self._closed:
+            return
+        answered = self._results >= 1 + self._delivered
+        if answered and not fsio.sorted_entries(self._new_dir):
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        if not self._closed:
+            self._closed = True
+            try:
+                self._stdin.close()
+            except OSError:
+                pass
+        self._stop.set()
 
 
 def resolve_harness(config: Config, name: str) -> HarnessConfig:
@@ -95,12 +204,16 @@ def prepare_workdir(home: Path, task: Task, store: TaskStore) -> Path:
     return workdir
 
 
+def guidance_note(msg: Message) -> str:
+    """One inbox message rendered as a line of guidance for the harness."""
+    return f"[from {msg.sender} at {msg.created_at}] {msg.payload.get('text', '')}"
+
+
 def claim_guidance(home: Path, task_id: str) -> list[str]:
     """Drain the task's inbox; each message becomes a line for the prompt."""
     notes = []
     for claimed in MessageBus(home).claim(inbox_name(task_id)):
-        msg = claimed.message
-        notes.append(f"[from {msg.sender} at {msg.created_at}] {msg.payload.get('text', '')}")
+        notes.append(guidance_note(claimed.message))
         claimed.ack()
     return notes
 
@@ -196,24 +309,35 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         proc = subprocess.Popen(
             argv,
             cwd=str(workdir),
+            stdin=subprocess.PIPE if harness.inject == INJECT_STREAM_JSON else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
         )
+        pump = None
+        if harness.inject == INJECT_STREAM_JSON:
+            pump = GuidancePump(home, inbox_name(task.id), proc.stdin)
+            pump.start()
         session = task.session
 
-        def capture_session(event: object) -> None:
+        def on_event(event: object) -> None:
             nonlocal session
             if session is None and isinstance(event, dict):
                 found = _find_session_id(event)
                 if found:
                     session = found
                     store.update(task.id, session=found)
+            if pump is not None:
+                pump.on_event(event)
 
-        stream_transcript(proc, transcript_path(home, task.id), on_event=capture_session)
-        exit_code = proc.wait()
+        try:
+            stream_transcript(proc, transcript_path(home, task.id), on_event=on_event)
+            exit_code = proc.wait()
+        finally:
+            if pump is not None:
+                pump.stop()
 
         run = TaskRun(
             started_at=fsio.iso(started), ended_at=fsio.iso(fsio.utc_now()), exit_code=exit_code
@@ -251,7 +375,9 @@ def launch_detached(home: Path, task_id: str) -> int:
 
 
 def _find_session_id(event: dict) -> str | None:
-    for key in ("session_id", "sessionId"):
+    # claude emits session_id; codex `exec --json` calls it thread_id
+    # (first event: {"type": "thread.started", "thread_id": ...}).
+    for key in ("session_id", "sessionId", "thread_id", "threadId"):
         value = event.get(key)
         if isinstance(value, str) and value:
             return value

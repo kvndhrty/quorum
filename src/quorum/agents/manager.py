@@ -32,7 +32,13 @@ from pathlib import Path
 from .. import fsio, tasks
 from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path, manager_env
 from ..agent import Agent
-from ..runner import build_harness_argv, resolve_harness, stream_transcript
+from ..runner import (
+    INJECT_STREAM_JSON,
+    GuidancePump,
+    build_harness_argv,
+    resolve_harness,
+    stream_transcript,
+)
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
@@ -171,17 +177,29 @@ class Manager(Agent):
         proc = subprocess.Popen(
             argv,
             cwd=str(self.ctx.home),
+            stdin=subprocess.PIPE if harness.inject == INJECT_STREAM_JSON else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
         )
+        # An inject-capable manager harness can be steered while a tick is in
+        # flight: `quorum manager tell` lands in the manager inbox and the
+        # pump forwards it as a user turn instead of waiting for the next tick.
+        pump = None
+        if harness.inject == INJECT_STREAM_JSON:
+            pump = GuidancePump(self.ctx.home, "manager", proc.stdin)
+            pump.start()
 
         reader = threading.Thread(
             target=stream_transcript,
             args=(proc, transcript),
-            kwargs={"extra": {"run": run_id}, "now": self.ctx.now},
+            kwargs={
+                "extra": {"run": run_id},
+                "now": self.ctx.now,
+                "on_event": pump.on_event if pump is not None else None,
+            },
             daemon=True,
         )
         reader.start()
@@ -194,6 +212,9 @@ class Manager(Agent):
             raise RuntimeError(
                 f"manager harness run {run_id} timed out after {int(timeout)}s and was killed"
             ) from None
+        finally:
+            if pump is not None:
+                pump.stop()
         reader.join(5)
         if code != 0:
             raise RuntimeError(f"manager harness run {run_id} exited {code}")

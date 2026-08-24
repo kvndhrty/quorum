@@ -71,13 +71,15 @@ gets the prompt appended as the final argument.
 
 ```toml
 [harness.claude]
-start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
+start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
           "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
-resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
+resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
           "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
+inject = "stream-json"   # deliver nudges into a *running* session (see below)
 
 [harness.codex]
-start = ["codex", "exec", "{prompt}"]
+start  = ["codex", "exec", "--json", "{prompt}"]
+resume = ["codex", "exec", "resume", "{session}", "--json", "{prompt}"]
 
 [harness.opencode]
 start = ["opencode", "run", "{prompt}"]
@@ -90,11 +92,24 @@ env   = { MY_AGENT_MODE = "headless" }
 Notes:
 
 - **Sessions.** Quorum scans the harness's stdout for JSON containing a
-  `session_id` and stores it on the task. When the harness has a `resume`
-  template and a session is known, later runs use it — the agent continues
-  its own conversation. Without either, every run starts fresh; that still
-  works, because the worktree (and everything the previous run wrote there)
-  persists between runs.
+  `session_id` (claude) or `thread_id` (codex `exec --json`) and stores it
+  on the task. When the harness has a `resume` template and a session is
+  known, later runs use it — the agent continues its own conversation.
+  Without either, every run starts fresh; that still works, because the
+  worktree (and everything the previous run wrote there) persists between
+  runs.
+- **Mid-run nudges.** By default, `quorum task nudge` reaches the harness
+  at the start of its *next* run. A harness that speaks the Claude Code
+  stream-json protocol can do better: set `inject = "stream-json"` and pair
+  `--input-format stream-json` with `--output-format stream-json` in its
+  templates (both matter — the runner writes nudges to the harness's stdin
+  as user turns, and it watches stdout `result` events to know when the
+  harness is idle so it can end the run). A nudge sent while the run is
+  live then reaches the agent at its next turn boundary, in the same
+  session, no new run needed; the run ends on its own at the first idle
+  turn with an empty inbox. Don't set `inject` without the flags: a
+  harness that never emits stream-json `result` events will wait on stdin
+  indefinitely.
 - **Autonomy flags.** Runs are unattended: a harness that stops to ask for
   interactive permission stalls silently on its first denied tool call, and
   the manager will eventually poke and resume it to no effect. Grant
@@ -190,6 +205,11 @@ journal:
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
 ```
+
+A `tell` is normally read at the start of the next tick. If the manager's
+harness sets `inject = "stream-json"` (see [Harnesses](#harnesses)), a
+directive sent while a tick's run is in flight is delivered into that run
+as a user turn instead of waiting.
 
 Two things bound a bad run, neither of which second-guesses a decision: a
 per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
