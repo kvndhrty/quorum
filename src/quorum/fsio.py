@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import unicodedata
 from datetime import UTC, datetime
@@ -23,18 +24,54 @@ from typing import Any
 
 # Crockford base32, as used by ULID.
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_TAIL_BITS = 80
+_TAIL_MAX = (1 << _TAIL_BITS) - 1
+
+# Monotonic-ULID state, guarded because the supervisor mints IDs from several
+# scheduler threads at once.
+_ulid_lock = threading.Lock()
+_ulid_last: tuple[int, int] | None = None  # (timestamp_ms, tail)
+
+
+def _b32(value: int, length: int) -> str:
+    chars = []
+    for _ in range(length):
+        chars.append(_B32[value & 0x1F])
+        value >>= 5
+    return "".join(reversed(chars))
 
 
 def ulid(now: datetime | None = None) -> str:
-    """A 26-char ULID: 48-bit ms timestamp + 80 random bits, lexicographically sortable."""
+    """A 26-char ULID: 48-bit ms timestamp + 80 random bits, lexicographically sortable.
+
+    Monotonic within a millisecond: rather than drawing a fresh tail, a ULID
+    sharing its predecessor's timestamp increments it. Ordering is what the
+    message bus actually relies on — board filenames carry only second
+    resolution, so two messages posted in the same tick would otherwise sort by
+    coin flip, and a consumer replaying by filename would see them in an order
+    the sender never chose. Independent random tails still separate ULIDs
+    minted by different processes in the same millisecond.
+
+    A backwards clock is deliberately not clamped: `now` is injectable, homes
+    are independent, and quietly rewriting a caller's timestamp would corrupt
+    the correspondence between an ID and the `created_at` beside it. Ordering
+    across a backwards step is ambiguous anyway, and the filename's own
+    timestamp prefix — not the ULID — is what sorts a topic.
+    """
     ts = int((now or datetime.now(UTC)).timestamp() * 1000)
-    chars = []
-    for _ in range(10):
-        chars.append(_B32[ts & 0x1F])
-        ts >>= 5
-    head = "".join(reversed(chars))
-    tail = "".join(secrets.choice(_B32) for _ in range(16))
-    return head + tail
+    global _ulid_last
+    with _ulid_lock:
+        if _ulid_last is not None and _ulid_last[0] == ts:
+            tail = _ulid_last[1] + 1
+            if tail > _TAIL_MAX:
+                # 2**80 IDs inside one millisecond. Unreachable in practice;
+                # carry into the timestamp rather than wrap and go backwards.
+                ts += 1
+                tail = secrets.randbits(_TAIL_BITS)
+        else:
+            tail = secrets.randbits(_TAIL_BITS)
+        _ulid_last = (ts, tail)
+    return _b32(ts, 10) + _b32(tail, 16)
 
 
 def utc_now() -> datetime:

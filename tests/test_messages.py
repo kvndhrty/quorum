@@ -103,3 +103,15 @@ def test_archive_old_respects_retention_and_ttl(home: Path, clock):
         for line in gzip.open(archive, "rt")
     ]
     assert {line["payload"]["text"] for line in lines} == {"ancient", "short-lived"}
+
+
+def test_same_instant_posts_read_back_in_post_order(home: Path, clock):
+    """A frozen clock is the sharp case, but the same thing happens whenever two
+    agents post inside one millisecond: the board is replayed by filename, so
+    the order a reader sees has to be the order the senders wrote in."""
+    bus = MessageBus(home, now=clock)
+    sent = [bus.post("sentinel", "reminders", "note", text=f"msg {i}") for i in range(10)]
+
+    read = bus.read_topic("reminders")
+    assert [m.id for m in read] == [m.id for m in sent]
+    assert [m.payload["text"] for m in read] == [f"msg {i}" for i in range(10)]
