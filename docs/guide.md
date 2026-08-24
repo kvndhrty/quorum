@@ -49,7 +49,7 @@ itself; and the manager has its own inbox for your directives.
 ## Setup
 
 ```bash
-uv tool install "quorum[web,tui]"
+uv tool install "quorum-orchestrator[web,tui]"   # installs the `quorum` command
 quorum init                    # scaffolds ~/.quorum and a starter config.toml
 ```
 
@@ -288,7 +288,7 @@ task run <id>`.
 
 ### Mode 2 — self-sandbox the supervisor
 
-With the `[nono]` extra installed (`uv tool install 'quorum[nono]'`):
+With the `[nono]` extra installed (`uv tool install 'quorum-orchestrator[nono]'`):
 
 ```bash
 quorum up --self-sandbox

@@ -32,8 +32,12 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 ## Install
 
 ```bash
-uv tool install "quorum[web,tui]"     # or: pipx / pip install
+uv tool install "quorum-orchestrator[web,tui]"   # or: pipx install
+uvx quorum-orchestrator --help                   # zero-install trial run
 ```
+
+The PyPI distribution is `quorum-orchestrator`; the command it installs is
+plain `quorum` (and the import name is `quorum` too).
 
 From a checkout: `uv sync --all-extras`, then prefix commands with `uv run`.
 

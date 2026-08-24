@@ -557,7 +557,7 @@ wheels = [
 ]
 
 [[package]]
-name = "quorum"
+name = "quorum-orchestrator"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

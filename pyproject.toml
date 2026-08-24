@@ -1,5 +1,5 @@
 [project]
-name = "quorum"
+name = "quorum-orchestrator"
 version = "0.1.0"
 description = "Bring-your-own-harness orchestration for long-running coding tasks: file-based, sandboxable, monitored."
 readme = "README.md"
