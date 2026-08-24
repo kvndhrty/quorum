@@ -32,7 +32,8 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 ## Install
 
 ```bash
-uv tool install "quorum-orchestrator[web,tui]"   # or: pipx install
+uv tool install quorum-orchestrator              # includes the TUI dashboard
+uv tool install "quorum-orchestrator[web]"       # + the localhost web dashboard
 uvx quorum-orchestrator --help                   # zero-install trial run
 ```
 

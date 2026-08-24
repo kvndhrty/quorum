@@ -563,15 +563,13 @@ source = { editable = "." }
 dependencies = [
     { name = "apscheduler" },
     { name = "pydantic" },
+    { name = "textual" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
 nono = [
     { name = "nono-py" },
-]
-tui = [
-    { name = "textual" },
 ]
 web = [
     { name = "fastapi" },
@@ -591,7 +589,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "nono-py", marker = "extra == 'nono'" },
     { name = "pydantic", specifier = ">=2" },
-    { name = "textual", marker = "extra == 'tui'", specifier = ">=0.60" },
+    { name = "textual", specifier = ">=0.60" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.29" },
 ]

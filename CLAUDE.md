@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync --all-extras            # dev setup (extras: web, tui, nono)
+uv sync --all-extras            # dev setup (extras: web, nono; the TUI is a core dep)
 uv run pytest                   # full suite
 uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs

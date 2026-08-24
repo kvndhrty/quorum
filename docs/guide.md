@@ -49,7 +49,8 @@ itself; and the manager has its own inbox for your directives.
 ## Setup
 
 ```bash
-uv tool install "quorum-orchestrator[web,tui]"   # installs the `quorum` command
+uv tool install quorum-orchestrator              # `quorum` command + TUI dashboard
+uv tool install "quorum-orchestrator[web]"       # add the localhost web dashboard
 quorum init                    # scaffolds ~/.quorum and a starter config.toml
 ```
 
@@ -244,9 +245,9 @@ the supervisor is running, including over SSH, and never hold locks.
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines.
-- `quorum tui` — live terminal dashboard (`[tui]` extra). Tasks on top;
-  select one to see its transcript and reports, `n` to nudge, `esc` back to
-  the board, `q` to quit.
+- `quorum tui` — live terminal dashboard, installed by default. Tasks on
+  top; select one to see its transcript and reports, `n` to nudge, `esc`
+  back to the board, `q` to quit.
 - `quorum web` — the same picture at `http://127.0.0.1:8787` (`[web]`
   extra). Localhost only, no exposed ports.
 - `quorum board read [topic]` — the raw message stream (`--json` for

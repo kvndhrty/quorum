@@ -577,7 +577,7 @@ def web(
     port: int = typer.Option(8787, "--port"),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Serve the local web dashboard on 127.0.0.1 (requires `quorum[web]`)."""
+    """Serve the local web dashboard on 127.0.0.1 (requires the [web] extra)."""
     target = get_home(home)
     try:
         import uvicorn
@@ -585,8 +585,9 @@ def web(
         from .web.app import create_app
     except ImportError:
         raise _fail(
-            "the web dashboard needs the [web] extra: uv tool install 'quorum[web]' "
-            "(or pip install 'quorum[web]')"
+            "the web dashboard needs the [web] extra: "
+            "uv tool install 'quorum-orchestrator[web]' "
+            "(or pip install 'quorum-orchestrator[web]')"
         ) from None
     typer.echo(f"dashboard: http://127.0.0.1:{port}")
     uvicorn.run(create_app(target), host="127.0.0.1", port=port, log_level="warning")
@@ -594,14 +595,15 @@ def web(
 
 @app.command()
 def tui(home: Path | None = _HOME_OPT) -> None:
-    """Open the terminal dashboard (requires `quorum[tui]`)."""
+    """Open the terminal dashboard."""
     target = get_home(home)
     try:
         from .tui.app import QuorumTUI
     except ImportError:
+        # textual is a core dependency; only a broken/partial install lands here
         raise _fail(
-            "the TUI needs the [tui] extra: uv tool install 'quorum[tui]' "
-            "(or pip install 'quorum[tui]')"
+            "textual is not importable — the TUI ships with quorum by default; "
+            "reinstall with: uv tool install quorum-orchestrator"
         ) from None
     QuorumTUI(target).run()
 
