@@ -103,7 +103,7 @@ def task_rows(home: Path) -> list[dict[str, Any]]:
                 "status": t.status,
                 "harness": t.harness,
                 "running": runner_alive(home, t.id),
-                "resumes": t.resumes,
+                "runs": len(t.runs),
                 "pr_url": t.pr_url,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,

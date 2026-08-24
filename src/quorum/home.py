@@ -22,9 +22,7 @@ retention_days = 30       # board messages older than this are archived
 
 [tasks]
 worktree = true           # run each task in its own git worktree under QUORUM_HOME
-stall_minutes = 15        # quiet for this long = the monitor pokes the task
-max_resumes = 3           # resume attempts before a task is marked blocked
-default_harness = ""      # e.g. "claude" — used when `quorum task add` has no --harness
+default_harness = ""      # e.g. "claude" — used by `quorum task add` and the manager
 
 # A harness is any coding-agent CLI that takes a prompt and works autonomously
 # in the current directory. "{prompt}" and "{session}" are substituted; a
@@ -48,9 +46,8 @@ default_harness = ""      # e.g. "claude" — used when `quorum task add` has no
 #[harness.opencode]
 #start = ["opencode", "run", "{prompt}"]
 
-# Uncomment to give the monitor an LLM for smarter stall triage and nudges.
-# `executable` is any CLI that takes a prompt and prints a completion.
-# Everything degrades gracefully when this section is absent.
+# Optional small-completion LLM for plugin agents (ctx.llm.complete()).
+# The manager does NOT use this — it runs a full harness (above).
 #[llm]
 #backend = "cli"
 #executable = "claude"
@@ -68,9 +65,19 @@ profile = ""              # optional nono profile name (used with `nono run`)
 #task_read  = []          # extra read grants for sandboxed task runs
 #task_write = ["~/.claude"]  # harness state dirs need write (claude: ~/.claude)
 
-[agents.monitor]
-type = "monitor"
-schedule = "every 2m"
+# The manager is itself harness-driven: each run it reads a digest of every
+# active task plus its own action journal, and acts through the quorum CLI.
+# Supervision policy lives in prompts/manager.md — edit it there.
+# auto_pause=false: if the LLM service is down the tick fails loudly but the
+# schedule keeps firing, so the manager self-recovers when service returns.
+[agents.manager]
+type = "manager"
+schedule = "every 5m"
+auto_pause = false
+[agents.manager.settings]
+#harness = "claude"          # default: [tasks].default_harness
+#run_timeout_seconds = 300
+#max_actions_per_run = 20
 
 # Plugin agents: drop a .py file into QUORUM_HOME/plugins/ and point a stanza
 # at it (see docs/guide.md; examples/steward.py in the quorum repo is a
@@ -87,6 +94,7 @@ SUBDIRS = [
     "messages/inbox",
     "messages/archive",
     "state/agents",
+    "state/manager",
     "tasks",
     "worktrees",
     "logs",

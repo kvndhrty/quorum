@@ -1,6 +1,6 @@
 """Resolve agent `type` strings from config into Agent classes.
 
-Builtins resolve by short name ("monitor"); anything else is a
+Builtins resolve by short name ("manager"); anything else is a
 "module:Class" dotted path. QUORUM_HOME/plugins is prepended to sys.path, so
 a user adds a custom agent by dropping a .py file there and writing
 

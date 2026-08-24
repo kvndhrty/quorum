@@ -11,24 +11,30 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    `QUORUM_HOME`, as JSON/JSONL/TOML/Markdown. `ls` and `cat` are debuggers;
    copying the directory migrates the whole system; sandbox profiles reduce
    to "rw on this tree (and per-task worktrees), ro elsewhere".
-3. **Degrade gracefully.** The LLM, the dashboards, and the sandbox are all
-   optional. The monitor has deterministic no-LLM behavior; every view works
-   with the supervisor stopped; a harness that ignores the report protocol
-   is still monitored passively.
+3. **Fail loudly, recover automatically.** Dashboards and views degrade
+   gracefully (pure file readers; they work with the supervisor stopped),
+   and a harness that ignores the report protocol is still observed
+   passively. Supervision itself, however, is deliberately *not*
+   degradable: the manager **is** a harness run, and without a working
+   harness its tick raises — visibly, every tick — while `auto_pause =
+   false` keeps the schedule firing so the first tick after the LLM
+   service returns reads the situation from files and reinvokes whatever
+   needs reinvoking. There is no dumbed-down fallback supervisor by
+   design.
 
 ## Process model
 
 ```
 quorum up ──► Supervisor
               ├─ APScheduler (BackgroundScheduler, thread pool)
-              │   ├─ job: monitor  (every 2m)  ── crash-isolated wrapper:
+              │   ├─ job: manager  (every 5m)  ── crash-isolated wrapper:
               │   ├─ job: <user plugins…>         heartbeats, error posts,
               │   ├─ job: _control (15s: claims supervisor inbox —
               │   │        agent.pause / agent.resume / agent.run-now)
               │   └─ job: _janitor (hourly: archival, stale-claim recovery)
               └─ supervisor.lock (pid file, touched every 60s = liveness)
 
-monitor ──launch_detached()──► quorum task run <id>   (detached process)
+manager ──(its harness runs `quorum task run --detach`)──► detached runner
                                ├─ tasks/<id>/runner.lock (pid = liveness)
                                ├─ git worktree in worktrees/<id>/
                                └─ harness subprocess (stdout → transcript.jsonl)
@@ -40,7 +46,7 @@ Two process shapes on purpose. Agent ticks are short, synchronous, and
 idempotent — right for a scheduler thread pool. A harness run lasts minutes
 to hours — wrong for a tick, so each run is its own detached process with
 its own pid-lock. Consequence: restarting the supervisor never kills a
-running task; the monitor re-attaches by reading files, exactly like the
+running task; the manager re-attaches by reading files, exactly like the
 dashboards. A per-agent `tick.lock` (same `O_EXCL` pid-lock as everything
 else) keeps a scheduled tick and a hand-run `quorum agent run-once` from
 interleaving.
@@ -65,6 +71,8 @@ messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
+state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
+state/manager/transcript.jsonl    the manager harness's own stdout
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
@@ -84,7 +92,7 @@ durable record (`tasks/<id>/task.json`) plus a sequence of runs, and
    stays clean; worktrees share the main repo's object store, which is why a
    sandboxed run needs write on the project's `.git`),
 3. claim everything in the task's inbox (`messages/inbox/task-<id>/`) — the
-   monitor's pokes and the user's nudges — and inject it into the prompt,
+   manager's pokes and the user's nudges — and inject it into the prompt,
 4. compose the prompt: preamble template (teaches the report/inbox protocol)
    + task prompt + guidance section; pick the harness argv template
    (`resume` when a session id is known, else `start`) and substitute
@@ -98,7 +106,7 @@ The runner **never sets task status**. Status is whatever the harness last
 said via `quorum task report --status <word>` — a free-form string, recorded
 in `reports.jsonl`, mirrored to the board topic `tasks`, and displayed
 everywhere. Only `TERMINAL_STATUSES = {done, blocked, cancelled}` mean
-anything to quorum: they end the monitor's attention. This is deliberate:
+anything to quorum: they end the manager's attention. This is deliberate:
 quorum ships the manager and the comms substrate, not a workflow engine.
 
 The return channel is quorum's own CLI. The preamble tells the harness to
@@ -110,24 +118,44 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
-## The monitor
+## The manager
 
-The only built-in agent. Each tick, for every non-terminal task:
+The only built-in agent, and it is *itself* harness-driven: supervision
+policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 
-- queued and never launched → `launch_detached` (a `quorum task run`
-  subprocess via `python -m quorum`), with a bootstrap grace window so the
-  next tick doesn't stack a second launch on a slow start;
-- runner alive but quiet past `stall_minutes` (newest of transcript /
-  reports / lock mtimes) → one deduped board warning + a nudge into the
-  task's inbox (a cooperative harness sees it mid-run; others at the next
-  run boundary);
-- runner dead without a terminal status → nudge + relaunch, up to
-  `max_resumes`, then set status `blocked` and escalate on the board.
+1. **Wake condition**: any non-terminal task, or a pending message in the
+   manager's inbox. Nothing to manage → no harness run. Dead runners keep
+   the condition true, which is precisely what makes post-outage recovery
+   automatic.
+2. **Digest** (`agents/manager.py::build_digest`, a pure function over
+   files): every active task's status, runner liveness, quiet time, recent
+   reports and transcript tail; recently finished tasks; the manager's own
+   recent **action journal** with then-vs-now status per target (the
+   anti-loop memory — see below); and any user directives claimed from
+   `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
+   only after a successful run; a crash rejects them back to `new/`.
+3. **One harness run** over `prompts/manager.md` + the digest, synchronous,
+   cwd = `QUORUM_HOME`, bounded by `run_timeout_seconds`, stdout streamed to
+   `state/manager/transcript.jsonl`. The env carries the actor tag
+   (`actor.py`): `QUORUM_ACTOR=manager`, a per-run `QUORUM_MANAGER_RUN` id,
+   and the resolved action cap in `QUORUM_MANAGER_ACTION_CAP`.
 
-With `[llm]` configured the nudge is drafted from the transcript tail
-(`prompts/monitor-nudge.md`); without it a canned poke is sent — the poke
-happens either way. All decisions re-derive from files, so ticks are
-idempotent; announcement dedupe lives in the agent's private state.
+The harness acts with full authority through the quorum CLI — `task
+add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`, `quorum
+manager note`. **Every mutating CLI action taken under the manager's env tag
+is auto-journaled** (`state/manager/journal.jsonl`: action, target, the
+target's status at action time, run id) *before* it executes — ground truth,
+not model self-report. The journal serves two purposes: fed back into the
+next digest, it lets the manager see which interventions changed nothing and
+avoid degenerate loops (its prompt forbids repeating an intervention marked
+UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
+(`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
+without ever second-guessing a choice.
+
+Failure story: missing harness config, nonzero exit, or timeout → the tick
+raises. Crash isolation records it (heartbeat, board); the manager's
+`auto_pause = false` config keeps the schedule firing so recovery needs no
+human intervention.
 
 ## Messaging protocol
 
@@ -137,7 +165,7 @@ One `Message` schema serves two channels:
 {
   "v": 1,
   "id": "01J5R3V7Q8Z9K2M4N6P8R0T2",
-  "from": "monitor",
+  "from": "manager",
   "to": "task-01J5R3…",
   "topic": null,
   "type": "nudge",
@@ -193,8 +221,9 @@ backend shells out to any configured executable; `[llm].input` selects stdin
 piping or argv substitution. `LLMClient.complete()` never raises — `None`
 means "no LLM today" and every caller has a deterministic fallback. Prompts
 come from user-editable templates in `prompts/` (`quorum.prompts`). Note the
-LLM layer is for quorum's *own* small completions (monitor nudges); task
-harnesses are invoked directly by the runner and are not LLM backends.
+LLM layer is for *plugin agents'* small completions; neither task harnesses
+nor the manager's harness go through it — both are invoked directly as
+subprocesses via the `[harness.*]` templates.
 
 ### Design seam: managed auth proxy
 
@@ -232,7 +261,7 @@ quorum functional), a non-empty `network` list keeps mode 2's network open,
 and an unreadable profile raises `SandboxUnavailable` — never a narrower
 sandbox than the user asked for. The same file works verbatim with the nono
 binary in mode 1.
-   The monitor's LLM subprocess calls go through `sandboxed_exec` with the
+   Plugin agents' LLM subprocess calls go through `sandboxed_exec` with the
    narrower `build_capabilities` set (network blocked unless `[llm]` is
    configured; stdin prompts staged as ULID-named files under
    `state/llm/` since `sandboxed_exec` cannot pipe stdin).
@@ -248,9 +277,13 @@ the grants you added explicitly.
 `tests/bin/`: `fake_llm.py` (canned completions) and `fake_harness.py`, which
 behaves like a real harness — echoes its argv and prompt to stdout, emits a
 `session_id`, and in `report` mode calls `python -m quorum task report`
-against `$QUORUM_HOME`, exercising the full cooperative loop. Monitor tests
-monkeypatch `launch_detached` and fabricate locks/mtimes; runner tests build
-real git repos and assert on worktrees, transcripts, and session capture.
+against `$QUORUM_HOME`, exercising the full cooperative loop, and manager
+modes (`manager_act` launches/nudges/journals; `manager_flood` slams into
+the action cap) — each `[harness.*]` table pins its own mode via `env`, so a
+fake task harness and a fake manager harness coexist in one test. Manager
+tests run the whole loop for real (the fake manager's `task run` executes
+the fake task harness); runner tests build real git repos and assert on
+worktrees, transcripts, and session capture.
 Sandbox glue is pinned by injecting a fake `nono_py` into `sys.modules`
 (`test_sandbox.py`); real kernel enforcement runs under `-m nono_integration`
 (dedicated CI job asserts platform support so it can never silently skip).

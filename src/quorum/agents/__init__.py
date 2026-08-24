@@ -1,8 +1,8 @@
 """Built-in agents, resolved lazily by short name.
 
-Quorum ships exactly one: the monitor. Everything else is user-provided —
-see docs/guide.md for the plugin contract and examples/steward.py for a
-complete worked example.
+Quorum ships exactly one: the manager, which is itself harness-driven.
+Everything else is user-provided — see docs/guide.md for the plugin contract
+and examples/steward.py for a complete worked example.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import importlib
 from ..agent import Agent
 
 BUILTIN_NAMES: dict[str, str] = {
-    "monitor": "monitor.Monitor",
+    "manager": "manager.Manager",
 }
 
 

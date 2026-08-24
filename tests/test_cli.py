@@ -150,7 +150,7 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     from quorum import fsio
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["agent", "pause", "monitor", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "pause", "manager", "--home", str(home)])
     assert r.exit_code == 0, r.output
     r = runner.invoke(app, ["agent", "pause", "ghost", "--home", str(home)])
     assert r.exit_code == 1
@@ -159,7 +159,7 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     entries = fsio.sorted_entries(inbox)
     assert len(entries) == 1
     msg = fsio.read_json(entries[0])
-    assert msg["type"] == "agent.pause" and msg["payload"]["agent"] == "monitor"
+    assert msg["type"] == "agent.pause" and msg["payload"]["agent"] == "manager"
 
 
 def test_run_once_respects_the_tick_lock(home: Path):
@@ -172,3 +172,78 @@ def test_run_once_respects_the_tick_lock(home: Path):
     lock.unlink()
     r = runner.invoke(app, ["agent", "run-once", "lockplug", "--home", str(home)])
     assert r.exit_code == 0, r.output
+
+
+# -- manager ---------------------------------------------------------------
+
+
+def test_manager_tell_note_and_journal(home: Path):
+    from quorum import fsio
+    from quorum.agents.manager import journal_path
+    from quorum.messages import MessageBus
+
+    r = runner.invoke(app, ["manager", "tell", "focus on the api task", "--home", str(home)])
+    assert r.exit_code == 0
+    inbox = MessageBus(home).inbox_dir / "manager" / "new"
+    assert len(fsio.sorted_entries(inbox)) == 1
+
+    r = runner.invoke(app, ["manager", "note", "human-added context", "--home", str(home)])
+    assert r.exit_code == 0
+    entries = fsio.read_jsonl(journal_path(home))
+    assert entries[-1]["action"] == "note" and entries[-1]["actor"] == "user"
+
+    r = runner.invoke(app, ["manager", "journal", "--home", str(home)])
+    assert "human-added context" in r.output
+
+
+def test_mutating_commands_journal_only_for_the_manager_actor(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    from quorum import fsio
+    from quorum.agents.manager import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "user-made task", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert fsio.read_jsonl(journal_path(home)) == []  # user actions: no journal
+
+    monkeypatch.setenv("QUORUM_ACTOR", "manager")
+    monkeypatch.setenv("QUORUM_MANAGER_RUN", "01TESTRUN")
+    r = runner.invoke(app, ["task", "add", slug, "manager-made task", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    entries = fsio.read_jsonl(journal_path(home))
+    assert len(entries) == 1
+    assert entries[0]["action"] == "task.add"
+    assert entries[0]["actor"] == "manager" and entries[0]["run"] == "01TESTRUN"
+
+
+def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkeypatch):
+    """The detached child re-invokes `quorum task run`; without stripping the
+    actor env it would journal a second entry (and burn the manager's cap)."""
+    import time
+
+    from quorum import fsio
+    from quorum.agents.manager import journal_path
+    from quorum.tasks import TaskStore, runner_lock_path
+
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "detach journaling", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    task = TaskStore(home).list()[0]
+
+    monkeypatch.setenv("QUORUM_ACTOR", "manager")
+    monkeypatch.setenv("QUORUM_MANAGER_RUN", "01DETACH")
+    r = runner.invoke(app, ["task", "run", task.short_id, "--detach", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        fresh = TaskStore(home).get(task.id)
+        if fresh.runs and not runner_lock_path(home, task.id).exists():
+            break
+        time.sleep(0.3)
+    else:
+        raise AssertionError("detached run did not complete in time")
+
+    entries = [e for e in fsio.read_jsonl(journal_path(home)) if e["run"] == "01DETACH"]
+    assert len(entries) == 1  # the manager's own action — not the child's re-invocation

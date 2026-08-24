@@ -222,3 +222,27 @@ def test_pause_landing_mid_tick_survives_the_completion_write(home: Path):
     hb = fsio.read_json(home / "state/agents/slow/heartbeat.json")
     assert hb["status"] == "paused"      # not clobbered back to idle
     assert hb["last_end"]                # timing fields still recorded
+
+
+def test_auto_pause_false_keeps_a_failing_agent_scheduled(home: Path):
+    """The manager's crash story: LLM down => every tick fails, but the agent
+    must never be paused, so the first tick after service returns recovers."""
+    (home / "plugins" / "flaky.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Flaky(Agent):\n"
+        "    def tick(self):\n"
+        "        raise RuntimeError('llm service down')\n"
+    )
+    config = write_config(
+        home,
+        '[agents.flaky]\ntype = "flaky:Flaky"\nschedule = "every 5m"\nauto_pause = false\n',
+    )
+    sup = Supervisor(home, config)
+    for _ in range(MAX_CONSECUTIVE_FAILURES + 2):
+        sup.run_agent_tick("flaky")
+
+    hb = fsio.read_json(home / "state/agents/flaky/heartbeat.json")
+    assert hb["status"] == "error"  # loud...
+    assert hb["consecutive_failures"] == MAX_CONSECUTIVE_FAILURES + 2
+    system = MessageBus(home).read_topic("system")
+    assert not any(m.type == "agent.paused" for m in system)  # ...but never paused

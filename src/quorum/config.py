@@ -62,8 +62,6 @@ class HarnessConfig(BaseModel):
 
 class TasksConfig(BaseModel):
     worktree: bool = True
-    stall_minutes: int = 15
-    max_resumes: int = 3
     default_harness: str = ""
 
 
@@ -79,6 +77,11 @@ class AgentConfig(BaseModel):
     type: str
     schedule: str = "every 1h"
     enabled: bool = True
+    # False: repeated failures never pause the schedule — the agent keeps
+    # retrying so it self-recovers when an external dependency (the LLM
+    # service, for the manager) comes back. Failures still land in the
+    # heartbeat and on the board.
+    auto_pause: bool = True
     settings: dict = Field(default_factory=dict)
 
     @field_validator("schedule")

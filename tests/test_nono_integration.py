@@ -155,7 +155,7 @@ def test_self_sandbox_enforces_in_subprocess(home: Path, tmp_path: Path):
 
         # Imported only now, i.e. under the sandbox.
         from quorum.registry import resolve
-        resolve("monitor", home)
+        resolve("manager", home)
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler()
         scheduler.add_job(lambda: None, id="i", trigger="interval", seconds=30)

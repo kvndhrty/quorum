@@ -9,7 +9,8 @@ writing your own agents. (Internals and design rationale live in
 - [Setup](#setup)
 - [Harnesses](#harnesses)
 - [Tasks](#tasks)
-- [Guiding and poking](#guiding-and-poking)
+- [The manager](#the-manager)
+- [Guiding tasks](#guiding-tasks)
 - [Dashboards](#dashboards)
 - [Controlling agents at runtime](#controlling-agents-at-runtime)
 - [Sandboxing](#sandboxing)
@@ -32,15 +33,18 @@ Five words carry the whole system:
 - **Harness** — any coding-agent CLI you already use: `claude`, `codex`,
   `opencode`, or your own script. Quorum never talks to a model API for
   tasks; it invokes your tool and stays out of the way.
-- **Monitor** — the one built-in agent. Under `quorum up` it launches queued
-  tasks, watches for stalls, pokes stuck harnesses, resumes runs that exited
-  without finishing, and marks tasks `blocked` for you when it runs out of
-  ideas.
+- **Manager** — the one built-in agent, and it is *itself* harness-driven.
+  Under `quorum up` it periodically reads a digest of everything happening —
+  every task's status, output, and liveness, plus its own recent actions and
+  your directives — and then *your harness* decides what to do: launch
+  queued tasks, poke stuck ones, relaunch dead ones, create follow-up work,
+  or escalate to you. Supervision policy is a prompt you can edit
+  (`prompts/manager.md`), not code.
 
 Communication is file-based messaging: a public **board** (topics anyone can
-read) and per-recipient **inboxes**. Your guidance and the monitor's pokes go
+read) and per-recipient **inboxes**. Your guidance and the manager's pokes go
 into a task's inbox; the harness reports progress back with the `quorum` CLI
-itself.
+itself; and the manager has its own inbox for your directives.
 
 ## Setup
 
@@ -56,9 +60,7 @@ section sets defaults:
 ```toml
 [tasks]
 worktree = true         # run each task in its own git worktree under QUORUM_HOME
-stall_minutes = 15      # quiet for this long = the monitor pokes the task
-max_resumes = 3         # resume attempts before a task is marked blocked
-default_harness = ""    # harness used when `quorum task add` has no --harness
+default_harness = ""    # harness used by `quorum task add` and the manager
 ```
 
 ## Harnesses
@@ -95,7 +97,7 @@ Notes:
   persists between runs.
 - **Autonomy flags.** Runs are unattended: a harness that stops to ask for
   interactive permission stalls silently on its first denied tool call, and
-  the monitor will eventually poke and resume it to no effect. Grant
+  the manager will eventually poke and resume it to no effect. Grant
   permissions explicitly. **Prefer a scoped allowlist** like the
   `--allowedTools` list above — it covers editing files, git, `gh` for the
   PR step, and quorum's own progress protocol (`Bash(quorum:*)` is what lets
@@ -113,7 +115,7 @@ Notes:
 quorum project add ~/work/my-api
 quorum task add my-api "add rate limiting to the public endpoints, then open a PR"
 quorum task add my-api "migrate the test suite to pytest" --harness codex
-quorum up                      # the monitor launches queued tasks
+quorum up                      # the manager launches queued tasks
 ```
 
 You can also drive runs by hand — no supervisor required:
@@ -146,7 +148,7 @@ quorum task report <id> --status blocked "<what you need>"
 Status is **free-form** — quorum records whatever word the harness reports
 and displays it. The conventional flow is `planning → executing → reviewing
 → pr → done`, but nothing is enforced. Only `done`, `blocked`, and
-`cancelled` mean anything to quorum itself: they end the monitor's
+`cancelled` mean anything to quorum itself: they end the manager's
 attention.
 
 **Watching.**
@@ -159,34 +161,61 @@ quorum status                     # tasks alongside agents and projects
 ```
 
 **Finishing and undoing.** A task that opens a PR reports the URL, which
-shows up in every view. `quorum task cancel <id>` stops the monitor's
+shows up in every view. `quorum task cancel <id>` stops the manager's
 attention (`--kill` also SIGTERMs a live runner). The work itself lives on
 the `quorum/<short-id>` branch either way.
 
-## Guiding and poking
+## The manager
 
-The steering channel is the task's inbox, and everything uses it the same
-way:
+Supervision in quorum is not a set of thresholds — it's your harness reading
+the situation and deciding. On its schedule (default every 5 minutes, only
+when there is something to manage), the manager compiles a **digest**:
+
+- every active task — status, whether its runner process is alive, how long
+  it has been quiet, its recent reports and the tail of its output;
+- the manager's own **recent actions with observed outcomes** ("you nudged
+  a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
+  never loops on an intervention that isn't working;
+- your directives.
+
+It then runs your harness over that digest with `prompts/manager.md` — and
+that prompt file *is* the supervision policy. Edit it to change how your
+manager behaves: how patient it is, when it escalates, how it words its
+pokes. Delete it to restore the default. The manager acts through the same
+CLI you use — launching tasks, nudging them, cancelling them, even creating
+follow-up tasks with `task add` — and every action lands in an auditable
+journal:
+
+```bash
+quorum manager tell "prioritize the api task; park the docs work"   # steer it
+quorum manager journal                    # audit everything it has done, and why
+```
+
+Two things bound a bad run, neither of which second-guesses a decision: a
+per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
+the journal.
+
+**When the LLM service is down, supervision halts loudly — and heals
+itself.** There is no dumbed-down fallback: the manager's tick simply fails
+(visible in `quorum status` and on the board), but its schedule keeps firing
+(`auto_pause = false`), so the first tick after service returns reads the
+state of the world from files and relaunches whatever died in the meantime.
+You don't have to do anything.
+
+## Guiding tasks
+
+The steering channel for individual tasks is the task's inbox, and you and
+the manager use it identically:
 
 ```bash
 quorum task nudge a3f2k9 "use the middleware approach, not decorators"
 ```
 
-- The **next run starts with your guidance in its prompt** (a "Guidance
-  received" section), and a cooperative harness that checks
-  `quorum task inbox --claim` mid-run sees it sooner.
-- The **monitor pokes through the same channel.** When a live run has been
-  quiet past `stall_minutes` it posts a warning to the board and drops a
-  nudge in the inbox. When a run exits without a terminal status it nudges
-  and starts a resume run — up to `max_resumes` times — then marks the task
-  `blocked` and escalates on the board.
-- With an `[llm]` configured, the monitor reads the transcript tail and
-  drafts a *specific* nudge ("the test run is failing on fixtures, fix that
-  before continuing"); without one it sends a canned poke. Tune the wording
-  in `prompts/monitor-nudge.md`.
-
-The TUI makes this fluid: select a task, press `n`, type, enter. The web
-dashboard has the same nudge box on each task.
+The **next run starts with the guidance in its prompt** (a "Guidance
+received" section), and a cooperative harness that checks
+`quorum task inbox --claim` mid-run sees it sooner. The TUI makes this
+fluid: select a task, press `n`, type, enter. The web dashboard has the same
+nudge box on each task.
 
 ## Dashboards
 
@@ -201,7 +230,9 @@ the supervisor is running, including over SSH, and never hold locks.
 - `quorum web` — the same picture at `http://127.0.0.1:8787` (`[web]`
   extra). Localhost only, no exposed ports.
 - `quorum board read [topic]` — the raw message stream (`--json` for
-  scripting). The monitor narrates task lifecycle on the `tasks` topic.
+  scripting). Task lifecycle lands on the `tasks` topic; manager
+  escalations on `attention`.
+- `quorum manager journal` — what the manager did and why.
 
 ## Controlling agents at runtime
 
@@ -209,14 +240,16 @@ While `quorum up` is running you can steer its schedule without editing
 config or restarting:
 
 ```bash
-quorum agent run-now monitor      # tick immediately
-quorum agent pause monitor        # stop scheduling it
-quorum agent resume monitor       # resume (also clears the auto-pause counter)
-quorum agent run-once monitor     # one tick in *this* shell, supervisor optional
+quorum agent run-now manager      # tick immediately
+quorum agent pause manager        # stop scheduling it
+quorum agent resume manager       # resume (also clears the auto-pause counter)
+quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
 
 Commands are delivered through the supervisor's inbox and applied within
-~15 seconds. An agent that fails 5 ticks in a row is auto-paused;
+~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
+its config sets `auto_pause = false`, as the manager's does, in which case
+it keeps retrying (loud failures, automatic recovery);
 `agent resume` is the recovery lever.
 
 ## Sandboxing
@@ -302,7 +335,7 @@ project's `.git`, and your `task_write` extras — nothing else. Readable:
 the interpreter's tree, the harness executable (resolved through `PATH`),
 nono's own system-read baseline (loader, system libraries — nothing can exec
 without them), and `task_read`. Network stays open, since a coding harness
-is assumed to need its API. The same flag also confines the monitor's
+is assumed to need its API. The same flag also confines plugin agents'
 `[llm]` subprocess calls.
 
 **Fail-closed, all modes:** if sandboxing was requested and nono-py is
@@ -312,7 +345,7 @@ Check platform support with
 
 ## Writing your own agents
 
-The monitor is deliberately the only built-in. Anything else you want on a
+The manager is deliberately the only built-in. Anything else you want on a
 schedule — a CI watcher, a SLURM queue poller, a deadline reminder — is a
 plugin: a class with a synchronous `tick()`, dropped into
 `QUORUM_HOME/plugins/`, no packaging.
@@ -427,8 +460,10 @@ def test_milestone(tmp_path):
   messages/board/<topic>/*.json     public board (task lifecycle on `tasks`)
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)
   messages/archive/YYYY-MM.jsonl.gz compacted history
-  prompts/*.md                      editable prompt templates
+  prompts/*.md                      editable prompt templates (incl. manager.md)
   state/agents/<name>/              heartbeats + private agent state
+  state/manager/journal.jsonl       the manager's auto-recorded actions
+  state/manager/transcript.jsonl    the manager harness's own output
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
 ```

@@ -13,7 +13,7 @@ of *runs*. Everything durable lives under `tasks/<id>/`:
 Status is a *reported* string, not an enforced state machine: the harness
 calls `quorum task report --status <word>` and quorum records whatever word
 it chose. Only the TERMINAL_STATUSES set carries meaning inside quorum — the
-monitor stops attending to a task once it reaches one of them.
+manager stops attending to a task once it reaches one of them.
 
 Guidance flows the other way through the ordinary message bus: each task
 owns the inbox `task-<id>`, and the runner injects claimed messages into the
@@ -22,6 +22,7 @@ next run's prompt.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +56,6 @@ class Task(BaseModel):
     pr_url: str | None = None
     use_worktree: bool = True
     workdir: str | None = None  # resolved on first run
-    resumes: int = 0
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -197,7 +197,7 @@ def report(
 
     Appends to reports.jsonl, updates the task's status (and pr_url when
     given), and mirrors the report onto the board so dashboards and the
-    monitor see it without polling every task directory's log.
+    manager see it without polling every task directory's log.
     """
     home = Path(home)
     store = TaskStore(home)
@@ -222,7 +222,7 @@ def report(
 
 
 def read_transcript_tail(home: Path, task_id: str, limit: int = 40) -> list[dict]:
-    return fsio.read_jsonl(transcript_path(home, task_id))[-limit:]
+    return fsio.read_jsonl_tail(transcript_path(home, task_id), limit=limit)
 
 
 def read_reports(home: Path, task_id: str, limit: int | None = None) -> list[dict]:
@@ -238,3 +238,21 @@ def runner_alive(home: Path, task_id: str) -> bool:
     except (OSError, ValueError):
         return False
     return pid > 0 and fsio.pid_alive(pid)
+
+
+def last_activity(home: Path, task_id: str) -> datetime | None:
+    """The newest sign of life: transcript, reports, or the runner lock."""
+    newest = None
+    for path in (
+        transcript_path(home, task_id),
+        reports_path(home, task_id),
+        runner_lock_path(home, task_id),
+    ):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None else max(newest, mtime)
+    if newest is None:
+        return None
+    return datetime.fromtimestamp(newest, tz=UTC)
