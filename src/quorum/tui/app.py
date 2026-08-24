@@ -1,7 +1,7 @@
 """Terminal dashboard (Textual). A pure reader of QUORUM_HOME, refreshed on a
 timer — works whether or not the supervisor is running, including over SSH.
 Its single write affordance is steering: `n` sends guidance into the selected
-task's inbox, the same channel the monitor's pokes use."""
+task's inbox, the same channel the manager's pokes use."""
 
 from __future__ import annotations
 

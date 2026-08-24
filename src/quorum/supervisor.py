@@ -182,7 +182,10 @@ class Supervisor:
                 text=f"agent {name} tick failed: {err.strip().splitlines()[-1]}",
                 payload={"agent": name},
             )
-            if self._failures[name] >= MAX_CONSECUTIVE_FAILURES:
+            acfg = self.config.agents.get(name)
+            if self._failures[name] >= MAX_CONSECUTIVE_FAILURES and (
+                acfg is None or acfg.auto_pause
+            ):
                 self._pause_agent(name)
             return
         self._failures[name] = 0

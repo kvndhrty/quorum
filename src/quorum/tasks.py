@@ -13,7 +13,7 @@ of *runs*. Everything durable lives under `tasks/<id>/`:
 Status is a *reported* string, not an enforced state machine: the harness
 calls `quorum task report --status <word>` and quorum records whatever word
 it chose. Only the TERMINAL_STATUSES set carries meaning inside quorum — the
-monitor stops attending to a task once it reaches one of them.
+manager stops attending to a task once it reaches one of them.
 
 Guidance flows the other way through the ordinary message bus: each task
 owns the inbox `task-<id>`, and the runner injects claimed messages into the
@@ -55,7 +55,6 @@ class Task(BaseModel):
     pr_url: str | None = None
     use_worktree: bool = True
     workdir: str | None = None  # resolved on first run
-    resumes: int = 0
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -197,7 +196,7 @@ def report(
 
     Appends to reports.jsonl, updates the task's status (and pr_url when
     given), and mirrors the report onto the board so dashboards and the
-    monitor see it without polling every task directory's log.
+    manager see it without polling every task directory's log.
     """
     home = Path(home)
     store = TaskStore(home)

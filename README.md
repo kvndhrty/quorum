@@ -1,28 +1,32 @@
 # quorum
 
-**Orchestrate long-running coding tasks with the harness you already use.**
-Point quorum at your repos, queue tasks in plain English, and let your coding
-agent CLI — `claude`, `codex`, `opencode`, anything that takes a prompt — do
-the work in an isolated git worktree while quorum's monitor watches progress,
-pokes agents that stall, and escalates to you when a human is really needed.
-One process, no root, no cron, no database; everything is a plain file you
-can `cat`.
+**Orchestrate long-running coding tasks with the harness you already use —
+supervised by that same harness.** Point quorum at your repos, queue tasks
+in plain English, and let your coding agent CLI — `claude`, `codex`,
+`opencode`, anything that takes a prompt — do the work in isolated git
+worktrees. The supervisor is an agent too: quorum's **manager** periodically
+hands your harness a digest of everything happening (every task's status,
+output, and liveness, plus its own past actions and their outcomes) and lets
+it decide — launch, nudge, relaunch, spin up follow-up work, or escalate to
+you. Supervision policy is a prompt you can edit, not code. One process, no
+root, no cron, no database; everything is a plain file you can `cat`.
 
 ```
 quorum task add my-api "add rate limiting to the public endpoints, then open a PR"
         │
 ┌─ quorum up ─────────────────────────────────────────────────────┐
-│  monitor    launches queued tasks, watches for stalls,          │
-│             pokes stuck agents, escalates when blocked          │
+│  manager    your harness, reading the whole situation and       │
+│             acting: launch, nudge, relaunch, task add,          │
+│             escalate — every action journaled and auditable     │
 │                                                                 │
 │  task runs  your harness (claude/codex/opencode/...) working    │
 │             in worktrees/<task>/, reporting progress back       │
-│             through `quorum task report` and reading your       │
-│             guidance from `quorum task inbox`                   │
+│             through `quorum task report` and reading guidance   │
+│             from `quorum task inbox`                            │
 └──────────────────── all state in ~/.quorum ─────────────────────┘
         ▲                    ▲                    ▲
    quorum status        quorum tui           quorum web
-   quorum task tail     (steer with `n`)     (localhost only)
+   quorum manager tell  (steer with `n`)     (localhost only)
 ```
 
 ## Install
@@ -71,6 +75,8 @@ Then, from another shell:
 quorum status                # supervisor, agents, tasks, deadlines
 quorum task tail a3f2k9 -f   # live harness transcript
 quorum task nudge a3f2k9 "prefer the retry approach over sleeps"
+quorum manager tell "the api task is urgent; park everything else"
+quorum manager journal       # what the manager did, and why
 quorum tui                   # dashboard; select a task, press n to steer
 quorum web                   # http://127.0.0.1:8787
 ```
@@ -86,23 +92,33 @@ quorum web                   # http://127.0.0.1:8787
   `quorum task inbox` — and the conventional flow is
   `planning → executing → reviewing → pr → done`. Quorum records what the
   harness says; it never enforces a state machine.
-- **The monitor shepherds.** Quorum's one built-in agent launches queued
-  tasks, notices silence (no output, no reports), drops a poke into the
-  task's inbox, resumes runs that exited without finishing — a bounded number
-  of times — and then marks the task `blocked` and tells you.
-- **Guidance is a message, not a keystroke.** Your nudges and the monitor's
+- **The manager is an agent, not a ruleset.** Each cycle it compiles a
+  situation digest — including its own recent actions and whether they
+  changed anything — and your harness decides what to do, with real
+  authority: `task run`, `task nudge`, `task add`, `task cancel`, escalate.
+  Every action is auto-journaled (`quorum manager journal`); the journal
+  feeds back into the next digest so the manager never loops on an
+  intervention that isn't working. Steer it with `quorum manager tell`.
+- **Guidance is a message, not a keystroke.** Your nudges and the manager's
   pokes travel the same file-based inbox; the next run starts with them in
   its prompt, and a cooperative harness picks them up mid-run.
+- **Failure is loud and recovery is automatic.** If your LLM service goes
+  down, every harness-driven tick fails visibly — and keeps being scheduled,
+  so the first tick after service returns reads the world from files and
+  relaunches whatever died. No degraded fallback mode to babysit.
 - **All state is files** under `QUORUM_HOME` (default `~/.quorum`): task
   records, transcripts, a message board, inboxes — written with atomic
   tmp+rename. The TUI and web dashboard are pure readers and work even when
   the supervisor is down. Copy the directory and your whole setup moves.
 
-## Optional LLM
+## Supervision policy is a prompt
 
-The monitor works without one (mtime-based stall detection, canned pokes).
-Give it an LLM in `[llm]` and it reads transcripts to draft specific,
-situation-aware nudges. Any CLI that turns a prompt into text works.
+`~/.quorum/prompts/manager.md` is the manager's constitution: how patient it
+is, when it escalates, how it words its pokes, when creating follow-up work
+is warranted. Edit it to retune your manager; delete it to restore the
+default. (An optional `[llm]` section separately gives *plugin* agents a
+small-completion client — the manager and tasks run your full harness
+directly.)
 
 ## Optional sandbox
 
@@ -115,9 +131,9 @@ See [docs/guide.md](docs/guide.md#sandboxing).
 
 ## Customizing
 
-- **Configure** harnesses, stall thresholds, and resume budgets in
+- **Configure** harnesses, schedules, and the manager's action budget in
   `config.toml` — quorum never rewrites that file.
-- **Retune** the task preamble and the monitor's nudges by editing
+- **Retune** the task preamble and the manager's policy by editing
   `~/.quorum/prompts/*.md`; delete a file to restore the default.
 - **Extend** with your own agents: drop a ~20-line Python file into
   `~/.quorum/plugins/` — [examples/steward.py](examples/steward.py) is a

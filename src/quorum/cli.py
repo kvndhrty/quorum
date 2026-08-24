@@ -23,10 +23,12 @@ board_app = typer.Typer(help="Read and post to the public message board.", no_ar
 project_app = typer.Typer(help="Manage registered projects.", no_args_is_help=True)
 agent_app = typer.Typer(help="Inspect, run, and control agents.", no_args_is_help=True)
 task_app = typer.Typer(help="Create, run, and guide harness-driven tasks.", no_args_is_help=True)
+manager_app = typer.Typer(help="Talk to (and audit) the manager agent.", no_args_is_help=True)
 app.add_typer(board_app, name="board")
 app.add_typer(project_app, name="project")
 app.add_typer(agent_app, name="agent")
 app.add_typer(task_app, name="task")
+app.add_typer(manager_app, name="manager")
 
 _HOME_OPT = typer.Option(None, "--home", help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum).")
 
@@ -51,6 +53,61 @@ def _load_config(home: Path):
         return load_config(home)
     except ConfigError as e:
         raise _fail(str(e)) from None
+
+
+def _manager_guard(
+    home: Path,
+    action: str,
+    target: str | None = None,
+    target_status: str | None = None,
+    args: str | None = None,
+    always_journal: bool = False,
+) -> None:
+    """Auto-journal (and rate-cap) actions taken by the manager's harness.
+
+    Manager runs carry QUORUM_ACTOR=manager and a QUORUM_MANAGER_RUN id in
+    their environment; every mutating CLI command routes through here, so
+    the journal is ground truth — not the model's self-report — and it is
+    what the next digest feeds back to prevent degenerate loops. The only
+    rail is rate: a per-run action cap. Choice is never second-guessed.
+    """
+    from .agents.manager import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
+
+    is_manager = os.environ.get("QUORUM_ACTOR") == "manager"
+    if not is_manager and not always_journal:
+        return
+    run = os.environ.get("QUORUM_MANAGER_RUN", "") if is_manager else ""
+    if is_manager and run:
+        cap = DEFAULT_MAX_ACTIONS_PER_RUN
+        try:
+            config = _load_config(home)
+            for acfg in config.agents.values():
+                if acfg.type == "manager":
+                    cap = int(acfg.settings.get("max_actions_per_run", cap))
+                    break
+        except typer.Exit:
+            pass
+        used = len([e for e in fsio.read_jsonl(journal_path(home)) if e.get("run") == run])
+        if used >= cap:
+            typer.secho(
+                f"action refused: manager action cap ({cap}) reached for this run — "
+                "remaining work waits for your next scheduled run",
+                fg="red", err=True,
+            )
+            raise typer.Exit(1)
+    entry = {
+        "at": fsio.iso(fsio.utc_now()),
+        "run": run,
+        "actor": "manager" if is_manager else "user",
+        "action": action,
+    }
+    if target:
+        entry["target"] = target
+    if target_status:
+        entry["target_status"] = target_status
+    if args:
+        entry["args"] = args
+    fsio.append_jsonl(journal_path(home), entry)
 
 
 def _resolve_task(home: Path, prefix: str):
@@ -162,7 +219,7 @@ def task_add(
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Queue a task. The monitor starts it while `quorum up` runs; or start it
+    """Queue a task. The manager starts it while `quorum up` runs; or start it
     yourself with `quorum task run`."""
     from .projects import ProjectRegistry
     from .tasks import TaskStore
@@ -178,6 +235,7 @@ def task_add(
     if name not in config.harness:
         known = ", ".join(sorted(config.harness)) or "none configured"
         raise _fail(f"no [harness.{name}] in config.toml (known: {known})")
+    _manager_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
     task = TaskStore(target).add(
         project=project,
         prompt=prompt,
@@ -185,7 +243,7 @@ def task_add(
         use_worktree=config.tasks.worktree and not no_worktree,
     )
     typer.secho(f"queued task {task.short_id} on {project} (harness: {name})", fg="green")
-    typer.echo(f"start now: `quorum task run {task.short_id}` — or let the monitor pick it up under `quorum up`")
+    typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
 
 
 @task_app.command("list")
@@ -223,12 +281,13 @@ def task_run(
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Execute one harness run of a task (the monitor does this automatically
+    """Execute one harness run of a task (the manager does this automatically
     under `quorum up`)."""
     from .runner import RunnerError, launch_detached, run_task
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    _manager_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
         pid = launch_detached(target, task.id)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
@@ -342,7 +401,10 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    MessageBus(target).send("user", inbox_name(task.id), type="guidance", text=text)
+    _manager_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
+                   args=text[:80])
+    sender = "manager" if os.environ.get("QUORUM_ACTOR") == "manager" else "user"
+    MessageBus(target).send(sender, inbox_name(task.id), type="guidance", text=text)
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
 
 
@@ -352,11 +414,12 @@ def task_cancel(
     kill: bool = typer.Option(False, "--kill", help="Also SIGTERM a live runner."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Mark a task cancelled so the monitor stops attending to it."""
+    """Mark a task cancelled so the manager stops attending to it."""
     from .tasks import TaskStore, runner_lock_path
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    _manager_guard(target, "task.cancel", target=task.short_id, target_status=task.status)
     TaskStore(target).update(task.id, status="cancelled")
     typer.echo(f"task {task.short_id} cancelled")
     if kill:
@@ -381,8 +444,11 @@ def board_post(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Post a message to a board topic."""
-    bus = MessageBus(get_home(home))
-    msg = bus.post(sender=sender, topic=topic, type=type, text=text)
+    target = get_home(home)
+    _manager_guard(target, "board.post", args=f"{topic}: {text[:80]}")
+    if sender == "user" and os.environ.get("QUORUM_ACTOR") == "manager":
+        sender = "manager"
+    msg = MessageBus(target).post(sender=sender, topic=topic, type=type, text=text)
     typer.echo(f"posted {msg.id} to {topic}")
 
 
@@ -602,6 +668,7 @@ def _agent_command(home: Path | None, name: str, command: str, note: str) -> Non
     config = _load_config(target)
     if name not in config.agents:
         raise _fail(f"no agent {name!r} in config.toml") from None
+    _manager_guard(target, f"agent.{command}", target=name)
     MessageBus(target).send("user", "supervisor", type=f"agent.{command}", payload={"agent": name})
     typer.echo(note)
 
@@ -622,6 +689,47 @@ def agent_resume(name: str, home: Path | None = _HOME_OPT) -> None:
 def agent_run_now(name: str, home: Path | None = _HOME_OPT) -> None:
     """Ask the running supervisor to tick an agent immediately."""
     _agent_command(home, name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
+
+
+# -- manager ---------------------------------------------------------------
+
+
+@manager_app.command("tell")
+def manager_tell(text: str, home: Path | None = _HOME_OPT) -> None:
+    """Send the manager a directive; its next run starts with it in the digest."""
+    target = get_home(home)
+    MessageBus(target).send("user", "manager", type="directive", text=text)
+    typer.secho("directive queued for the manager's next run", fg="green")
+
+
+@manager_app.command("note")
+def manager_note(text: str, home: Path | None = _HOME_OPT) -> None:
+    """Journal a reasoning note (the manager's harness calls this; humans can too)."""
+    target = get_home(home)
+    _manager_guard(target, "note", args=text, always_journal=True)
+    typer.echo("noted")
+
+
+@manager_app.command("journal")
+def manager_journal(
+    lines: int = typer.Option(20, "-n", "--lines", help="Entries to show."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Print the manager's recent action journal (auto-recorded, per-run tagged)."""
+    from .agents.manager import journal_path
+
+    entries = fsio.read_jsonl(journal_path(get_home(home)))[-lines:]
+    if not entries:
+        typer.echo("no manager actions recorded yet")
+        return
+    for e in entries:
+        run = e.get("run", "")
+        line = f"[{e.get('at', '')}] ({e.get('actor', '?')}{'/' + run[-6:].lower() if run else ''}) {e.get('action', '')}"
+        if e.get("target"):
+            line += f" -> {e['target']}"
+        if e.get("args"):
+            line += f"  {e['args']}"
+        typer.echo(line)
 
 
 def _parse_window(text: str) -> timedelta:

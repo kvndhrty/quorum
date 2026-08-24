@@ -7,7 +7,7 @@ A run is the unit of control for a generic harness. The runner:
    `QUORUM_HOME/worktrees/<id>` by default, so parallel tasks on one repo
    never collide and the main checkout stays clean),
 3. claims any guidance waiting in the task's inbox and injects it — this is
-   how the monitor's pokes and the user's steering reach the harness,
+   how the manager's pokes and the user's steering reach the harness,
 4. composes the prompt (preamble teaching the report/inbox protocol + the
    task prompt + guidance) and spawns the configured harness argv,
 5. streams stdout into `transcript.jsonl` line by line, capturing a
@@ -16,7 +16,7 @@ A run is the unit of control for a generic harness. The runner:
 
 The runner never sets a task's status: status is whatever the harness last
 reported via `quorum task report`. A run that exits without reporting is the
-monitor's cue to poke and resume.
+manager's cue to poke and resume.
 
 Runs execute as their own processes (`quorum task run --detach` uses
 start_new_session), not supervisor threads, so tasks survive supervisor
@@ -114,19 +114,21 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
     return "\n\n".join(parts)
 
 
-def build_argv(harness: HarnessConfig, task: Task, prompt: str) -> list[str]:
+def build_harness_argv(harness: HarnessConfig, prompt: str, session: str | None = None) -> list[str]:
     """Substitute {prompt}/{session} into the start or resume template."""
-    template = harness.resume if (task.session and harness.resume) else harness.start
+    template = harness.resume if (session and harness.resume) else harness.start
     argv, saw_prompt = [], False
     for element in template:
         if "{prompt}" in element:
             saw_prompt = True
-        argv.append(
-            element.replace("{prompt}", prompt).replace("{session}", task.session or "")
-        )
+        argv.append(element.replace("{prompt}", prompt).replace("{session}", session or ""))
     if not saw_prompt:
         argv.append(prompt)
     return argv
+
+
+def build_argv(harness: HarnessConfig, task: Task, prompt: str) -> list[str]:
+    return build_harness_argv(harness, prompt, task.session)
 
 
 def run_task(home: Path, config: Config, task_prefix: str) -> int:
@@ -159,6 +161,11 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         argv = build_argv(harness, task, prompt)
 
         env = {**os.environ, **harness.env, "QUORUM_HOME": str(home)}
+        # The task harness acts as itself, not as whoever launched it: a
+        # manager-initiated run must not leak the manager's actor identity
+        # (its quorum calls would be journaled and capped as manager actions).
+        env.pop("QUORUM_ACTOR", None)
+        env.pop("QUORUM_MANAGER_RUN", None)
         started = fsio.utc_now()
         proc = subprocess.Popen(
             argv,
@@ -212,6 +219,11 @@ def launch_detached(home: Path, task_id: str) -> int:
     log_path = runner_log_path(home, task_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "QUORUM_HOME": str(home)}
+    # The detached child re-invokes `quorum task run`; that inner invocation
+    # is infrastructure, not a second manager action — strip the actor tag
+    # so it is neither journaled again nor charged against the action cap.
+    env.pop("QUORUM_ACTOR", None)
+    env.pop("QUORUM_MANAGER_RUN", None)
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             [sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home)],

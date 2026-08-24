@@ -23,8 +23,11 @@ skip there. `test_web.py` needs the `web` extra (it `importorskip`s FastAPI).
 Bring-your-own-harness orchestration for long-running coding tasks: the user
 registers projects, queues tasks in plain English, and a configured harness CLI
 (claude / codex / opencode / anything) executes each task as a sequence of *runs*
-in a per-task git worktree. Quorum ships the manager (a monitor agent) and the
-comms substrate (file-based board + inboxes), **not** prescriptive worker agents.
+in a per-task git worktree. Supervision is **itself harness-driven**: the one
+built-in agent (the manager) runs the same harness over a situation digest and
+acts through the quorum CLI. Quorum ships the manager and the comms substrate
+(file-based board + inboxes), **not** prescriptive worker agents, and supervision
+policy lives in `prompts/manager.md`, not Python.
 
 Read `docs/architecture.md` first — it is the design record. The three invariants
 below govern nearly every change:
@@ -36,9 +39,12 @@ below govern nearly every change:
 2. **All state is plain files** under `QUORUM_HOME` (resolution: `--home` > `$QUORUM_HOME`
    > `./quorum-home` if present > `~/.quorum`). No database. Adding new durable state
    means adding a file layout, documented in `docs/architecture.md`.
-3. **Degrade gracefully.** LLM, dashboards, and sandbox are all optional. The monitor
-   works without an LLM; every view works with the supervisor stopped; a harness that
-   ignores the report protocol is still monitored passively.
+3. **Fail loudly, recover automatically.** Views/dashboards degrade gracefully (pure
+   file readers; work with the supervisor stopped) and a harness that ignores the
+   report protocol is still observed passively — but supervision has **no no-LLM
+   fallback by design**: without a working harness the manager's tick raises every
+   time, and its `auto_pause = false` config keeps the schedule firing so it
+   self-recovers when the LLM service returns. Do not add degraded supervision paths.
 
 ### Layers
 
@@ -53,7 +59,7 @@ below govern nearly every change:
   `os.rename`, so exactly one claimant wins). Task guidance (`task-<id>` inboxes) and
   the supervisor control channel both ride this; no new transports.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
-  `report()` (the harness's return channel), path helpers shared by runner/monitor/
+  `report()` (the harness's return channel), path helpers shared by runner/manager/
   views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`
   (`done`/`blocked`/`cancelled`) mean anything to quorum. `short_id` is the ULID's
   random *tail* (the head is a same-instant-shared timestamp); `resolve()` accepts
@@ -64,10 +70,17 @@ below govern nearly every change:
   `[harness.<name>]` argv template → stream stdout to `transcript.jsonl`, capturing
   `session_id`. The runner **never sets task status**. `launch_detached` spawns
   `python -m quorum task run` in a new session.
-- `agents/monitor.py` — the only builtin: launches queued tasks (with a bootstrap
-  grace window), warns + nudges on stalls, resumes dead runs up to `max_resumes`,
-  then marks `blocked`. Nudges go into the task inbox; LLM-drafted when configured,
-  canned otherwise.
+- `agents/manager.py` — the only builtin, and it makes **no decisions in Python**:
+  its tick builds a situation digest (`build_digest`, pure over files — task
+  statuses, runner liveness, quiet time, report/transcript tails, the manager's own
+  action journal with then-vs-now outcomes, user directives from the `manager`
+  inbox), renders `prompts/manager.md`, and runs the configured harness
+  synchronously (cwd=home, `QUORUM_ACTOR=manager` + per-run `QUORUM_MANAGER_RUN`
+  in env, bounded by `run_timeout_seconds`, stdout → `state/manager/transcript.jsonl`).
+  The harness acts via the quorum CLI; the CLI's `_manager_guard` auto-journals
+  every mutating action to `state/manager/journal.jsonl` and enforces the per-run
+  action cap (`max_actions_per_run`) — the only rail, a rate limit, never a veto.
+  Failures raise; directives are rejected back to `new/` on crash.
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single
   seam through which agents touch the world: `ctx.bus`, `ctx.projects`, `ctx.llm`,
   `ctx.prompt()`, `ctx.load_state()/save_state()`, `ctx.log_action()`, `ctx.now()`.
@@ -81,10 +94,10 @@ below govern nearly every change:
 - `views.py` — the shared read-model assembled purely from files; `quorum status`, the
   web app, and the TUI are all pure readers of it (the TUI/web's one write affordance
   is nudging a task, via the same bus call as the CLI).
-- `registry.py` — resolves an agent `type` string: builtin short name (only `monitor`),
+- `registry.py` — resolves an agent `type` string: builtin short name (only `manager`),
   else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
-- `llm/` — `LLMBackend` is a one-method protocol for quorum's *own* small completions
-  (monitor nudges) — task harnesses are not LLM backends. `LLMClient.complete()`
+- `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small
+  completions — neither task harnesses nor the manager go through it. `LLMClient.complete()`
   **never raises**; `None` means "no LLM today". No module outside `llm/` may assume
   the `cli` backend (`proxy` is a reserved seam).
 - `sandbox.py` — the *only* module that imports `nono_py`, always lazily and inside
@@ -94,14 +107,15 @@ below govern nearly every change:
   with network open.
 - `config.py` — `config.toml` is user-owned and **quorum never writes it back**; machine
   state goes to JSON. `[harness.<name>]` tables are argv templates; `[tasks]` holds
-  worktree/stall/resume defaults. Schedules are validated by regex and translated to
-  APScheduler trigger kwargs by `parse_schedule`.
+  worktree/default-harness; `AgentConfig.auto_pause=false` exempts an agent from the
+  5-failure auto-pause (the manager uses it). Schedules are validated by regex and
+  translated to APScheduler trigger kwargs by `parse_schedule`.
 - `projects.py` — `projects/<slug>.json` is canonical, but a `.quorum.toml` marker inside
   the project directory merges over it at read time. Agents and views must go through
   `ProjectRegistry` and must only ever *read* project dirs — task writes happen in
   worktrees.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
-  `default_prompts/` (`task-preamble`, `monitor-nudge`); deleting a file restores the
+  `default_prompts/` (`task-preamble`, `manager`); deleting a file restores the
   default. `format_map` with a missing-key-preserving dict.
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
@@ -109,7 +123,7 @@ below govern nearly every change:
 
 ### Adding an agent
 
-Builtins live in `agents/__init__.py::BUILTIN_NAMES` (currently just `monitor`) —
+Builtins live in `agents/__init__.py::BUILTIN_NAMES` (currently just `manager`) —
 prefer plugins unless quorum itself needs the behavior. The user-facing contract is
 `docs/guide.md#writing-your-own-agents`: idempotent `tick()`, dedupe repeat
 announcements through `load_state()/save_state()`, raising is safe.
@@ -119,10 +133,12 @@ announcements through `load_state()/save_state()`, raising is safe.
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME` in `tmp_path`, exported via
 `$QUORUM_HOME`), `clock` (a `FakeClock` passed as `AgentContext(now=...)`), and `fake_llm`.
 `tests/bin/fake_harness.py` is a fake coding harness (echoes argv/prompt, emits a
-`session_id`, `report` mode calls `python -m quorum task report` — the full cooperative
-loop). Runner tests build real git repos; monitor tests monkeypatch
-`quorum.runner.launch_detached` and fabricate locks/mtimes (a "live" runner is a lock
-holding pid 1 — never `os.getpid()`, which same-process lock takeover treats as stale).
+`session_id`; `report` mode calls `python -m quorum task report`; `manager_act` /
+`manager_flood` modes act like a manager — each `[harness.*]` table pins its mode via
+its `env` field, so a fake task harness and a fake manager harness coexist). Runner and
+manager tests build real git repos and run the loop for real; when a test needs a
+"live" runner, its lock holds pid 1 — never `os.getpid()`, which same-process lock
+takeover treats as stale.
 `test_sandbox.py` injects a fake `nono_py` via `sys.modules`; `test_nono_integration.py`
 exercises real kernel enforcement.
 
