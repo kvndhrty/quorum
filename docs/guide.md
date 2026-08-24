@@ -69,8 +69,10 @@ gets the prompt appended as the final argument.
 
 ```toml
 [harness.claude]
-start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose"]
-resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose"]
+start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
+resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
 
 [harness.codex]
 start = ["codex", "exec", "{prompt}"]
@@ -92,10 +94,15 @@ Notes:
   works, because the worktree (and everything the previous run wrote there)
   persists between runs.
 - **Autonomy flags.** Runs are unattended: a harness that stops to ask for
-  interactive permission will look like a stall. Give your harness whatever
-  non-interactive/permission flags you're comfortable with (e.g. Claude
-  Code's permission modes), ideally paired with the [sandbox](#sandboxing)
-  so the blast radius is the worktree, not your machine.
+  interactive permission stalls silently on its first denied tool call, and
+  the monitor will eventually poke and resume it to no effect. Grant
+  permissions explicitly. **Prefer a scoped allowlist** like the
+  `--allowedTools` list above — it covers editing files, git, `gh` for the
+  PR step, and quorum's own progress protocol (`Bash(quorum:*)` is what lets
+  the harness call `quorum task report` / `quorum task inbox`) — over
+  blanket bypasses like `--dangerously-skip-permissions`. Whatever you
+  grant, pairing it with the [sandbox](#sandboxing) keeps the blast radius
+  to the worktree, not your machine.
 - **Environment.** The run inherits your environment plus the harness's
   `env` table, with `QUORUM_HOME` set — that's how `quorum task report`
   inside the run finds the right home.
