@@ -51,6 +51,13 @@ below govern nearly every change:
    time, and its `auto_pause = false` config keeps the schedule firing so it
    self-recovers when the LLM service returns. Do not add degraded supervision paths.
 
+These are the project's *current* design commitments, not gospel. Quorum is
+evolving: any recorded stance — including the big three above and smaller ones
+noted per-layer below (e.g. the TUI/web being pure readers) — is open to
+deliberate revision when a change is worth it. Don't contort a feature to fit
+an old rule; propose breaking the rule, and when it changes, update this file
+and `docs/architecture.md` in the same commit so the record stays true.
+
 ### Layers
 
 - `fsio.py` — the primitives everything else stands on: `atomic_write_*` (dot-prefixed
