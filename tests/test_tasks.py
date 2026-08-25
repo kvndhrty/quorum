@@ -36,6 +36,13 @@ def make_repo(tmp_path: Path, name: str = "proj") -> Path:
     return repo
 
 
+def repo_git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
+        check=True, capture_output=True,
+    )
+
+
 def harness_config(home: Path, extra: str = "") -> None:
     body = (
         "[tasks]\n"
@@ -246,3 +253,56 @@ def test_second_concurrent_run_is_refused(home: Path, project: str):
             run_task(home, config, task.id)
     finally:
         lock.unlink()
+
+
+def test_workdir_git_state_tracks_dirty_and_unpushed(home: Path, tmp_path: Path):
+    repo = make_repo(tmp_path)
+    store = TaskStore(home)
+    task = store.add(project="proj", prompt="p", harness="fake")
+    assert tasks.workdir_git_state(task) is None  # no workdir resolved yet
+
+    task = store.update(task.id, workdir=str(repo))
+    state = tasks.workdir_git_state(task)
+    assert state["dirty"] == 0
+    assert state["unpushed"] is None  # no remote: pushing does not apply
+
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo_git(repo, "remote", "add", "origin", str(bare))
+    repo_git(repo, "push", "-q", "-u", "origin", "HEAD")
+    assert tasks.workdir_git_state(task)["unpushed"] == 0
+
+    (repo / "work.txt").write_text("wip")
+    state = tasks.workdir_git_state(task)
+    assert state["dirty"] == 1
+    assert state["unpushed"] == 0
+
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "wip")
+    state = tasks.workdir_git_state(task)
+    assert state["dirty"] == 0
+    assert state["unpushed"] == 1
+    assert state["branch"]
+
+    repo_git(repo, "push", "-q", "origin", "HEAD")
+    assert tasks.workdir_git_state(task)["unpushed"] == 0
+
+
+def test_task_rows_surface_git_state_but_skip_settled_tasks(home: Path, tmp_path: Path):
+    from datetime import timedelta
+
+    from quorum import views
+
+    repo = make_repo(tmp_path)
+    store = TaskStore(home)
+    task = store.add(project="proj", prompt="p", harness="fake")
+    store.update(task.id, workdir=str(repo), status="executing")
+    (repo / "work.txt").write_text("wip")
+
+    row = views.task_rows(home)[0]
+    assert row["git"]["dirty"] == 1
+
+    # long-terminal tasks stop being probed (views refresh constantly)
+    old = fsio.utc_now() - timedelta(hours=views.GIT_PROBE_TERMINAL_HOURS + 1)
+    store.update(task.id, now=old, status="done")
+    assert views.task_rows(home)[0]["git"] is None

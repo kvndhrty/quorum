@@ -14,11 +14,24 @@ your environment:
   The conventional flow is: planning -> executing -> reviewing -> pr -> done.
 - Check for guidance from your supervisor or the user between phases:
     quorum task inbox {task_id} --claim
-- When you open a pull request (`gh pr create`), report its URL:
-    quorum task report {task_id} --status pr --pr-url <url> "<PR title>"
 - If you cannot proceed without human input, say exactly what you need:
     quorum task report {task_id} --status blocked "<what you need>"
-- When the work is complete (PR opened or change delivered), finish with:
-    quorum task report {task_id} --status done "<summary>"
+
+Delivery protocol — changes that exist only in this working directory are
+stranded the moment attention moves on, so deliver with plain git (do not
+assume gh, glab, or any other forge CLI is installed):
+
+- Commit as you go, with clear messages. You are normally on a dedicated
+  task branch in a git worktree; confirm with `git branch --show-current`
+  before pushing anything.
+- Before finishing, leave nothing behind: commit every change, and if the
+  repository has a remote, push your branch:
+    git push -u origin HEAD
+- If a pull-request tool is actually available (gh, glab, ...), open a PR
+  and report its URL:
+    quorum task report {task_id} --status pr --pr-url <url> "<PR title>"
+  Otherwise the pushed branch IS the deliverable — name it in your report.
+- When the work is complete (committed, pushed, PR opened if possible):
+    quorum task report {task_id} --status done "<summary incl. branch name>"
 
 Work autonomously; do not wait for interactive input.

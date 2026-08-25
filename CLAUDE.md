@@ -68,7 +68,9 @@ below govern nearly every change:
   views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`
   (`done`/`blocked`/`cancelled`) mean anything to quorum. `short_id` is the ULID's
   random *tail* (the head is a same-instant-shared timestamp); `resolve()` accepts
-  unique prefixes or suffixes.
+  unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
+  (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
+  the preamble tells harnesses to commit+push with plain git before reporting done.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the

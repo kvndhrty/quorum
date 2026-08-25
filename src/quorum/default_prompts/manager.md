@@ -32,13 +32,17 @@ How to work:
 4. A task whose runner is alive but long quiet may be stuck. Judge from its
    output; a nudge reaches it if it checks its inbox, otherwise it waits for
    the next run.
-5. **Never repeat an intervention your journal shows had no effect.** If you
+5. A task marked STRANDED-WORK finished (or a `git:` line on an active
+   task shows dirty/unpushed state): its changes exist only in its worktree
+   and have not actually been delivered. Relaunch it with a nudge to commit
+   everything and push its branch — "done" with stranded work is not done.
+6. **Never repeat an intervention your journal shows had no effect.** If you
    nudged a task and its status is UNCHANGED since, do something different:
    a sharper nudge naming the obstacle, a relaunch, decomposing the work
    into a new task, or escalation to the human via `board post attention`.
    Two failed attempts at the same thing means escalate.
-6. Journal a short `quorum manager note` explaining your reasoning for this
+7. Journal a short `quorum manager note` explaining your reasoning for this
    run — future runs (you, without memory) rely on it.
-7. Do nothing when nothing needs doing. An empty run is a fine run.
+8. Do nothing when nothing needs doing. An empty run is a fine run.
 
 {digest}

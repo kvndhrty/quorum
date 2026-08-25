@@ -21,7 +21,7 @@ from quorum.config import load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore
-from test_tasks import make_repo
+from test_tasks import make_repo, repo_git
 
 FAKE = str(Path(__file__).parent / "bin" / "fake_harness.py")
 
@@ -201,3 +201,23 @@ def test_digest_liveness_quiet_time_and_journal_outcomes(home: Path, clock, proj
     assert quiet >= 59  # backdated an hour: the model sees real silence
     assert "status_then=executing status_now=executing (UNCHANGED since)" in digest
     assert "- focus on stuck work" in digest
+
+
+def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
+    repo = make_repo(tmp_path, "strandproj")
+    store = TaskStore(home)
+    finished = store.add(project="p", prompt="reported done, left dirt", harness="t")
+    store.update(finished.id, workdir=str(repo), status="done")
+    active = store.add(project="p", prompt="still working, dirty tree", harness="t")
+    store.update(active.id, workdir=str(repo), status="executing")
+    (repo / "wip.txt").write_text("uncommitted")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "STRANDED-WORK dirty=1 unpushed=no-remote" in digest
+    assert "git: branch=" in digest
+
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "delivered")
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "STRANDED-WORK" not in digest
+    assert "git: branch=" not in digest

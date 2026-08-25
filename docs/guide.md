@@ -181,6 +181,17 @@ shows up in every view. `quorum task cancel <id>` stops the manager's
 attention (`--kill` also SIGTERMs a live runner). The work itself lives on
 the `quorum/<short-id>` branch either way.
 
+**Delivery.** The preamble also teaches the harness to deliver with plain
+git — commit everything and `git push -u origin HEAD` before reporting
+`done` — with no assumption that `gh`, `glab`, or any forge CLI is
+installed; opening a PR is a bonus when the tooling happens to exist,
+otherwise the pushed branch is the deliverable. Quorum also verifies:
+every view flags a task whose working directory holds uncommitted changes
+or unpushed commits (`⚠ 2 uncommitted, 1 unpushed` in `quorum status`),
+and the manager's digest marks a finished task in that state as
+`STRANDED-WORK` — the default manager prompt relaunches it with a nudge to
+commit and push, so work can't silently rot in a worktree.
+
 ## The manager
 
 Supervision in quorum is not a set of thresholds — it's your harness reading

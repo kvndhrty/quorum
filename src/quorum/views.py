@@ -15,9 +15,14 @@ from .config import Config, ConfigError, load_config
 from .messages import MessageBus
 from .projects import ProjectRegistry
 from .supervisor import LOCK_TOUCH_SECONDS
-from .tasks import TaskStore, read_reports, runner_alive
+from .tasks import TERMINAL_STATUSES, TaskStore, read_reports, runner_alive, workdir_git_state
 
 SUPERVISOR_STALE_AFTER = LOCK_TOUCH_SECONDS * 3
+
+# How long after a task goes terminal its workdir keeps being probed for
+# stranded work. Views refresh often (the TUI every 2s) and each probe is
+# a few git subprocesses, so long-settled tasks stop being probed.
+GIT_PROBE_TERMINAL_HOURS = 24
 
 
 def supervisor_status(home: Path) -> dict[str, Any]:
@@ -92,8 +97,15 @@ def project_rows(home: Path) -> list[dict[str, Any]]:
 
 def task_rows(home: Path) -> list[dict[str, Any]]:
     rows = []
+    now = fsio.utc_now()
     for t in TaskStore(home).list():
         last = read_reports(home, t.id, limit=1)
+        git_state = None
+        if t.status not in TERMINAL_STATUSES or (
+            (now - fsio.parse_iso(t.updated_at)).total_seconds()
+            < GIT_PROBE_TERMINAL_HOURS * 3600
+        ):
+            git_state = workdir_git_state(t)
         rows.append(
             {
                 "id": t.id,
@@ -105,6 +117,7 @@ def task_rows(home: Path) -> list[dict[str, Any]]:
                 "running": runner_alive(home, t.id),
                 "runs": len(t.runs),
                 "pr_url": t.pr_url,
+                "git": git_state,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,
                 "last_report": last[-1].get("text", "") if last else "",

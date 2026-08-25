@@ -147,7 +147,12 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    automatic.
 2. **Digest** (`agents/manager.py::build_digest`, a pure function over
    files): every active task's status, runner liveness, quiet time, recent
-   reports and transcript tail; recently finished tasks; the manager's own
+   reports and transcript tail, plus a `git:` line when its working
+   directory holds uncommitted changes or unpushed commits; recently
+   finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they
+   ended with such state — work a harness left in its worktree without
+   delivering it, which the default manager prompt treats as not done and
+   relaunches with a nudge to commit and push; the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked

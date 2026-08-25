@@ -207,6 +207,14 @@ def _echo_task_row(t: dict) -> None:
         line += f"  {t['last_report'][:60]}"
     if t["pr_url"]:
         line += f"  {t['pr_url']}"
+    git = t.get("git")
+    if git and (git["dirty"] or git["unpushed"]):
+        risks = []
+        if git["dirty"]:
+            risks.append(f"{git['dirty']} uncommitted")
+        if git["unpushed"]:
+            risks.append(f"{git['unpushed']} unpushed")
+        line += "  ⚠ " + ", ".join(risks)
     typer.echo(line)
 
 

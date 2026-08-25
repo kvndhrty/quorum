@@ -22,6 +22,7 @@ next run's prompt.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -256,3 +257,49 @@ def last_activity(home: Path, task_id: str) -> datetime | None:
     if newest is None:
         return None
     return datetime.fromtimestamp(newest, tz=UTC)
+
+
+def workdir_git_state(task: Task) -> dict[str, Any] | None:
+    """Git state of the task's working directory, or None when there is
+    nothing to probe (no workdir resolved yet, directory gone, not git).
+
+    Work only counts as delivered once it is committed *and* pushed;
+    anything less is stranded in the worktree the moment attention moves
+    on. This probe is how stranded work stays visible: views and the
+    manager digest surface `dirty` (uncommitted paths) and `unpushed`
+    (commits on HEAD that no remote ref has; None when the repository has
+    no remote to push to). Read-only — a few git plumbing calls.
+    """
+    if not task.workdir:
+        return None
+    workdir = Path(task.workdir)
+    if not workdir.is_dir():
+        return None
+
+    def git(*args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(workdir), *args],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    status = git("status", "--porcelain")
+    if status is None or status.returncode != 0:
+        return None
+    dirty = sum(1 for line in status.stdout.splitlines() if line.strip())
+    head = git("rev-parse", "--abbrev-ref", "HEAD")
+    branch = head.stdout.strip() if head is not None and head.returncode == 0 else ""
+    unpushed: int | None = None
+    remotes = git("remote")
+    if remotes is not None and remotes.returncode == 0 and remotes.stdout.strip():
+        count = git("rev-list", "--count", "HEAD", "--not", "--remotes")
+        if count is not None and count.returncode == 0:
+            try:
+                unpushed = int(count.stdout.strip())
+            except ValueError:
+                unpushed = None
+    return {"branch": branch, "dirty": dirty, "unpushed": unpushed}

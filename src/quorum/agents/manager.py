@@ -72,6 +72,12 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
+        git = tasks.workdir_git_state(t)
+        if git and (git["dirty"] or git["unpushed"]):
+            unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
+            lines.append(
+                f"  git: branch={git['branch']} dirty={git['dirty']} unpushed={unpushed}"
+            )
         for r in tasks.read_reports(home, t.id, limit=3):
             lines.append(f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}")
         for e in tasks.read_transcript_tail(home, t.id, limit=TRANSCRIPT_TAIL_LINES):
@@ -87,8 +93,14 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
     if recent_terminal:
         lines.append("## Recently finished (last 24h)")
         for t in recent_terminal:
-            lines.append(f"- [{t.status}] {t.short_id} project={t.project}"
-                         + (f" pr={t.pr_url}" if t.pr_url else ""))
+            line = f"- [{t.status}] {t.short_id} project={t.project}" + (
+                f" pr={t.pr_url}" if t.pr_url else ""
+            )
+            git = tasks.workdir_git_state(t)
+            if git and (git["dirty"] or git["unpushed"]):
+                unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
+                line += f" STRANDED-WORK dirty={git['dirty']} unpushed={unpushed}"
+            lines.append(line)
         lines.append("")
 
     lines.append("## Your recent actions (journal)")
