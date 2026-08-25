@@ -17,10 +17,19 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     nudge it, and journal a note
     manager_flood   echo + nudge the first task repeatedly until the CLI's
                     per-run action cap refuses; print the refusal
+    inject          echo + speak the stream-json injection protocol: emit a
+                    `result` event per turn and echo every stdin line back
+                    as an event; exits when the runner closes stdin. Before
+                    the first result it can seed its own mid-run message
+                    (FAKE_HARNESS_INJECT_POST below), which makes pump tests
+                    deterministic: the message provably lands *during* the
+                    run, yet before the runner could close an idle stdin.
     hang            sleep far past any test timeout (exercises run timeouts)
     fail            exit 3 without output
 
   FAKE_HARNESS_STATUS / FAKE_HARNESS_PR_URL   report-mode knobs
+  FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
+                             its own task, "tell" sends `manager tell`
 """
 
 import json
@@ -28,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -35,6 +45,11 @@ def quorum(*args) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "quorum", *args], capture_output=True, text=True
     )
+
+
+def task_id_from(prompt: str) -> str | None:
+    m = re.search(r"Task ID: (\S+)", prompt)
+    return m.group(1) if m else None
 
 
 def main() -> int:
@@ -52,11 +67,11 @@ def main() -> int:
     print(f"CWD| {os.getcwd()}")
 
     if mode == "report":
-        m = re.search(r"Task ID: (\S+)", prompt)
-        if not m:
+        task_id = task_id_from(prompt)
+        if not task_id:
             print("no task id found in prompt", file=sys.stderr)
             return 4
-        argv = ["task", "report", m.group(1),
+        argv = ["task", "report", task_id,
                 "--status", os.environ.get("FAKE_HARNESS_STATUS", "done"),
                 "finished by fake harness"]
         pr_url = os.environ.get("FAKE_HARNESS_PR_URL")
@@ -77,6 +92,29 @@ def main() -> int:
             print(f"ACT| task nudge {target} -> exit {nudged.returncode}")
             noted = quorum("manager", "note", f"launched and nudged {target}")
             print(f"ACT| note -> exit {noted.returncode}")
+
+    elif mode == "inject":
+        sys.stdout.flush()
+        # If the close logic ever regresses, die loudly instead of wedging CI.
+        watchdog = threading.Timer(30, lambda: os._exit(7))
+        watchdog.daemon = True
+        watchdog.start()
+        post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
+        if post == "nudge":
+            task_id = task_id_from(prompt)
+            if not task_id:
+                print("no task id found in prompt", file=sys.stderr)
+                return 4
+            quorum("task", "nudge", task_id, "switch to the fallback plan")
+        elif post == "tell":
+            quorum("manager", "tell", "pause new launches until tests pass")
+        print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            print(json.dumps({"type": "stdin", "received": json.loads(line)}), flush=True)
+            print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
 
     elif mode == "manager_flood":
         m = re.search(r"- \[\w+\] (\S+)", prompt)

@@ -32,7 +32,13 @@ from pathlib import Path
 from .. import fsio, tasks
 from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path, manager_env
 from ..agent import Agent
-from ..runner import build_harness_argv, resolve_harness, stream_transcript
+from ..runner import (
+    build_harness_argv,
+    guidance_note,
+    guidance_pump,
+    resolve_harness,
+    stream_transcript,
+)
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
@@ -128,9 +134,7 @@ class Manager(Agent):
         if not active and not claimed:
             return  # nothing to manage; don't spend a harness run on an idle home
 
-        directives = [
-            f"[{c.message.created_at}] {c.message.payload.get('text', '')}" for c in claimed
-        ]
+        directives = [guidance_note(c.message) for c in claimed]
         try:
             digest = build_digest(home, all_tasks, self.ctx.now(), directives)
             prompt = self.ctx.prompt("manager", digest=digest)
@@ -171,29 +175,37 @@ class Manager(Agent):
         proc = subprocess.Popen(
             argv,
             cwd=str(self.ctx.home),
+            stdin=subprocess.PIPE if harness.inject else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             env=env,
         )
-
-        reader = threading.Thread(
-            target=stream_transcript,
-            args=(proc, transcript),
-            kwargs={"extra": {"run": run_id}, "now": self.ctx.now},
-            daemon=True,
-        )
-        reader.start()
-        try:
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            reader.join(2)
-            raise RuntimeError(
-                f"manager harness run {run_id} timed out after {int(timeout)}s and was killed"
-            ) from None
+        # An inject-capable manager harness can be steered while a tick is in
+        # flight: `quorum manager tell` lands in the manager inbox and the
+        # pump forwards it as a user turn instead of waiting for the next tick.
+        with guidance_pump(self.ctx.home, "manager", harness, proc) as pump:
+            reader = threading.Thread(
+                target=stream_transcript,
+                args=(proc, transcript),
+                kwargs={
+                    "extra": {"run": run_id},
+                    "now": self.ctx.now,
+                    "on_event": pump.on_event if pump is not None else None,
+                },
+                daemon=True,
+            )
+            reader.start()
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                reader.join(2)
+                raise RuntimeError(
+                    f"manager harness run {run_id} timed out after {int(timeout)}s and was killed"
+                ) from None
         reader.join(5)
         if code != 0:
             raise RuntimeError(f"manager harness run {run_id} exited {code}")

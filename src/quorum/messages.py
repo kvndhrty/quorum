@@ -183,6 +183,16 @@ class MessageBus:
 
     # -- inbox claiming ---------------------------------------------------
 
+    def pending(self, agent: str) -> bool:
+        """True if unclaimed messages wait in `agent`'s inbox — a peek, no claim."""
+        try:
+            with os.scandir(self.inbox_dir / agent / "new") as entries:
+                return any(
+                    e.name.endswith(".json") and not fsio.is_tmp(e.name) for e in entries
+                )
+        except FileNotFoundError:
+            return False
+
     def claim(self, agent: str) -> Iterator[ClaimedMessage]:
         """Yield direct messages for `agent`, each atomically claimed via rename."""
         inbox = self.inbox_dir / agent

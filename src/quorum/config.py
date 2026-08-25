@@ -46,11 +46,18 @@ class HarnessConfig(BaseModel):
     appended as the final argument). `resume` is optional — without it, or
     without a captured session id, every run uses `start`; the worktree
     persists between runs, so a fresh session still sees prior progress.
+
+    `inject = "stream-json"` opts a harness into mid-run guidance delivery:
+    the runner keeps the harness's stdin open and forwards inbox messages as
+    stream-json user turns (the Claude Code `--input-format stream-json`
+    protocol). The argv template must include the matching flags; harnesses
+    without it get guidance at the next run start, as before.
     """
 
     start: list[str]
     resume: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    inject: Literal["", "stream-json"] = ""
 
     @field_validator("start")
     @classmethod

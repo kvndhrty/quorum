@@ -79,10 +79,10 @@ plugins/                          drop-in custom agent modules
 
 ## Tasks and the runner
 
-The unit of control for a *generic* harness is the **run**: no CLI harness
-supports mid-flight steering from outside, but every one supports "run in a
-directory with a prompt until exit, then be invoked again". So a task is a
-durable record (`tasks/<id>/task.json`) plus a sequence of runs, and
+The unit of control for a *generic* harness is the **run**: every CLI
+harness supports "run in a directory with a prompt until exit, then be
+invoked again", so that is the baseline contract. So a task is a durable
+record (`tasks/<id>/task.json`) plus a sequence of runs, and
 `quorum.runner.run_task` does exactly one run:
 
 1. take `runner.lock` (O_EXCL pid-lock; one live run per task),
@@ -99,8 +99,26 @@ durable record (`tasks/<id>/task.json`) plus a sequence of runs, and
    `{prompt}`/`{session}`,
 5. spawn the harness with `cwd=<workdir>` and `QUORUM_HOME` in its
    environment; stream stdout line-by-line into `transcript.jsonl`,
-   capturing a `session_id` from any JSON event that carries one,
+   capturing a `session_id` (or codex-style `thread_id`) from any JSON
+   event that carries one,
 6. append the run (exit code, timestamps) to `task.json`; release the lock.
+
+**Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
+the Claude Code stream-json protocol (`--input-format stream-json`
+`--output-format stream-json`) can opt into steering *during* a run: the
+runner spawns it with a pipe on stdin, and a `GuidancePump` thread polls the
+task inbox and writes each claimed message as a stream-json user turn
+(`{"type": "user", "message": {...}}`), which the harness queues and picks
+up at its next turn boundary. Because a stream-json harness runs until
+stdin closes, the pump also owns ending the run: the protocol emits one
+`result` event per completed user turn, so the pump closes stdin once every
+delivered turn has its result and `new/` is empty — a run extends while
+guidance keeps arriving and ends at the first idle turn boundary. A message
+that arrives after close, or lands on a harness without `inject`, waits in
+`new/` for the next run start, exactly as before; the maildir claim makes
+the two delivery points race-free. Delivery is acknowledgment: a message
+written to the harness's stdin is acked, the same contract as the
+run-start claim.
 
 The runner **never sets task status**. Status is whatever the harness last
 said via `quorum task report --status <word>` — a free-form string, recorded
@@ -133,7 +151,11 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
-   only after a successful run; a crash rejects them back to `new/`.
+   only after a successful run; a crash rejects them back to `new/`. If the
+   manager's harness sets `inject = "stream-json"`, directives arriving
+   *while* a tick's run is in flight are pumped into it as user turns (same
+   `GuidancePump` as the task runner, sourced from the `manager` inbox)
+   instead of waiting for the next tick.
 3. **One harness run** over `prompts/manager.md` + the digest, synchronous,
    cwd = `QUORUM_HOME`, bounded by `run_timeout_seconds`, stdout streamed to
    `state/manager/transcript.jsonl`. The env carries the actor tag

@@ -27,21 +27,25 @@ default_harness = ""      # e.g. "claude" — used by `quorum task add` and the 
 # A harness is any coding-agent CLI that takes a prompt and works autonomously
 # in the current directory. "{prompt}" and "{session}" are substituted; a
 # template without "{prompt}" gets the prompt appended as the last argument.
-# `resume` is optional — quorum captures a session_id from JSON output when
-# the harness emits one.
+# `resume` is optional — quorum captures a session_id (or codex thread_id)
+# from JSON output when the harness emits one. `inject = "stream-json"`
+# delivers nudges into a *running* session over stdin; it requires the
+# stream-json flags shown below. See docs/guide.md#harnesses.
 #
 # Runs are unattended, so the harness needs permission to act without asking —
 # otherwise it stalls silently on its first denied tool call. Prefer a scoped
 # allowlist covering the report protocol (Bash(quorum:*)) and the work itself
 # over blanket permission bypasses. See docs/guide.md#harnesses.
 #[harness.claude]
-#start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
+#start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
-#resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
+#resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
+#inject = "stream-json"
 
 #[harness.codex]
-#start = ["codex", "exec", "{prompt}"]
+#start  = ["codex", "exec", "--json", "{prompt}"]
+#resume = ["codex", "exec", "resume", "{session}", "--json", "{prompt}"]
 
 #[harness.opencode]
 #start = ["opencode", "run", "{prompt}"]

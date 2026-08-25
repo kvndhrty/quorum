@@ -10,11 +10,12 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "pydantic>=2",
     "typer>=0.12",
+    "textual>=0.60",   # `quorum tui` ships by default; pure-Python, no server
 ]
 
 [project.optional-dependencies]
 web = ["fastapi>=0.110", "uvicorn>=0.29"]
-tui = ["textual>=0.60"]
+tui = []   # the TUI is now a core dependency; kept so `quorum-orchestrator[tui]` still installs
 nono = ["nono-py"]
 
 [dependency-groups]

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync --all-extras            # dev setup (extras: web, tui, nono)
+uv sync --all-extras            # dev setup (extras: web, nono; the TUI is a core dep)
 uv run pytest                   # full suite
 uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs
@@ -73,8 +73,11 @@ below govern nearly every change:
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
   `[harness.<name>]` argv template → stream stdout to `transcript.jsonl`, capturing
-  `session_id`. The runner **never sets task status**. `launch_detached` spawns
-  `python -m quorum task run` in a new session.
+  `session_id`/`thread_id`. A harness with `inject = "stream-json"` also gets
+  mid-run guidance: `GuidancePump` holds stdin open, forwards inbox messages as
+  stream-json user turns, and closes stdin at the first idle `result` event (the
+  manager reuses the pump over the `manager` inbox). The runner **never sets task
+  status**. `launch_detached` spawns `python -m quorum task run` in a new session.
 - `agents/manager.py` — the only builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, the manager's own

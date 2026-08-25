@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from quorum import fsio, tasks
+from quorum import fsio, runner, tasks
 from quorum.config import load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
@@ -143,6 +143,48 @@ def test_resume_template_used_once_session_known(home: Path, project: str):
     argvs = [e["event"]["argv"] for e in entries if "event" in e and "argv" in e.get("event", {})]
     assert "--resumed" not in argvs[0]
     assert argvs[1][0] == "--resumed" and argvs[1][1] == "sess-fake-123"
+
+
+def test_session_capture_accepts_codex_thread_ids():
+    assert runner._find_session_id({"type": "thread.started", "thread_id": "th-1"}) == "th-1"
+    assert runner._find_session_id({"threadId": "th-2"}) == "th-2"
+    assert runner._find_session_id({"type": "system", "session_id": "s-1"}) == "s-1"
+    assert runner._find_session_id({"type": "turn.started"}) is None
+
+
+def test_inject_pump_delivers_mid_run_guidance(home: Path, project: str, monkeypatch):
+    """A nudge that arrives while the harness is running reaches it as a
+    stream-json user turn (the fake posts the nudge itself mid-run, before its
+    first turn boundary, so delivery provably happens inside one run)."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject")
+    monkeypatch.setenv("FAKE_HARNESS_INJECT_POST", "nudge")
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "switch to the fallback plan" in text  # the nudge reached the live harness
+    assert '"role": "user"' in text  # ...framed as a stream-json user turn
+    inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
+    assert fsio.sorted_entries(inbox / "new") == []  # consumed, not re-delivered next run
+    assert fsio.sorted_entries(inbox / "cur") == []
+
+
+def test_inject_pump_closes_an_idle_run(home: Path, project: str, monkeypatch):
+    """With nothing in the inbox the pump closes stdin at the first turn
+    boundary — an inject-mode run still ends on its own."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject")
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.runs[0].exit_code == 0
 
 
 def test_harness_reports_back_through_the_cli(home: Path, project: str, monkeypatch):
