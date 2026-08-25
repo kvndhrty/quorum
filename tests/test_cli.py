@@ -247,3 +247,60 @@ def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkey
 
     entries = [e for e in fsio.read_jsonl(journal_path(home)) if e["run"] == "01DETACH"]
     assert len(entries) == 1  # the manager's own action — not the child's re-invocation
+
+
+# -- init / prompt seeding -------------------------------------------------
+
+
+def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypatch):
+    import hashlib
+
+    from quorum import home as home_mod
+
+    target = tmp_path / "qhome"
+    fresh, outcomes = home_mod.scaffold(target)
+    assert fresh
+    assert outcomes["task-preamble.md"] == "seeded"
+
+    # a pristine seed from an older quorum: content whose hash is registered
+    old_default = "old packaged preamble\n"
+    monkeypatch.setitem(
+        home_mod.SUPERSEDED_PROMPT_HASHES,
+        "task-preamble.md",
+        {hashlib.sha256(old_default.encode()).hexdigest()},
+    )
+    preamble = target / "prompts" / "task-preamble.md"
+    preamble.write_text(old_default)
+    # a user-edited prompt: never touched, only reported
+    manager = target / "prompts" / "manager.md"
+    manager.write_text("my custom manager policy\n")
+
+    fresh, outcomes = home_mod.scaffold(target)
+    assert not fresh
+    assert outcomes == {"task-preamble.md": "upgraded", "manager.md": "edited"}
+    assert "git push" in preamble.read_text()  # the current packaged default
+    assert manager.read_text() == "my custom manager policy\n"
+
+    # up-to-date files produce no outcome at all
+    _, outcomes = home_mod.scaffold(target)
+    assert outcomes == {"manager.md": "edited"}
+
+    result = runner.invoke(app, ["init", "--home", str(target)])
+    assert result.exit_code == 0
+    assert "keeping your edits" in result.output
+
+
+def test_superseded_hashes_never_contain_the_current_defaults():
+    """A current default hashed into SUPERSEDED_PROMPT_HASHES would make
+    `quorum init` treat up-to-date files as stale forever; the set must only
+    hold *replaced* versions."""
+    import hashlib
+    from importlib import resources
+
+    from quorum import home as home_mod
+
+    for entry in (resources.files("quorum") / "default_prompts").iterdir():
+        if not entry.name.endswith(".md"):
+            continue
+        digest = hashlib.sha256(entry.read_bytes()).hexdigest()
+        assert digest not in home_mod.SUPERSEDED_PROMPT_HASHES.get(entry.name, set())

@@ -133,7 +133,10 @@ below govern nearly every change:
   worktrees.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
   `default_prompts/` (`task-preamble`, `manager`); deleting a file restores the
-  default. `format_map` with a missing-key-preserving dict.
+  default. `format_map` with a missing-key-preserving dict. Re-running `quorum
+  init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
+  change a file in `default_prompts/`, append the replaced version's sha256 to
+  `home.py::SUPERSEDED_PROMPT_HASHES`** (`git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256`).
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
   true. Not a builtin; users copy it into `plugins/`.

@@ -127,12 +127,23 @@ def _resolve_task(home: Path, prefix: str):
 def init(home: Path | None = _HOME_OPT) -> None:
     """Create the QUORUM_HOME directory tree and a starter config.toml."""
     target = home_mod.resolve_home(home)
-    fresh = home_mod.scaffold(target)
+    fresh, prompts = home_mod.scaffold(target)
     if fresh:
         typer.secho(f"initialized quorum home at {target}", fg="green")
         typer.echo(f"next: edit {target / home_mod.CONFIG_NAME}, then `quorum up`")
     else:
         typer.echo(f"quorum home at {target} already initialized (config left untouched)")
+    for name, outcome in sorted(prompts.items()):
+        if outcome == "upgraded":
+            typer.secho(f"prompts/{name}: unedited, upgraded to the new packaged default", fg="green")
+        elif outcome == "edited":
+            typer.secho(
+                f"prompts/{name}: keeping your edits, but the packaged default has changed — "
+                f"delete the file to adopt the new default, or merge by hand",
+                fg="yellow",
+            )
+        elif outcome == "seeded" and not fresh:
+            typer.echo(f"prompts/{name}: seeded from the packaged default")
 
 
 # -- supervisor ------------------------------------------------------------

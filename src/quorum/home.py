@@ -8,8 +8,11 @@ copy the directory and the state moves with it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
+
+from . import fsio
 
 CONFIG_NAME = "config.toml"
 
@@ -118,8 +121,30 @@ def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
     return Path.home() / ".quorum"
 
 
-def scaffold(home: Path) -> bool:
-    """Create the QUORUM_HOME tree. Returns True if the config was newly written."""
+# sha256 of every *previously* shipped version of each default prompt. A
+# prompts/ file whose content hashes into this set is a pristine seed from an
+# older quorum, so `quorum init` upgrades it to the current default; any other
+# content is a user edit and is never touched. When you change a file in
+# default_prompts/, append the hash of the version you are replacing here
+# (`shasum -a 256 src/quorum/default_prompts/<name>` before editing, or
+# `git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256` after).
+SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
+    "task-preamble.md": {
+        "28f1079b09bfad2841dca8ebbeae8131969c81b97a0b6a7611deb4035f2048be",
+    },
+    "manager.md": {
+        "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
+    },
+}
+
+
+def scaffold(home: Path) -> tuple[bool, dict[str, str]]:
+    """Create the QUORUM_HOME tree.
+
+    Returns (config newly written, prompt seeding outcomes — see
+    `_seed_prompts`). Safe to re-run: an existing config is never rewritten,
+    and re-running is how an upgraded quorum refreshes unedited prompts.
+    """
     home.mkdir(parents=True, exist_ok=True)
     for sub in SUBDIRS:
         (home / sub).mkdir(parents=True, exist_ok=True)
@@ -127,21 +152,42 @@ def scaffold(home: Path) -> bool:
     fresh = not config.exists()
     if fresh:
         config.write_text(DEFAULT_CONFIG, encoding="utf-8")
-    _seed_prompts(home)
-    return fresh
+    return fresh, _seed_prompts(home)
 
 
-def _seed_prompts(home: Path) -> None:
-    """Copy packaged default prompt templates into prompts/ (never overwrites)."""
+def _seed_prompts(home: Path) -> dict[str, str]:
+    """Seed packaged prompt templates into prompts/ and upgrade stale seeds.
+
+    A missing file is seeded. An existing file is replaced only when its
+    content matches a previously shipped default (`SUPERSEDED_PROMPT_HASHES`)
+    — i.e. the user never edited it. An edited file is never touched; when
+    the packaged default has moved on it is reported as "edited" so the CLI
+    can tell the user. Returns {filename: "seeded" | "upgraded" | "edited"}
+    covering only files that changed or need attention.
+    """
     from importlib import resources
 
     target = home / "prompts"
+    outcomes: dict[str, str] = {}
     try:
         defaults = resources.files("quorum") / "default_prompts"
-        for entry in defaults.iterdir():  # type: ignore[attr-defined]
-            if entry.name.endswith(".md"):
-                dest = target / entry.name
-                if not dest.exists():
-                    dest.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+        entries = [e for e in defaults.iterdir() if e.name.endswith(".md")]  # type: ignore[attr-defined]
     except (FileNotFoundError, ModuleNotFoundError):
-        pass
+        return outcomes
+    for entry in entries:
+        current = entry.read_text(encoding="utf-8")
+        dest = target / entry.name
+        if not dest.is_file():
+            dest.write_text(current, encoding="utf-8")
+            outcomes[entry.name] = "seeded"
+            continue
+        existing = dest.read_text(encoding="utf-8")
+        if existing == current:
+            continue
+        digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()
+        if digest in SUPERSEDED_PROMPT_HASHES.get(entry.name, set()):
+            fsio.atomic_write_text(dest, current)
+            outcomes[entry.name] = "upgraded"
+        else:
+            outcomes[entry.name] = "edited"
+    return outcomes

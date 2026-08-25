@@ -66,7 +66,8 @@ tasks/<id>/reports.jsonl          `quorum task report` entries
 tasks/<id>/runner.lock            pid of the active run
 tasks/<id>/runner.log             detached-run bootstrap output
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
-prompts/<name>.md                 user-editable prompt templates
+prompts/<name>.md                 user-editable prompt templates (re-running
+                                  `quorum init` upgrades never-edited seeds)
 messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history

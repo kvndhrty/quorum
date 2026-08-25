@@ -208,7 +208,11 @@ when there is something to manage), the manager compiles a **digest**:
 It then runs your harness over that digest with `prompts/manager.md` — and
 that prompt file *is* the supervision policy. Edit it to change how your
 manager behaves: how patient it is, when it escalates, how it words its
-pokes. Delete it to restore the default. The manager acts through the same
+pokes. Delete it to restore the default. Both prompt files are seeded by
+`quorum init`; after upgrading quorum, re-run `quorum init` — a prompt you
+never edited is refreshed to the new packaged default, while an edited one
+is left alone (init tells you when its default has moved on so you can
+merge or delete). The manager acts through the same
 CLI you use — launching tasks, nudging them, cancelling them, even creating
 follow-up tasks with `task add` — and every action lands in an auditable
 journal:
