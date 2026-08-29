@@ -1,8 +1,9 @@
 """Built-in agents, resolved lazily by short name.
 
-Quorum ships exactly one: the manager, which is itself harness-driven.
-Everything else is user-provided — see docs/guide.md for the plugin contract
-and examples/steward.py for a complete worked example.
+Quorum ships two: the manager (harness-driven task supervision) and the
+generic prompt agent (a user-written prompt run over the harness on a
+schedule). Everything else is user-provided — see docs/guide.md for the
+plugin contract and examples/steward.py for a complete worked example.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from ..agent import Agent
 
 BUILTIN_NAMES: dict[str, str] = {
     "manager": "manager.Manager",
+    "prompt": "prompt_agent.PromptAgent",
 }
 
 

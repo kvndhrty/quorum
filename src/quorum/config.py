@@ -72,6 +72,16 @@ class TasksConfig(BaseModel):
     default_harness: str = ""
 
 
+class HerdrConfig(BaseModel):
+    """Optional [herdr] table for the fail-soft herdr adapter (herdr.py).
+
+    Absent config is fine: the adapter auto-detects the default socket and
+    silently does nothing when herdr isn't around."""
+
+    socket: str = ""  # override for ~/.config/herdr/herdr.sock
+    enabled: bool = True
+
+
 class QuorumSection(BaseModel):
     timezone: str = "local"
     retention_days: int = 30
@@ -127,12 +137,114 @@ class Config(BaseModel):
     llm: LLMConfig | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    herdr: HerdrConfig | None = None
     harness: dict[str, HarnessConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
 
 class ConfigError(RuntimeError):
     pass
+
+
+AGENTS_DIR = "agents"
+
+# The names an agents/<name>.toml file may never claim: builtins configured in
+# config.toml, the supervisor control inbox, and the task-inbox namespace.
+AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+RESERVED_AGENT_NAMES = {"manager", "supervisor", "user"}
+
+
+def validate_agent_name(name: str) -> None:
+    if not AGENT_NAME_RE.match(name):
+        raise ConfigError(
+            f"invalid agent name {name!r}: use lowercase letters, digits, '-' or '_', "
+            "starting with a letter (max 32 chars)"
+        )
+    if name in RESERVED_AGENT_NAMES or name.startswith("task-"):
+        raise ConfigError(f"agent name {name!r} is reserved")
+
+
+def agent_file_path(home: Path, name: str) -> Path:
+    return Path(home) / AGENTS_DIR / f"{name}.toml"
+
+
+def _load_agent_files(home: Path) -> dict[str, AgentConfig]:
+    agents_dir = Path(home) / AGENTS_DIR
+    found: dict[str, AgentConfig] = {}
+    if not agents_dir.is_dir():
+        return found
+    for path in sorted(agents_dir.glob("*.toml")):
+        if path.name.startswith("."):
+            continue
+        name = path.stem
+        try:
+            validate_agent_name(name)
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+            found[name] = AgentConfig.model_validate(raw)
+        except Exception as e:
+            raise ConfigError(f"{path}: {e}") from e
+    return found
+
+
+def write_agent_file(home: Path, name: str, agent: AgentConfig) -> Path:
+    """Write agents/<name>.toml — the one config location quorum may write
+    (config.toml stays user-owned). Hand-serialized: the schema is small and
+    fixed, and stdlib has no TOML writer; json.dumps produces valid TOML
+    basic strings."""
+    import json
+
+    from . import fsio
+
+    validate_agent_name(name)
+    lines = [
+        f"type = {json.dumps(agent.type)}",
+        f"schedule = {json.dumps(agent.schedule)}",
+        f"enabled = {'true' if agent.enabled else 'false'}",
+        f"auto_pause = {'true' if agent.auto_pause else 'false'}",
+    ]
+    if agent.settings:
+        lines += ["", "[settings]"]
+        for key, value in agent.settings.items():
+            if isinstance(value, bool):
+                lines.append(f"{key} = {'true' if value else 'false'}")
+            elif isinstance(value, (int, float)):
+                lines.append(f"{key} = {value}")
+            else:
+                lines.append(f"{key} = {json.dumps(str(value))}")
+    path = agent_file_path(home, name)
+    fsio.atomic_write_text(path, "\n".join(lines) + "\n")
+    return path
+
+
+def create_agent(
+    home: Path,
+    name: str,
+    *,
+    type_: str = "prompt",
+    schedule: str = "every 1h",
+    auto_pause: bool = True,
+    settings: dict | None = None,
+    prompt_text: str | None = None,
+) -> AgentConfig:
+    """Create a file-defined agent: agents/<name>.toml plus, when given,
+    prompts/<name>.md. Shared by `quorum agent create` and the web dashboard;
+    callers send the `agent.reload` poke themselves."""
+    from . import fsio
+
+    validate_agent_name(name)
+    if name in load_config(home).agents:
+        raise ConfigError(
+            f"agent {name!r} already exists — edit agents/{name}.toml (then "
+            f"`quorum agent reload {name}`) or config.toml instead"
+        )
+    acfg = AgentConfig(
+        type=type_, schedule=schedule, auto_pause=auto_pause, settings=settings or {}
+    )
+    write_agent_file(home, name, acfg)
+    if prompt_text is not None:
+        fsio.atomic_write_text(Path(home) / "prompts" / f"{name}.md", prompt_text)
+    return acfg
 
 
 def load_config(home: Path) -> Config:
@@ -145,6 +257,10 @@ def load_config(home: Path) -> Config:
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"{path}: {e}") from e
     try:
-        return Config.model_validate(raw)
+        config = Config.model_validate(raw)
     except Exception as e:
         raise ConfigError(f"{path}: {e}") from e
+    # agents/<name>.toml files merge over config.toml [agents.*]: the file is
+    # the machine-writable channel, so on a name collision the file wins.
+    config.agents.update(_load_agent_files(home))
+    return config

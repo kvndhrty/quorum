@@ -30,7 +30,8 @@ quorum up ──► Supervisor
               │   ├─ job: manager  (every 5m)  ── crash-isolated wrapper:
               │   ├─ job: <user plugins…>         heartbeats, error posts,
               │   ├─ job: _control (15s: claims supervisor inbox —
-              │   │        agent.pause / agent.resume / agent.run-now)
+              │   │        agent.pause / agent.resume / agent.run-now /
+              │   │        agent.reload)
               │   └─ job: _janitor (hourly: archival, stale-claim recovery)
               └─ supervisor.lock (pid file, touched every 60s = liveness)
 
@@ -58,9 +59,13 @@ Resolution: `--home` flag > `$QUORUM_HOME` > `./quorum-home` (if it exists) >
 
 ```
 config.toml                       user-owned; quorum never rewrites it
+agents/<name>.toml                file-defined agents (the one config location
+                                  quorum may write: `agent create` and the web
+                                  dashboard; merges over [agents.*], file wins)
 supervisor.lock                   pid + start time; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
+tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
 tasks/<id>/runner.lock            pid of the active run
@@ -72,6 +77,8 @@ messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
+                                  (+ journal.jsonl and transcript.jsonl for
+                                  harness-driven agents other than the manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
 state/manager/transcript.jsonl    the manager harness's own stdout
 logs/supervisor.log, actions.jsonl
@@ -137,9 +144,59 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
+### Attached tasks: adopting a live session
+
+`quorum task adopt` inverts the ownership: instead of quorum spawning runs,
+an *existing interactive session* (Claude Code, or anything with hooks) is
+recorded as a task with `attached = true`, `workdir` = the session's own
+directory, no worktree, and the harness's session id when known. Quorum
+never spawns runs for it — `run_task` refuses attached tasks outright. That
+refusal is a deliberate, narrow bend of "the action cap is the only rail":
+it is a *substrate* rail in the same class as `runner.lock`, protecting the
+user's live checkout from a racing headless run, not supervision policy.
+`quorum task detach` lifts it.
+
+Liveness for a run quorum didn't spawn comes from `tasks/<id>/attached.json`,
+rewritten by harness-side hooks (`quorum task hook-session-start`,
+`hook-stop`, `hook-session-end`) with the latest lifecycle event. The hook
+entry points are harness-agnostic — JSON with `session_id`/`cwd` on stdin,
+matched to an attached task by exact session id first, then working
+directory. The cwd fallback is how an id-less adoption *learns* its session
+id, and it only fires while the task has no live session of its own (none
+recorded, or the recorded one ended — a resume under a fresh id), so a
+second concurrent session in the adopted checkout can't steal guidance or
+the session id —
+and `integrations/` ships an adapter per harness: `claude-code/` and
+`codex/` wire native Stop/SessionEnd(/SessionStart) hooks straight to the
+CLI, both speaking the same stdin payload and `{"decision": "block"}`
+continuation protocol, while `opencode/` (no hook commands; an in-process
+plugin bus instead) ships a fail-soft JS plugin that calls
+`hook-stop --format text` on idle events and injects whatever the CLI
+prints as a user turn via the SDK. Either way the digest renders attached
+tasks in their own section (never as `runner=dead`-launchable), and
+guidance flows through the ordinary task inbox: the stop/idle hook claims
+pending messages and continues the session with them, so `task nudge` —
+from the CLI, manager, TUI, or web — reaches the human's live session at
+its next stop. Delivery consumes the guidance, so continuation can't loop,
+and the maildir claim keeps the delivery point race-free against a future
+headless run after detach.
+
+**herdr (optional).** When the session runs inside a
+[herdr](https://herdr.dev) pane (`task adopt --herdr-pane <id>`), `herdr.py`
+— the one module speaking herdr's local socket API — adds two things:
+the pane's detected agent status (`herdr: state=working|blocked|idle` in
+the digest; a busy session fires no hooks, so this outclasses mtimes) and a
+doorbell on `task nudge` (the pane is poked that guidance is waiting;
+sessions with no quorum adapter installed get their delivery prompt this
+way). The adapter fails *soft* by design — the mirror image of
+sandbox.py's fail-closed — because observation enrichment must never break
+a digest. The inbox remains the single transport: the doorbell never
+carries the payload, so delivery stays exactly-once across all delivery
+points.
+
 ## The manager
 
-The only built-in agent, and it is *itself* harness-driven: supervision
+The flagship built-in agent, and it is *itself* harness-driven: supervision
 policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 
 1. **Wake condition**: any non-terminal task, or a pending message in the
@@ -149,7 +206,9 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 2. **Digest** (`agents/manager.py::build_digest`, a pure function over
    files): every active task's status, runner liveness, quiet time, recent
    reports and transcript tail, plus a `git:` line when its working
-   directory holds uncommitted changes or unpushed commits; recently
+   directory holds uncommitted changes or unpushed commits; attached
+   sessions in their own clearly-labeled section (last hook event age, git
+   state, reports — never runner liveness, which they don't have); recently
    finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they
    ended with such state — work a harness left in its worktree without
    delivering it, which the default manager prompt treats as not done and
@@ -165,8 +224,11 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 3. **One harness run** over `prompts/manager.md` + the digest, synchronous,
    cwd = `QUORUM_HOME`, bounded by `run_timeout_seconds`, stdout streamed to
    `state/manager/transcript.jsonl`. The env carries the actor tag
-   (`actor.py`): `QUORUM_ACTOR=manager`, a per-run `QUORUM_MANAGER_RUN` id,
-   and the resolved action cap in `QUORUM_MANAGER_ACTION_CAP`.
+   (`actor.py`): `QUORUM_ACTOR=manager`, a per-run `QUORUM_ACTOR_RUN` id,
+   and the resolved action cap in `QUORUM_ACTOR_CAP`. The tag is
+   name-generic — any harness-driven agent identifies itself the same way,
+   and the CLI journals it under `state/agents/<name>/journal.jsonl` (the
+   manager keeps its historical `state/manager/` spot).
 
 The harness acts with full authority through the quorum CLI — `task
 add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`, `quorum
@@ -184,6 +246,20 @@ Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
 `auto_pause = false` config keeps the schedule firing so recovery needs no
 human intervention.
+
+### Prompt agents
+
+The generic sibling of the manager: `type = "prompt"` runs a user-written
+prompt (`prompts/<name>.md`, or `settings.prompt` to point elsewhere) over
+the configured harness on a schedule, sharing the manager's exact run
+mechanics (`agents/harness_run.py`): actor-tagged env, per-agent journal and
+action cap, transcript at `state/agents/<name>/transcript.jsonl`, mid-run
+directives via the agent's own inbox when the harness supports injection.
+There is deliberately no wake condition and no digest — a prompt agent runs
+every scheduled tick, and anything conditional belongs in its prompt. Prompt
+agents are usually file-defined (`agents/<name>.toml`, created by
+`quorum agent create` or the web dashboard, hot-added via `agent.reload`)
+but a `[agents.<name>]` table in config.toml works identically.
 
 ## Messaging protocol
 
@@ -222,9 +298,16 @@ One `Message` schema serves two channels:
   `messages/archive/YYYY-MM.jsonl.gz`.
 
 The **control channel** rides the same machinery: `quorum agent
-pause|resume|run-now` sends to the `supervisor` inbox, which the supervisor
-claims every 15 s and applies to its scheduler jobs. No new transport, no
-ports, and commands queue harmlessly while the supervisor is down.
+pause|resume|run-now|reload` sends to the `supervisor` inbox, which the
+supervisor claims every 15 s and applies to its scheduler jobs. No new
+transport, no ports, and commands queue harmlessly while the supervisor is
+down. `agent.reload` is the hot-add path: it re-reads config (config.toml
+plus `agents/*.toml`) and creates, replaces, or removes that one agent's
+job — the file is the source of truth, the message is only a poke, so one
+command covers create, edit, and delete. A pause is durable: it lands in
+the agent's heartbeat, and a restarting supervisor schedules any agent whose
+heartbeat says `paused` with its job paused rather than silently resuming
+it.
 
 ### Design seam: outboxes and a router
 

@@ -57,6 +57,13 @@ class Task(BaseModel):
     pr_url: str | None = None
     use_worktree: bool = True
     workdir: str | None = None  # resolved on first run
+    # True: this task *is* a live interactive session the user adopted into
+    # quorum (workdir = their checkout, session = the harness's own session).
+    # Quorum never spawns runs for it; guidance reaches it through hooks.
+    attached: bool = False
+    # The herdr pane hosting the session, when it runs inside herdr: enables
+    # pane-status observation and the nudge doorbell (herdr.py).
+    herdr_pane: str | None = None
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -101,6 +108,29 @@ def worktree_path(home: Path, task_id: str) -> Path:
     return Path(home) / "worktrees" / task_id
 
 
+def attached_path(home: Path, task_id: str) -> Path:
+    return task_dir(home, task_id) / "attached.json"
+
+
+def write_attached_state(
+    home: Path, task_id: str, event: str, session: str | None = None, now: Any = None
+) -> None:
+    """Record the adopted session's latest lifecycle event ("adopt",
+    "session-start", "stop", "session-end") — the liveness signal for a run
+    quorum didn't spawn."""
+    fsio.atomic_write_json(
+        attached_path(home, task_id),
+        {"at": fsio.iso(now or fsio.utc_now()), "event": event, "session": session},
+    )
+
+
+def attached_state(home: Path, task_id: str) -> dict[str, Any] | None:
+    try:
+        return fsio.read_json(attached_path(home, task_id))
+    except (OSError, ValueError):
+        return None
+
+
 def inbox_name(task_id: str) -> str:
     """The bus inbox a task's guidance goes to."""
     return f"task-{task_id}"
@@ -119,6 +149,10 @@ class TaskStore:
         prompt: str,
         harness: str,
         use_worktree: bool = True,
+        workdir: str | None = None,
+        session: str | None = None,
+        attached: bool = False,
+        status: str = "queued",
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -128,6 +162,10 @@ class TaskStore:
             prompt=prompt,
             harness=harness,
             use_worktree=use_worktree,
+            workdir=workdir,
+            session=session,
+            attached=attached,
+            status=status,
             created_at=created,
             updated_at=created,
         )
@@ -222,6 +260,23 @@ def report(
     return task
 
 
+def nudge(home: Path, task: Task, text: str, sender: str = "user"):
+    """Queue guidance for a task — the single write path shared by the CLI,
+    TUI, and web. When the task lives in a herdr pane, also ring the pane's
+    doorbell; the payload stays in the inbox (exactly-once delivery), the
+    doorbell only says something is waiting."""
+    msg = MessageBus(home).send(sender, inbox_name(task.id), type="guidance", text=text)
+    if task.herdr_pane:
+        from . import herdr  # fail-soft adapter; a dead herdr never blocks a nudge
+
+        herdr.ring_doorbell(
+            home,
+            task.herdr_pane,
+            f"quorum guidance waiting — run: quorum task inbox {task.short_id} --claim",
+        )
+    return msg
+
+
 def read_transcript_tail(home: Path, task_id: str, limit: int = 40) -> list[dict]:
     return fsio.read_jsonl_tail(transcript_path(home, task_id), limit=limit)
 
@@ -242,12 +297,14 @@ def runner_alive(home: Path, task_id: str) -> bool:
 
 
 def last_activity(home: Path, task_id: str) -> datetime | None:
-    """The newest sign of life: transcript, reports, or the runner lock."""
+    """The newest sign of life: transcript, reports, the runner lock, or an
+    adopted session's hook-written attached.json."""
     newest = None
     for path in (
         transcript_path(home, task_id),
         reports_path(home, task_id),
         runner_lock_path(home, task_id),
+        attached_path(home, task_id),
     ):
         try:
             mtime = path.stat().st_mtime

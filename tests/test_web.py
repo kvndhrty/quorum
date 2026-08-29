@@ -65,3 +65,29 @@ def test_patch_project(client: TestClient, home: Path, tmp_path: Path):
     assert r.status_code == 200 and r.json()["deadline"] == "2026-10-01"
     assert client.patch("/api/projects/ghost", json={"deadline": "2026-10-01"}).status_code == 404
     assert client.patch("/api/projects/patchable", json={"deadline": "nope"}).status_code == 422
+
+
+def test_agent_create_detail_and_control(client: TestClient, home: Path):
+    r = client.post("/api/agents", json={
+        "name": "standup", "schedule": "every 30m", "prompt_text": "post a note",
+    })
+    assert r.status_code == 200, r.text
+    assert (home / "agents" / "standup.toml").exists()
+    assert (home / "prompts" / "standup.md").read_text() == "post a note"
+
+    detail = client.get("/api/agents/standup").json()
+    assert detail["schedule"] == "every 30m"
+    assert detail["journal"] == [] and detail["actions"] == []
+    assert client.get("/api/agents/ghost").status_code == 404
+
+    # duplicate creation is refused, loudly
+    r = client.post("/api/agents", json={"name": "standup", "prompt_text": "again"})
+    assert r.status_code == 422
+
+    assert client.post("/api/agents/standup/pause").status_code == 200
+    assert client.post("/api/agents/standup/explode").status_code == 422
+    assert client.post("/api/agents/ghost/pause").status_code == 404
+
+    inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
+    types = [fsio.read_json(p)["type"] for p in fsio.sorted_entries(inbox)]
+    assert types == ["agent.reload", "agent.pause"]

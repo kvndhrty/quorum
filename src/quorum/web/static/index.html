@@ -52,8 +52,13 @@
   button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
            padding: 6px 12px; cursor: pointer; }
   button.small { font-size: 12px; padding: 3px 9px; }
-  .task-row { cursor: pointer; }
-  #task-detail { margin-top: 10px; display: none; }
+  .task-row, .agent-row { cursor: pointer; }
+  #task-detail, #agent-detail { margin-top: 10px; display: none; }
+  #agent-detail-buttons { display: flex; gap: 6px; margin: 6px 0; }
+  form.stack { flex-direction: column; align-items: stretch; }
+  form.stack textarea { background: var(--bg); color: var(--ink); font: inherit;
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; resize: vertical; }
+  details > summary { cursor: pointer; margin-top: 8px; font-size: 13px; }
   pre.tail { white-space: pre-wrap; font: 12px/1.5 ui-monospace, monospace;
              margin: 6px 0 0; max-height: 320px; overflow: auto;
              background: var(--bg); border: 1px solid var(--line);
@@ -83,6 +88,25 @@
   <section>
     <h2>Agents</h2>
     <table id="agents"></table>
+    <div id="agent-detail">
+      <div id="agent-detail-head" class="muted"></div>
+      <div id="agent-detail-buttons">
+        <button class="small" onclick="agentCmd('pause')">Pause</button>
+        <button class="small" onclick="agentCmd('resume')">Resume</button>
+        <button class="small" onclick="agentCmd('run-now')">Run now</button>
+      </div>
+      <pre class="tail" id="agent-tail"></pre>
+    </div>
+    <details id="agent-create">
+      <summary class="muted">new agent…</summary>
+      <form id="agent-create-form" class="stack">
+        <input type="text" id="na-name" placeholder="name (lowercase, e.g. standup)" required>
+        <input type="text" id="na-schedule" placeholder="schedule (e.g. every 30m)" value="every 1h" required>
+        <input type="text" id="na-harness" placeholder="harness (blank: tasks default)">
+        <textarea id="na-prompt" rows="5" placeholder="the agent's prompt — it acts by running quorum CLI commands…" required></textarea>
+        <button>Create agent</button>
+      </form>
+    </details>
   </section>
   <section>
     <h2>Projects</h2>
@@ -100,7 +124,9 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtTs = (s) => (s || "").replace("T", " ").replace("Z", "").slice(5, 16);
 let selectedTask = null;
+let selectedAgent = null;
 
 async function refresh() {
   let data;
@@ -113,8 +139,8 @@ async function refresh() {
     ? `supervisor running (pid ${sup.pid})` : "supervisor not running";
 
   $("tasks").innerHTML = (data.tasks || []).map(t => {
-    const cls = t.running ? "task-running" : `status-${esc(t.status)}`;
-    const status = esc(t.status) + (t.running ? " ▶" : "");
+    const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
+    const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""));
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     return `<tr class="task-row" onclick="selectTask('${esc(t.id)}')">
       <td class="muted">${esc(t.id_short)}</td>
@@ -124,12 +150,17 @@ async function refresh() {
       <td>${pr}</td></tr>`;
   }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`;
 
-  $("agents").innerHTML = (data.agents || []).map(a =>
-    `<tr><td>${esc(a.name)}</td>
+  $("agents").innerHTML = (data.agents || []).map(a => {
+    const next = a.next_run
+      ? (a.next_run_estimated ? "~" : "") + fmtTs(a.next_run) : "";
+    const err = a.error ? ` title="${esc(a.error)}"` : "";
+    return `<tr class="agent-row" onclick="selectAgent('${esc(a.name)}')"${err}>
+      <td>${esc(a.name)}${a.error ? ' <span class="status-error">!</span>' : ""}</td>
       <td class="status-${esc(a.status)}">${esc(a.status)}</td>
       <td class="muted">${esc(a.schedule)}</td>
-      <td class="muted">${esc((a.last_end || "").replace("T"," ").replace("Z",""))}</td></tr>`
-  ).join("");
+      <td class="muted">last ${fmtTs(a.last_end) || "—"}</td>
+      <td class="muted">next ${next || "—"}</td></tr>`;
+  }).join("");
 
   $("projects").innerHTML = (data.projects || []).map(p => {
     let due = "";
@@ -148,6 +179,34 @@ async function refresh() {
   ).join("") || `<li class="muted">no messages yet</li>`;
 
   if (selectedTask) renderTaskDetail();
+  if (selectedAgent) renderAgentDetail();
+}
+
+async function selectAgent(name) {
+  selectedAgent = (selectedAgent === name) ? null : name;
+  $("agent-detail").style.display = selectedAgent ? "block" : "none";
+  if (selectedAgent) renderAgentDetail();
+}
+
+async function renderAgentDetail() {
+  let a;
+  try { a = await (await fetch(`/api/agents/${selectedAgent}`)).json(); }
+  catch { return; }
+  $("agent-detail-head").textContent =
+    `${a.name} · ${a.type} · ${a.schedule}` + (a.error ? ` · ${a.error}` : "");
+  const acts = (a.actions || []).map(x => `${fmtTs(x.at)} ${x.type}: ${x.text}`);
+  const journal = (a.journal || []).map(x =>
+    `${fmtTs(x.at)} ${x.action}${x.target ? " -> " + x.target : ""}${x.args ? "  " + x.args : ""}`);
+  $("agent-tail").textContent =
+    [...(journal.length ? ["— action journal —", ...journal] : []),
+     ...(acts.length ? ["— activity —", ...acts] : [])].join("\n") || "no activity yet";
+}
+
+async function agentCmd(cmd) {
+  if (!selectedAgent) return;
+  const r = await fetch(`/api/agents/${selectedAgent}/${cmd}`, { method: "POST" });
+  if (!r.ok) alert((await r.json()).detail || `${cmd} failed`);
+  refresh();
 }
 
 async function selectTask(id) {
@@ -189,6 +248,25 @@ $("nudge-form").addEventListener("submit", async (e) => {
     body: JSON.stringify({ text }),
   });
   $("nudge-text").value = "";
+});
+
+$("agent-create-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    name: $("na-name").value.trim(),
+    schedule: $("na-schedule").value.trim(),
+    harness: $("na-harness").value.trim(),
+    prompt_text: $("na-prompt").value,
+  };
+  if (!body.name || !body.prompt_text) return;
+  const r = await fetch("/api/agents", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { alert((await r.json()).detail || "create failed"); return; }
+  $("agent-create").open = false;
+  $("na-name").value = ""; $("na-prompt").value = "";
+  refresh();
 });
 
 $("post-form").addEventListener("submit", async (e) => {

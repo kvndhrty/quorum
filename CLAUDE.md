@@ -10,6 +10,8 @@ uv run pytest                   # full suite
 uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs
 uv run pytest -m nono_integration -v      # real kernel sandbox tests (need [nono] + Landlock/Seatbelt)
+QUORUM_HARNESS_TESTS=1 uv run pytest -m "codex_integration or opencode_integration" -v
+                                # real codex/opencode adoption tests (binaries + auth; spend tokens)
 uv run ruff check .             # lint (line-length 100; E4,E7,E9,F,I,UP,B)
 uv run quorum <cmd>             # run the CLI from a checkout
 ```
@@ -78,6 +80,17 @@ and `docs/architecture.md` in the same commit so the record stays true.
   unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
   (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
   the preamble tells harnesses to commit+push with plain git before reporting done.
+  `attached = true` marks an *adopted* live interactive session (`quorum task
+  adopt`): workdir = the user's checkout, no worktree, liveness from
+  `tasks/<id>/attached.json` (rewritten by `task hook-session-start`/
+  `hook-stop`/`hook-session-end`, which also learn the session id by cwd
+  match and deliver pending inbox guidance — as the Stop-hook block-protocol
+  JSON, or bare text via `hook-stop --format text` for shims that inject the
+  continuation themselves); `task detach` reverts it. One adapter per
+  harness under `integrations/` (claude-code, codex, opencode — the last is
+  a fail-soft JS plugin, kept a dumb pipe over the same CLI entry points),
+  kept true by `tests/test_integrations.py` (the opencode plugin is driven
+  for real under node, skipped when node is absent).
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
@@ -86,20 +99,29 @@ and `docs/architecture.md` in the same commit so the record stays true.
   mid-run guidance: `GuidancePump` holds stdin open, forwards inbox messages as
   stream-json user turns, and closes stdin at the first idle `result` event (the
   manager reuses the pump over the `manager` inbox). The runner **never sets task
-  status**. `launch_detached` spawns `python -m quorum task run` in a new session.
-- `agents/manager.py` — the only builtin, and it makes **no decisions in Python**:
+  status**, and refuses attached tasks outright — a substrate rail (same class as
+  `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
+  the user's live checkout. `launch_detached` spawns `python -m quorum task run`
+  in a new session.
+- `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, the manager's own
   action journal with then-vs-now outcomes, user directives from the `manager`
   inbox), renders `prompts/manager.md`, and runs the configured harness
   synchronously (cwd=home, tagged with the `actor.py` env protocol —
-  `QUORUM_ACTOR=manager`, per-run `QUORUM_MANAGER_RUN`, the resolved cap in
-  `QUORUM_MANAGER_ACTION_CAP` — bounded by `run_timeout_seconds`, stdout →
+  `QUORUM_ACTOR=manager`, per-run `QUORUM_ACTOR_RUN`, the resolved cap in
+  `QUORUM_ACTOR_CAP` — bounded by `run_timeout_seconds`, stdout →
   `state/manager/transcript.jsonl`).
-  The harness acts via the quorum CLI; the CLI's `_manager_guard` auto-journals
-  every mutating action to `state/manager/journal.jsonl` and enforces the per-run
+  The harness acts via the quorum CLI; the CLI's `_actor_guard` auto-journals
+  every mutating action to the acting agent's journal and enforces the per-run
   action cap (`max_actions_per_run`) — the only rail, a rate limit, never a veto.
   Failures raise; directives are rejected back to `new/` on crash.
+  `agents/harness_run.py` holds the extracted run mechanics (`run_agent_harness`)
+  shared with `agents/prompt_agent.py::PromptAgent` (builtin `prompt`) — the
+  generic sibling: renders `prompts/<name>.md` (no digest, no wake condition;
+  conditional behavior belongs in the prompt) and runs the harness with the
+  same journal/cap rails under `state/agents/<name>/`. Prompt agents are
+  usually file-defined and created by `quorum agent create` or the web form.
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single
   seam through which agents touch the world: `ctx.bus`, `ctx.projects`, `ctx.llm`,
   `ctx.prompt()`, `ctx.load_state()/save_state()`, `ctx.log_action()`, `ctx.now()`.
@@ -108,18 +130,26 @@ and `docs/architecture.md` in the same commit so the record stays true.
 - `supervisor.py` — one scheduler job per enabled agent, wrapped by `run_agent_tick`
   for crash isolation: heartbeat files, an `agent.error` post to the `system` topic,
   auto-pause after `MAX_CONSECUTIVE_FAILURES` (5). A 15s `_control` job claims the
-  `supervisor` inbox (`quorum agent pause|resume|run-now`). An hourly janitor archives
-  expired board messages and returns crash-orphaned `cur/` claims to `new/`.
+  `supervisor` inbox (`quorum agent pause|resume|run-now|reload`); `agent.reload`
+  is the hot-add/edit/remove path for file-defined agents (re-reads config, one
+  message for all mutations — handled *before* the job-exists guard). Pause is
+  durable: `_schedule_agent` creates the job paused when the heartbeat says
+  `paused`. An hourly janitor archives expired board messages and returns
+  crash-orphaned `cur/` claims to `new/`.
 - `views.py` — the shared read-model assembled purely from files; `quorum status`, the
-  web app, and the TUI are all pure readers of it (the TUI/web's one write affordance
-  is nudging a task, via the same bus call as the CLI).
+  web app, and the TUI are all pure readers of it. `agent_rows` estimates a stale
+  `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
+  per-agent actions. Write affordances stay thin bus/config calls shared with the
+  CLI: nudging a task (TUI+web), and in the web only, board posts, project edits,
+  agent create (via `config.create_agent`) and pause/resume/run-now/reload.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
-  as. The manager tags the harness it spawns (`manager_env`), the CLI resolves
-  `current_actor()` for journaling and message attribution, and the runner
-  `strip_actor_env`s spawned children so they act as themselves. Also owns the
-  manager action journal's path.
-- `registry.py` — resolves an agent `type` string: builtin short name (only `manager`),
-  else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
+  as, name-generic over harness-driven agents. An agent tags the harness it
+  spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
+  for journaling and message attribution, and the runner `strip_actor_env`s
+  spawned children so they act as themselves. Also owns `journal_path`/
+  `transcript_path` (manager at `state/manager/`, others at `state/agents/<name>/`).
+- `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
+  `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small
   completions — neither task harnesses nor the manager go through it. `LLMClient.complete()`
   **never raises**; `None` means "no LLM today". No module outside `llm/` may assume
@@ -129,8 +159,20 @@ and `docs/architecture.md` in the same commit so the record stays true.
   unless `[llm]` is set; `build_task_capabilities` (per-run) grants the worktree, the
   project's `.git` (shared object store), and `[sandbox].task_read/task_write` extras,
   with network open.
+- `herdr.py` — the *only* module that talks to a herdr server (terminal
+  multiplexer with agent-aware panes), over its unix-socket newline-JSON API.
+  **Fails soft** — the deliberate opposite of sandbox.py's fail-closed: herdr
+  absent/broken degrades every call to `None`/`False`, never breaking a digest
+  or nudge. Two narrow uses, both for attached tasks with a `herdr_pane`:
+  `agent_state` (pane status into the digest) and `ring_doorbell` (a
+  `task nudge` pokes the pane that guidance is waiting — the payload stays in
+  the maildir inbox; herdr is a doorbell, never a second transport). Optional
+  `[herdr]` table (`socket` override, `enabled`).
 - `config.py` — `config.toml` is user-owned and **quorum never writes it back**; machine
-  state goes to JSON. `[harness.<name>]` tables are argv templates; `[tasks]` holds
+  state goes to JSON. The one config location quorum may write is `agents/<name>.toml`
+  (file-defined agents, atomic whole-file writes via `write_agent_file`/`create_agent`;
+  merged over `[agents.*]` at load, file wins; names validated + reserved-checked).
+  `[harness.<name>]` tables are argv templates; `[tasks]` holds
   worktree/default-harness; `AgentConfig.auto_pause=false` exempts an agent from the
   5-failure auto-pause (the manager uses it). Schedules are validated by regex and
   translated to APScheduler trigger kwargs by `parse_schedule`.
@@ -150,7 +192,7 @@ and `docs/architecture.md` in the same commit so the record stays true.
 
 ### Adding an agent
 
-Builtins live in `agents/__init__.py::BUILTIN_NAMES` (currently just `manager`) —
+Builtins live in `agents/__init__.py::BUILTIN_NAMES` (`manager`, `prompt`) —
 prefer plugins unless quorum itself needs the behavior. The user-facing contract is
 `docs/guide.md#writing-your-own-agents`: idempotent `tick()`, dedupe repeat
 announcements through `load_state()/save_state()`, raising is safe.

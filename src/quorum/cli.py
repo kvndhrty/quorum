@@ -14,9 +14,9 @@ import typer
 from . import fsio
 from . import home as home_mod
 from .actor import (
+    ACTOR_CAP_ENV,
+    ACTOR_RUN_ENV,
     DEFAULT_MAX_ACTIONS_PER_RUN,
-    MANAGER_CAP_ENV,
-    MANAGER_RUN_ENV,
     current_actor,
     journal_path,
 )
@@ -62,7 +62,7 @@ def _load_config(home: Path):
         raise _fail(str(e)) from None
 
 
-def _manager_guard(
+def _actor_guard(
     home: Path,
     action: str,
     target: str | None = None,
@@ -70,29 +70,33 @@ def _manager_guard(
     args: str | None = None,
     always_journal: bool = False,
 ) -> None:
-    """Auto-journal (and rate-cap) actions taken by the manager's harness.
+    """Auto-journal (and rate-cap) actions taken by a harness-driven agent.
 
-    Manager runs carry the actor env tag (see actor.py): the actor identity,
-    a per-run id, and the action cap the manager resolved from its settings.
+    Agent runs carry the actor env tag (see actor.py): the actor identity,
+    a per-run id, and the action cap the agent resolved from its settings.
     Every mutating CLI command routes through here, so the journal is ground
     truth — not the model's self-report — and it is what the next digest
     feeds back to prevent degenerate loops. The only rail is rate: a per-run
     action cap. Choice is never second-guessed.
+
+    User actions journal only when `always_journal` is set; they land in the
+    manager's journal so notes left for the manager surface in its digest.
     """
     actor = current_actor()
-    if actor != "manager" and not always_journal:
+    if actor == "user" and not always_journal:
         return
-    run = os.environ.get(MANAGER_RUN_ENV, "") if actor == "manager" else ""
+    journal = journal_path(home, actor if actor != "user" else "manager")
+    run = os.environ.get(ACTOR_RUN_ENV, "") if actor != "user" else ""
     if run:
         try:
-            cap = int(os.environ.get(MANAGER_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
+            cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
         except ValueError:
             cap = DEFAULT_MAX_ACTIONS_PER_RUN
         # this run's entries sit at the journal's end, well inside the tail window
-        used = len([e for e in fsio.read_jsonl_tail(journal_path(home)) if e.get("run") == run])
+        used = len([e for e in fsio.read_jsonl_tail(journal) if e.get("run") == run])
         if used >= cap:
             typer.secho(
-                f"action refused: manager action cap ({cap}) reached for this run — "
+                f"action refused: {actor} action cap ({cap}) reached for this run — "
                 "remaining work waits for your next scheduled run",
                 fg="red", err=True,
             )
@@ -109,7 +113,7 @@ def _manager_guard(
         entry["target_status"] = target_status
     if args:
         entry["args"] = args
-    fsio.append_jsonl(journal_path(home), entry)
+    fsio.append_jsonl(journal, entry)
 
 
 def _resolve_task(home: Path, prefix: str):
@@ -212,7 +216,10 @@ def status(home: Path | None = _HOME_OPT) -> None:
 
 
 def _echo_task_row(t: dict) -> None:
-    marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
+    if t.get("attached"):
+        marker = "⚭"
+    else:
+        marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
     line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {t['status']:<12} {t['harness']}"
     if t["last_report"]:
         line += f"  {t['last_report'][:60]}"
@@ -256,7 +263,7 @@ def task_add(
     if name not in config.harness:
         known = ", ".join(sorted(config.harness)) or "none configured"
         raise _fail(f"no [harness.{name}] in config.toml (known: {known})")
-    _manager_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
+    _actor_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
     task = TaskStore(target).add(
         project=project,
         prompt=prompt,
@@ -265,6 +272,226 @@ def task_add(
     )
     typer.secho(f"queued task {task.short_id} on {project} (harness: {name})", fg="green")
     typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
+
+
+@task_app.command("adopt")
+def task_adopt(
+    description: str = typer.Argument("", help="What this session is working on (optional)."),
+    session: str = typer.Option("", "--session", help="The harness's own session id (enables exact hook matching and later resume)."),
+    directory: Path | None = typer.Option(None, "--dir", help="The session's working directory (default: current directory)."),
+    harness: str | None = typer.Option(None, "--harness", help="Which [harness.<name>] this session runs (default: [tasks].default_harness)."),
+    herdr_pane: str = typer.Option("", "--herdr-pane", help="The herdr pane hosting the session (enables pane observation and the nudge doorbell)."),
+    json_out: bool = typer.Option(False, "--json", help="Print the created task ids as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Adopt a live interactive coding session into quorum, mid-problem.
+
+    Creates an *attached* task pointing at the session's own directory —
+    quorum never spawns runs for it. The manager observes it like any task
+    and guides it with `quorum task nudge`; a harness-side hook (see
+    integrations/) delivers the guidance into the live session.
+    """
+    from .projects import ProjectRegistry
+    from .tasks import TaskStore, write_attached_state
+
+    target = get_home(home)
+    config = _load_config(target)
+    workdir = (directory or Path.cwd()).expanduser().resolve()
+    if not workdir.is_dir():
+        raise _fail(f"no such directory: {workdir}")
+
+    registry = ProjectRegistry(target)
+    slug = next(
+        (
+            p.slug
+            for p in registry.list()
+            if workdir == p.dir.resolve() or p.dir.resolve() in workdir.parents
+        ),
+        None,
+    )
+    registered = False
+    if slug is None:
+        try:
+            slug = registry.add(workdir).slug
+            registered = True
+        except ValueError as e:
+            raise _fail(f"cannot auto-register {workdir} as a project: {e}") from None
+
+    _actor_guard(target, "task.adopt", args=f"{slug}: {str(workdir)}")
+    task = TaskStore(target).add(
+        project=slug,
+        prompt=description or f"adopted interactive session in {workdir}",
+        harness=harness or config.tasks.default_harness,
+        use_worktree=False,
+        workdir=str(workdir),
+        session=session or None,
+        attached=True,
+        status="attached",
+    )
+    if herdr_pane:
+        task = TaskStore(target).update(task.id, herdr_pane=herdr_pane)
+    write_attached_state(target, task.id, "adopt", session or None)
+    if json_out:
+        typer.echo(json.dumps({"id": task.id, "short_id": task.short_id, "project": slug}))
+        return
+    if registered:
+        typer.echo(f"registered {workdir} as project {slug!r}")
+    typer.secho(f"adopted session as attached task {task.short_id} on {slug}", fg="green")
+    typer.echo(
+        "guide it with `quorum task nudge` (delivered at the session's next stop); "
+        f"`quorum task detach {task.short_id}` hands it back to the headless runner"
+    )
+
+
+@task_app.command("detach")
+def task_detach(task_id: str, home: Path | None = _HOME_OPT) -> None:
+    """Detach an adopted task from its interactive session — after this the
+    manager may run it headless like any other task."""
+    from .tasks import TaskStore
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    if not task.attached:
+        raise _fail(f"task {task.short_id} is not attached")
+    _actor_guard(target, "task.detach", target=task.short_id, target_status=task.status)
+    TaskStore(target).update(task.id, attached=False)
+    typer.secho(f"task {task.short_id} detached — runnable again", fg="green")
+
+
+def _match_attached(home: Path, session_id: str, cwd: str):
+    """The task a harness hook is speaking for: exact session match first,
+    then the working directory. The cwd fallback only fires when the task
+    has no *live* session of its own — adopted id-less, or its known session
+    already ended (a resume under a fresh id) — so a second concurrent
+    session in the same checkout can't steal an adopted task's guidance or
+    overwrite its session id."""
+    from .tasks import TERMINAL_STATUSES, TaskStore, attached_state
+
+    candidates = [
+        t
+        for t in TaskStore(home).list()
+        if t.attached and t.status not in TERMINAL_STATUSES
+    ]
+    if session_id:
+        for t in candidates:
+            if t.session == session_id:
+                return t
+    if cwd:
+        resolved = str(Path(cwd).expanduser().resolve())
+        for t in candidates:
+            if not (t.workdir and str(Path(t.workdir).expanduser().resolve()) == resolved):
+                continue
+            if t.session is None:
+                return t
+            state = attached_state(home, t.id)
+            if state and state.get("event") == "session-end":
+                return t
+    return None
+
+
+def _read_hook_payload() -> dict:
+    import sys as _sys
+
+    try:
+        return json.load(_sys.stdin)
+    except Exception:
+        return {}
+
+
+@task_app.command("hook-stop")
+def task_hook_stop(
+    format: str = typer.Option(
+        "decision",
+        "--format",
+        help="Output when guidance is waiting: 'decision' (the Claude Code/Codex "
+        "Stop-hook block protocol) or 'text' (bare guidance lines, for shims that "
+        "inject the continuation themselves, e.g. the opencode plugin).",
+    ),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Harness stop/idle-hook entry point (reads the hook's JSON on stdin).
+
+    For an adopted session this refreshes its liveness record and, when
+    guidance is waiting in the task inbox, emits it — by default as the
+    Stop-hook block-protocol JSON that continues the session (Claude Code and
+    Codex speak the same one). For everything else it exits 0 silently — the
+    hook is installed globally, so this must stay cheap and mute.
+    """
+    from .messages import MessageBus
+    from .runner import guidance_note
+    from .tasks import TaskStore, inbox_name, write_attached_state
+
+    if format not in ("decision", "text"):
+        raise _fail(f"unknown --format {format!r} (expected 'decision' or 'text')")
+    payload = _read_hook_payload()
+    target = home_mod.resolve_home(home)
+    if not (target / home_mod.CONFIG_NAME).exists():
+        raise typer.Exit(0)
+    session_id = str(payload.get("session_id") or "")
+    task = _match_attached(target, session_id, str(payload.get("cwd") or ""))
+    if task is None:
+        raise typer.Exit(0)
+    write_attached_state(target, task.id, "stop", session_id or task.session)
+    if session_id and session_id != task.session:
+        TaskStore(target).update(task.id, session=session_id)
+    claimed = list(MessageBus(target).claim(inbox_name(task.id)))
+    if not claimed:
+        raise typer.Exit(0)
+    # Loop-safe by construction: guidance is consumed on delivery, so a
+    # blocked stop only recurs while new guidance keeps arriving.
+    reason = "Guidance from quorum:\n" + "\n".join(
+        f"- {guidance_note(c.message)}" for c in claimed
+    )
+    try:
+        if format == "text":
+            typer.echo(reason)
+        else:
+            typer.echo(json.dumps({"decision": "block", "reason": reason}))
+    except Exception:
+        for c in claimed:
+            c.reject()
+        raise
+    for c in claimed:
+        c.ack()
+
+
+@task_app.command("hook-session-start")
+def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
+    """Harness SessionStart-hook entry point: refreshes an adopted task's
+    liveness record and learns the (possibly new) session id — harnesses
+    whose sessions can't shell out with their own id at adopt time (Codex)
+    get it associated here instead."""
+    from .tasks import TaskStore, write_attached_state
+
+    payload = _read_hook_payload()
+    target = home_mod.resolve_home(home)
+    if not (target / home_mod.CONFIG_NAME).exists():
+        raise typer.Exit(0)
+    session_id = str(payload.get("session_id") or "")
+    task = _match_attached(target, session_id, str(payload.get("cwd") or ""))
+    if task is None:
+        raise typer.Exit(0)
+    write_attached_state(target, task.id, "session-start", session_id or task.session)
+    if session_id and session_id != task.session:
+        TaskStore(target).update(task.id, session=session_id)
+
+
+@task_app.command("hook-session-end")
+def task_hook_session_end(home: Path | None = _HOME_OPT) -> None:
+    """Harness SessionEnd-hook entry point: records that an adopted session
+    ended (the task stays attached — sessions get reopened)."""
+    from .tasks import write_attached_state
+
+    payload = _read_hook_payload()
+    target = home_mod.resolve_home(home)
+    if not (target / home_mod.CONFIG_NAME).exists():
+        raise typer.Exit(0)
+    task = _match_attached(
+        target, str(payload.get("session_id") or ""), str(payload.get("cwd") or "")
+    )
+    if task is None:
+        raise typer.Exit(0)
+    write_attached_state(target, task.id, "session-end", task.session)
 
 
 @task_app.command("list")
@@ -308,7 +535,14 @@ def task_run(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    _manager_guard(target, "task.run", target=task.short_id, target_status=task.status)
+    # mirror the runner's substrate rail here so --detach fails in the
+    # parent too, instead of journaling a success and refusing in the child
+    if task.attached:
+        raise _fail(
+            f"task {task.short_id} is attached to a live interactive session — "
+            "guide it with `quorum task nudge`, or `quorum task detach` it first"
+        )
+    _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
         pid = launch_detached(target, task.id)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
@@ -374,7 +608,7 @@ def task_report(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    _manager_guard(target, "task.report", target=task.short_id, target_status=task.status,
+    _actor_guard(target, "task.report", target=task.short_id, target_status=task.status,
                    args=status)
     tasks_mod.report(target, task.id, status=status, text=text, pr_url=pr_url)
     typer.echo(f"task {task.short_id}: {status}" + (f" ({pr_url})" if pr_url else ""))
@@ -420,13 +654,13 @@ def task_inbox(
 def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
     """Send guidance to a task; the next run (or a cooperative harness
     mid-run) will see it."""
-    from .tasks import inbox_name
+    from .tasks import nudge
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    _manager_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
+    _actor_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
                    args=text[:80])
-    MessageBus(target).send(current_actor(), inbox_name(task.id), type="guidance", text=text)
+    nudge(target, task, text, sender=current_actor())
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
 
 
@@ -441,7 +675,7 @@ def task_cancel(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    _manager_guard(target, "task.cancel", target=task.short_id, target_status=task.status)
+    _actor_guard(target, "task.cancel", target=task.short_id, target_status=task.status)
     TaskStore(target).update(task.id, status="cancelled")
     typer.echo(f"task {task.short_id} cancelled")
     if kill:
@@ -467,7 +701,7 @@ def board_post(
 ) -> None:
     """Post a message to a board topic."""
     target = get_home(home)
-    _manager_guard(target, "board.post", args=f"{topic}: {text[:80]}")
+    _actor_guard(target, "board.post", args=f"{topic}: {text[:80]}")
     if sender == "user":
         sender = current_actor()  # a manager-tagged call attributes itself
     msg = MessageBus(target).post(sender=sender, topic=topic, type=type, text=text)
@@ -516,7 +750,7 @@ def project_add(
     from .projects import ProjectRegistry
 
     target = get_home(home)
-    _manager_guard(target, "project.add", args=str(path))
+    _actor_guard(target, "project.add", args=str(path))
     registry = ProjectRegistry(target)
     try:
         project = registry.add(
@@ -560,7 +794,7 @@ def project_set(
     from .projects import ProjectRegistry
 
     target = get_home(home)
-    _manager_guard(target, "project.set", target=slug)
+    _actor_guard(target, "project.set", target=slug)
     registry = ProjectRegistry(target)
     try:
         project = registry.update(
@@ -581,7 +815,7 @@ def project_remove(slug: str, home: Path | None = _HOME_OPT) -> None:
     from .projects import ProjectRegistry
 
     target = get_home(home)
-    _manager_guard(target, "project.remove", target=slug)
+    _actor_guard(target, "project.remove", target=slug)
     if ProjectRegistry(target).remove(slug):
         typer.echo(f"removed {slug}")
     else:
@@ -650,7 +884,7 @@ def agent_run_once(name: str, home: Path | None = _HOME_OPT) -> None:
     config = _load_config(target)
     acfg = config.agents.get(name)
     if acfg is None:
-        raise _fail(f"no agent {name!r} in config.toml") from None
+        raise _fail(f"no agent {name!r} in config.toml or agents/") from None
     try:
         cls = resolve(acfg.type, target)
     except AgentResolutionError as e:
@@ -697,8 +931,8 @@ def _agent_command(home: Path | None, name: str, command: str, note: str) -> Non
     target = get_home(home)
     config = _load_config(target)
     if name not in config.agents:
-        raise _fail(f"no agent {name!r} in config.toml") from None
-    _manager_guard(target, f"agent.{command}", target=name)
+        raise _fail(f"no agent {name!r} in config.toml or agents/") from None
+    _actor_guard(target, f"agent.{command}", target=name)
     MessageBus(target).send("user", "supervisor", type=f"agent.{command}", payload={"agent": name})
     typer.echo(note)
 
@@ -721,6 +955,86 @@ def agent_run_now(name: str, home: Path | None = _HOME_OPT) -> None:
     _agent_command(home, name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
 
 
+@agent_app.command("create")
+def agent_create(
+    name: str,
+    schedule: str = typer.Option("every 1h", "--schedule", help="'every <N><s|m|h|d>' or 'cron <5 fields>'."),
+    type_: str = typer.Option("prompt", "--type", help="Agent type: builtin short name or module:Class."),
+    harness: str = typer.Option("", "--harness", help="Harness table for a prompt agent (default: [tasks].default_harness)."),
+    prompt_file: Path | None = typer.Option(None, "--prompt-file", help="File whose contents seed prompts/<name>.md."),
+    prompt_text: str = typer.Option("", "--prompt-text", help="Inline prompt body for prompts/<name>.md."),
+    timeout: int = typer.Option(0, "--timeout", help="run_timeout_seconds for the agent's harness runs."),
+    max_actions: int = typer.Option(0, "--max-actions", help="Per-run action cap for the agent's harness runs."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Create a file-defined agent (agents/<name>.toml + prompts/<name>.md).
+
+    A running supervisor picks it up within seconds — no restart, and
+    config.toml is never touched.
+    """
+    from .config import ConfigError, create_agent
+
+    target = get_home(home)
+    text: str | None = None
+    if prompt_file is not None:
+        try:
+            text = prompt_file.read_text(encoding="utf-8")
+        except OSError as e:
+            raise _fail(f"cannot read {prompt_file}: {e}") from None
+    elif prompt_text:
+        text = prompt_text
+    if type_ == "prompt" and text is None:
+        raise _fail("a prompt agent needs --prompt-text or --prompt-file (it becomes prompts/<name>.md)")
+    settings: dict = {}
+    if harness:
+        settings["harness"] = harness
+    if timeout:
+        settings["run_timeout_seconds"] = timeout
+    if max_actions:
+        settings["max_actions_per_run"] = max_actions
+    _actor_guard(target, "agent.create", target=name, args=f"{type_} @ {schedule}")
+    try:
+        create_agent(
+            target, name, type_=type_, schedule=schedule, settings=settings, prompt_text=text
+        )
+    except ConfigError as e:
+        raise _fail(str(e)) from None
+    MessageBus(target).send(current_actor(), "supervisor", type="agent.reload", payload={"agent": name})
+    typer.secho(
+        f"agent {name} created (agents/{name}.toml"
+        + (f", prompts/{name}.md" if text is not None else "")
+        + ") — a running supervisor schedules it within seconds",
+        fg="green",
+    )
+
+
+@agent_app.command("remove")
+def agent_remove(name: str, home: Path | None = _HOME_OPT) -> None:
+    """Remove a file-defined agent (keeps its prompt and state files)."""
+    from .config import agent_file_path
+
+    target = get_home(home)
+    config = _load_config(target)
+    path = agent_file_path(target, name)
+    if not path.exists():
+        if name in config.agents:
+            raise _fail(
+                f"{name!r} is defined in config.toml — remove it there and restart `quorum up`"
+            ) from None
+        raise _fail(f"no agent {name!r} — `quorum agent list`") from None
+    _actor_guard(target, "agent.remove", target=name)
+    path.unlink()
+    MessageBus(target).send(current_actor(), "supervisor", type="agent.reload", payload={"agent": name})
+    typer.echo(f"removed agents/{name}.toml (kept prompts/{name}.md and state) — unschedule queued")
+
+
+@agent_app.command("reload")
+def agent_reload(name: str, home: Path | None = _HOME_OPT) -> None:
+    """Ask the running supervisor to re-read an agent's config (after editing
+    agents/<name>.toml or its prompt's settings)."""
+    _agent_command(home, name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
+
+
 # -- manager ---------------------------------------------------------------
 
 
@@ -736,7 +1050,7 @@ def manager_tell(text: str, home: Path | None = _HOME_OPT) -> None:
 def manager_note(text: str, home: Path | None = _HOME_OPT) -> None:
     """Journal a reasoning note (the manager's harness calls this; humans can too)."""
     target = get_home(home)
-    _manager_guard(target, "note", args=text, always_journal=True)
+    _actor_guard(target, "note", args=text, always_journal=True)
     typer.echo("noted")
 
 

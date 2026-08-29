@@ -23,24 +23,16 @@ condition true precisely so that recovery is automatic.
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import threading
 from datetime import datetime
 from pathlib import Path
 
-from .. import fsio, tasks
-from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path, manager_env
+from .. import actor, fsio, herdr, tasks
+from ..actor import journal_path
 from ..agent import Agent
-from ..runner import (
-    build_harness_argv,
-    guidance_note,
-    guidance_pump,
-    resolve_harness,
-    stream_transcript,
-)
+from ..runner import guidance_note
+from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
 
-DEFAULT_RUN_TIMEOUT_SECONDS = 300
+__all__ = ["DEFAULT_RUN_TIMEOUT_SECONDS", "Manager", "build_digest", "journal_path", "transcript_path"]
 
 TRANSCRIPT_TAIL_LINES = 10
 JOURNAL_TAIL_ENTRIES = 15
@@ -48,7 +40,7 @@ RECENT_TERMINAL_HOURS = 24
 
 
 def transcript_path(home: Path) -> Path:
-    return Path(home) / "state" / "manager" / "transcript.jsonl"
+    return actor.transcript_path(home, "manager")
 
 
 def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directives: list[str]) -> str:
@@ -56,7 +48,9 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
     task lines look like `- [status] shortid ...` so both models and tests
     can parse them."""
     home = Path(home)
-    active = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
+    live = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
+    active = [t for t in live if not t.attached]
+    attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
 
     lines.append("## Active tasks")
@@ -84,6 +78,41 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
             text = e.get("line") if "line" in e else json.dumps(e.get("event"), ensure_ascii=False)
             lines.append(f"  out| {str(text)[:160]}")
     lines.append("")
+
+    if attached:
+        lines.append("## Attached sessions (live interactive work — never `task run` these)")
+        for t in attached:
+            st = tasks.attached_state(home, t.id)
+            if st:
+                try:
+                    age = int((now - fsio.parse_iso(st["at"])).total_seconds() // 60)
+                except (KeyError, ValueError):
+                    age = None
+                event = st.get("event", "adopt")
+                label = {"stop": "last-stop", "session-end": "session-ended"}.get(event, "adopted")
+                seen = f"{label} {age}m-ago" if age is not None else label
+            else:
+                seen = "no-signal"
+            lines.append(
+                f"- [attached] {t.short_id} project={t.project} dir={t.workdir} {seen}"
+            )
+            if t.herdr_pane:
+                state = herdr.agent_state(home, t.herdr_pane)
+                if state:
+                    lines.append(f"  herdr: state={state}")
+            first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
+            lines.append(f"  prompt: {first[:120]}")
+            git = tasks.workdir_git_state(t)
+            if git and (git["dirty"] or git["unpushed"]):
+                unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
+                lines.append(
+                    f"  git: branch={git['branch']} dirty={git['dirty']} unpushed={unpushed}"
+                )
+            for r in tasks.read_reports(home, t.id, limit=3):
+                lines.append(
+                    f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}"
+                )
+        lines.append("")
 
     recent_terminal = [
         t for t in all_tasks
@@ -150,7 +179,7 @@ class Manager(Agent):
         try:
             digest = build_digest(home, all_tasks, self.ctx.now(), directives)
             prompt = self.ctx.prompt("manager", digest=digest)
-            self._run_harness(prompt)
+            run_agent_harness(self.ctx, prompt)
         except BaseException:
             for c in claimed:
                 c.reject()  # directives go straight back to new/ for the next tick
@@ -158,66 +187,3 @@ class Manager(Agent):
         for c in claimed:
             c.ack()
         self.ctx.log_action("manager.run", "manager run complete")
-
-    # -- harness invocation ------------------------------------------------
-
-    def _resolve_harness(self):
-        config = self.ctx.config
-        name = self.ctx.settings.get("harness") or (config.tasks.default_harness if config else "")
-        if not config or not name:
-            raise RuntimeError(
-                "manager has no usable harness (set [agents.manager.settings].harness or "
-                "[tasks].default_harness in config.toml) — supervision is halted until then"
-            )
-        return resolve_harness(config, name)
-
-    def _run_harness(self, prompt: str) -> None:
-        harness = self._resolve_harness()
-        run_id = fsio.ulid()
-        timeout = float(self.ctx.settings.get("run_timeout_seconds", DEFAULT_RUN_TIMEOUT_SECONDS))
-        cap = int(self.ctx.settings.get("max_actions_per_run", DEFAULT_MAX_ACTIONS_PER_RUN))
-        env = {
-            **os.environ,
-            **harness.env,
-            "QUORUM_HOME": str(self.ctx.home),
-            **manager_env(run_id, cap),
-        }
-        argv = build_harness_argv(harness, prompt)
-        transcript = transcript_path(self.ctx.home)
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(self.ctx.home),
-            stdin=subprocess.PIPE if harness.inject else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        # An inject-capable manager harness can be steered while a tick is in
-        # flight: `quorum manager tell` lands in the manager inbox and the
-        # pump forwards it as a user turn instead of waiting for the next tick.
-        with guidance_pump(self.ctx.home, "manager", harness, proc) as pump:
-            reader = threading.Thread(
-                target=stream_transcript,
-                args=(proc, transcript),
-                kwargs={
-                    "extra": {"run": run_id},
-                    "now": self.ctx.now,
-                    "on_event": pump.on_event if pump is not None else None,
-                },
-                daemon=True,
-            )
-            reader.start()
-            try:
-                code = proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-                reader.join(2)
-                raise RuntimeError(
-                    f"manager harness run {run_id} timed out after {int(timeout)}s and was killed"
-                ) from None
-        reader.join(5)
-        if code != 0:
-            raise RuntimeError(f"manager harness run {run_id} exited {code}")

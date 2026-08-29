@@ -133,6 +133,14 @@ class Supervisor:
 
     def _schedule_agent(self, name: str, agent: Agent) -> None:
         kwargs = parse_schedule(self.config.agents[name].schedule)
+        # Durable pause: a paused heartbeat survives supervisor restarts, so
+        # the job is created paused rather than silently resuming.
+        try:
+            hb = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
+        except (OSError, ValueError):
+            hb = {}
+        if hb.get("status") == "paused":
+            kwargs["next_run_time"] = None
         self.scheduler.add_job(
             lambda: self.run_agent_tick(name),
             id=name,
@@ -228,7 +236,7 @@ class Supervisor:
             "system",
             "agent.paused",
             text=f"agent {name} auto-paused after {MAX_CONSECUTIVE_FAILURES} consecutive failures "
-            "(fix the cause and restart `quorum up`)",
+            "(fix the cause and `quorum agent resume` it)",
             payload={"agent": name},
         )
 
@@ -274,6 +282,11 @@ class Supervisor:
             claimed.ack()
 
     def _apply_control(self, command: str, name: str) -> None:
+        if command == "agent.reload":
+            # Must come before the job lookup: a freshly created agent has no
+            # job yet — the whole point of the reload is to give it one.
+            self._reload_agent(name)
+            return
         job = self.scheduler.get_job(name)
         if job is None:
             log.warning("control command %s for unknown/unscheduled agent %r", command, name)
@@ -292,6 +305,47 @@ class Supervisor:
             log.info("agent %s scheduled to run now", name)
         else:
             log.warning("unknown control command %r", command)
+
+    def _reload_agent(self, name: str) -> None:
+        """Pick up a created, edited, or removed `agents/<name>.toml` (or a
+        config.toml agent change) without a restart. The file is the source
+        of truth; the reload message is only a poke."""
+        from .config import ConfigError, load_config
+
+        try:
+            fresh = load_config(self.home)
+        except ConfigError as e:
+            log.error("agent.reload(%s): config is unloadable: %s", name, e)
+            return
+        self.config = fresh
+        try:
+            if self.scheduler.get_job(name):
+                self.scheduler.remove_job(name)
+        except Exception:
+            log.debug("agent.reload(%s): job removal skipped", name, exc_info=True)
+        acfg = fresh.agents.get(name)
+        if acfg is None or not acfg.enabled:
+            self.agents.pop(name, None)
+            self._failures.pop(name, None)
+            write_heartbeat(self.home, name, status="removed", error=None, next_run=None)
+            log.info("agent %s removed via reload", name)
+            return
+        try:
+            cls = resolve(acfg.type, self.home)
+            ctx = AgentContext(home=self.home, name=name, settings=acfg.settings, config=self.config)
+            self.agents[name] = cls(ctx)
+            self._clear_load_error(name)
+        except Exception as e:
+            self.errors[name] = str(e)
+            log.error("agent %s failed to load on reload: %s", name, e)
+            self._write_heartbeat(
+                name, status="error", error=f"failed to load: {e}", load_error=True
+            )
+            return
+        self._failures[name] = 0
+        self._schedule_agent(name, self.agents[name])
+        self._write_heartbeat(name)
+        log.info("agent %s (re)loaded: %s @ %s", name, acfg.type, acfg.schedule)
 
     # -- janitor -------------------------------------------------------------
 

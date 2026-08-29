@@ -312,6 +312,14 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         raise RunnerError(f"no task matching {task_prefix!r} — `quorum task list`") from None
     except ValueError as e:
         raise RunnerError(str(e)) from None
+    if task.attached:
+        # A substrate rail, not supervision policy (same class as the runner
+        # lock): the workdir is the user's live checkout with an interactive
+        # session in it, and a headless run there would race the human.
+        raise RunnerError(
+            f"task {task.short_id} is attached to a live interactive session — "
+            "guide it with `quorum task nudge`, or `quorum task detach` it first"
+        )
     harness = resolve_harness(config, task.harness)
 
     lock = runner_lock_path(home, task.id)

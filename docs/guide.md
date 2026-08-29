@@ -253,6 +253,61 @@ received" section), and a cooperative harness that checks
 fluid: select a task, press `n`, type, enter. The web dashboard has the same
 nudge box on each task.
 
+## Adopting a live session
+
+Sometimes the work is already underway — you're deep in a problem inside an
+interactive coding session and want quorum's manager watching over it.
+Adopt the session instead of re-queuing the work:
+
+```bash
+quorum task adopt "refactoring the auth flow"    # from the session's directory
+```
+
+or from inside the session itself, with the shipped adapter for your
+harness (each `integrations/<harness>/README.md` has install steps):
+
+- **Claude Code** (`integrations/claude-code/`): `/quorum:adopt <desc>`,
+  plus Stop/SessionEnd hooks.
+- **Codex CLI** (`integrations/codex/`): `/prompts:quorum-adopt <desc>`,
+  plus SessionStart/Stop/SessionEnd hooks — Codex speaks the same hook
+  protocol as Claude Code. Adoption starts id-less (Codex prompts can't see
+  their own session id); the next hook firing learns it by directory match.
+- **opencode** (`integrations/opencode/`): `/quorum-adopt <desc>`, backed by
+  a plugin that watches idle events and injects guidance as a user turn.
+
+Adoption creates an **attached** task (`⚭` in every dashboard): its workdir
+is your own checkout, quorum never spawns runs for it (`task run` refuses,
+by design), and the manager treats it as human-driven — observing its git
+state and reports, nudging rather than relaunching, escalating to the
+`attention` topic if it looks abandoned. Guidance queued with `task nudge`
+is delivered *inside* the session by the adapter the next time the agent
+stops or goes idle, as an instruction to continue; the session can also call
+`quorum task report` like any harness. If the directory wasn't a registered
+project yet, adoption registers it. When the interactive phase is over,
+`quorum task detach <id>` turns it back into an ordinary task the manager
+may run headless (a captured session id lets a `resume` harness template
+continue the same conversation).
+
+### herdr (optional)
+
+If you run your interactive sessions inside [herdr](https://herdr.dev) —
+a terminal multiplexer that detects coding agents in its panes — tell
+quorum which pane hosts the session:
+
+```bash
+quorum task adopt "port the parser" --herdr-pane w1:p2
+```
+
+Two things light up, both fail-soft (herdr stopped or absent changes
+nothing): the manager digest shows the pane's live agent status
+(`herdr: state=working|blocked|idle`), and every `task nudge` also rings a
+doorbell in the pane telling the session guidance is waiting — which is how
+nudges reach sessions with no quorum adapter installed. The
+guidance itself always stays in the task inbox; the session collects it
+with `quorum task inbox <id> --claim`. An optional `[herdr]` table in
+config.toml overrides the socket path (`socket = "..."`) or disables the
+integration (`enabled = false`).
+
 ## Dashboards
 
 All views are pure readers of the home directory — they work whether or not
@@ -262,9 +317,13 @@ the supervisor is running, including over SSH, and never hold locks.
   tasks, project deadlines.
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
   top; select one to see its transcript and reports, `n` to nudge, `esc`
-  back to the board, `q` to quit.
+  back to the board, `q` to quit. The agents table shows each agent's
+  status, schedule, last and next run (`~` marks an estimate computed from
+  the schedule when the supervisor isn't around to say for sure).
 - `quorum web` — the same picture at `http://127.0.0.1:8787` (`[web]`
-  extra). Localhost only, no exposed ports.
+  extra). Localhost only, no exposed ports. Click an agent for its recent
+  actions and journal plus pause/resume/run-now buttons, and use the "new
+  agent…" form to create a prompt agent without leaving the browser.
 - `quorum board read [topic]` — the raw message stream (`--json` for
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
@@ -286,7 +345,53 @@ Commands are delivered through the supervisor's inbox and applied within
 ~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
 its config sets `auto_pause = false`, as the manager's does, in which case
 it keeps retrying (loud failures, automatic recovery);
-`agent resume` is the recovery lever.
+`agent resume` is the recovery lever. A pause survives supervisor restarts.
+
+## Prompt-driven agents
+
+The manager is one instance of a general shape: a prompt, a schedule, and a
+harness. You can mint more of them — a standup summarizer, a nightly triage
+bot, a docs gardener — without writing Python:
+
+```bash
+quorum agent create standup \
+  --schedule "every 1d" \
+  --prompt-text "Read the board with \`quorum board read\`, then post a short
+standup summary with \`quorum board post notes ...\`."
+```
+
+This writes two plain files — `agents/standup.toml` (schedule, type,
+settings; hand-editable, and the one config location quorum itself may
+write) and `prompts/standup.md` (the prompt; edit it any time) — and pokes a
+running supervisor, which schedules the agent within seconds. No restart,
+and config.toml is never touched. The web dashboard's "new agent…" form does
+exactly the same thing.
+
+Each tick, a prompt agent renders its prompt and runs your harness over it,
+with the same authority and the same rails as the manager: every mutating
+`quorum` command it issues is auto-journaled to
+`state/agents/<name>/journal.jsonl` and rate-capped per run
+(`max_actions_per_run`, default 20). Send it a mid-run or
+between-run directive with the bus (`quorum agent list` shows it; messages
+to the `<name>` inbox appear in its `{directives}` placeholder). Useful
+settings in `agents/<name>.toml`:
+
+```toml
+type = "prompt"
+schedule = "every 1d"
+
+[settings]
+harness = "claude"            # defaults to [tasks].default_harness
+prompt = "standup"            # template name, defaults to the agent's name
+run_timeout_seconds = 300
+max_actions_per_run = 10      # tighten the rail below the default of 20
+```
+
+After editing, `quorum agent reload standup` applies the change to a running
+supervisor; `quorum agent remove standup` unschedules it (the prompt and
+state files stay). There is no wake condition: a scheduled prompt agent
+spends a harness run every tick, so give an expensive agent a sparse
+schedule and put any "do nothing unless…" logic in the prompt itself.
 
 ## Sandboxing
 
