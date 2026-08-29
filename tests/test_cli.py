@@ -373,3 +373,44 @@ def test_superseded_hashes_never_contain_the_current_defaults():
             continue
         digest = hashlib.sha256(entry.read_bytes()).hexdigest()
         assert digest not in home_mod.SUPERSEDED_PROMPT_HASHES.get(entry.name, set())
+
+
+# -- Phase-A UX rails: help rendering, version, attention surfacing ----------
+
+
+def test_help_keeps_config_table_names():
+    """Rich treats [bracketed] text as markup; unescaped, the help would tell
+    users to edit "" instead of [harness.<name>] / [tasks] / [web]."""
+    r = runner.invoke(app, ["task", "add", "--help"])
+    assert "[harness.<name>]" in r.output
+    assert "[tasks].default_harness" in r.output
+    r = runner.invoke(app, ["web", "--help"])
+    assert "[web]" in r.output
+
+
+def test_version_flag():
+    r = runner.invoke(app, ["--version"])
+    assert r.exit_code == 0
+    assert r.output.startswith("quorum ")
+
+
+def test_top_level_home_is_accepted(home: Path, monkeypatch):
+    monkeypatch.delenv("QUORUM_HOME")
+    r = runner.invoke(app, ["--home", str(home), "task", "list"])
+    assert r.exit_code == 0, r.output
+    assert "no tasks" in r.output
+
+
+def test_status_surfaces_attention_and_empty_state(home: Path):
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0
+    assert "no tasks" in r.output
+    assert "no projects registered" in r.output
+    assert "#attention" not in r.output
+
+    from quorum.messages import MessageBus
+
+    MessageBus(home).post("manager", "attention", text="need a human decision")
+    r = runner.invoke(app, ["status"])
+    assert "1 on #attention" in r.output
+    assert "quorum board read attention" in r.output

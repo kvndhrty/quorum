@@ -15,7 +15,13 @@ environment you launch `codex` from.
 
 ## Install
 
-Copy the hooks config — user-wide:
+From an installed package (no checkout needed):
+
+```bash
+quorum integration install codex
+```
+
+Or copy the hooks config by hand — user-wide:
 
 ```bash
 cp integrations/codex/hooks.json ~/.codex/hooks.json

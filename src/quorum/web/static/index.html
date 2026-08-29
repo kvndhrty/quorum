@@ -24,6 +24,9 @@
   #sup .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
               margin-right: 5px; background: var(--bad); }
   #sup.alive .dot { background: var(--ok); }
+  #attn { display: none; font-size: 13px; font-weight: 600; color: var(--warn); }
+  li.attn { border-left: 3px solid var(--warn); padding-left: 8px; }
+  li.attn .meta { color: var(--warn); }
   main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
          gap: 16px; padding: 16px 24px 40px; max-width: 1500px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
@@ -71,6 +74,7 @@
 <header>
   <h1>quorum</h1>
   <span id="sup"><span class="dot"></span><span id="sup-text">checking…</span></span>
+  <span id="attn"></span>
 </header>
 <main>
   <section class="wide">
@@ -138,6 +142,10 @@ async function refresh() {
   $("sup-text").textContent = sup.alive
     ? `supervisor running (pid ${sup.pid})` : "supervisor not running";
 
+  const attn = data.attention || {};
+  $("attn").style.display = attn.count ? "inline" : "none";
+  $("attn").textContent = attn.count ? `⚠ ${attn.count} on #attention` : "";
+
   $("tasks").innerHTML = (data.tasks || []).map(t => {
     const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""));
@@ -175,7 +183,7 @@ async function refresh() {
   }).join("") || `<tr><td class="muted">none registered</td></tr>`;
 
   $("board").innerHTML = (data.board || []).slice().reverse().map(m =>
-    `<li>${esc(m.text)}<br><span class="meta">#${esc(m.topic)} · ${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))}</span></li>`
+    `<li${m.topic === "attention" ? ' class="attn"' : ""}>${esc(m.text)}<br><span class="meta">#${esc(m.topic)} · ${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))}</span></li>`
   ).join("") || `<li class="muted">no messages yet</li>`;
 
   if (selectedTask) renderTaskDetail();

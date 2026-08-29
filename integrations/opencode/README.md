@@ -18,7 +18,13 @@ from.
 
 ## Install
 
-Copy the plugin and command — global:
+From an installed package (no checkout needed):
+
+```bash
+quorum integration install opencode
+```
+
+Or copy the plugin and command by hand — global:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins ~/.config/opencode/commands

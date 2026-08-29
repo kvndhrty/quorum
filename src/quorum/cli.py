@@ -25,17 +25,50 @@ from .messages import MessageBus
 app = typer.Typer(
     help="Quorum: orchestrate long-running coding tasks with your own harness.",
     no_args_is_help=True,
+    pretty_exceptions_enable=False,
 )
 board_app = typer.Typer(help="Read and post to the public message board.", no_args_is_help=True)
 project_app = typer.Typer(help="Manage registered projects.", no_args_is_help=True)
 agent_app = typer.Typer(help="Inspect, run, and control agents.", no_args_is_help=True)
 task_app = typer.Typer(help="Create, run, and guide harness-driven tasks.", no_args_is_help=True)
 manager_app = typer.Typer(help="Talk to (and audit) the manager agent.", no_args_is_help=True)
+integration_app = typer.Typer(
+    help="Install harness adapters (session-adoption hooks and plugins).", no_args_is_help=True
+)
 app.add_typer(board_app, name="board")
 app.add_typer(project_app, name="project")
 app.add_typer(agent_app, name="agent")
 app.add_typer(task_app, name="task")
 app.add_typer(manager_app, name="manager")
+app.add_typer(integration_app, name="integration")
+
+
+def _version_callback(value: bool) -> None:
+    if not value:
+        return
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        typer.echo(f"quorum {version('quorum-orchestrator')}")
+    except PackageNotFoundError:
+        typer.echo("quorum (unknown version — not an installed package)")
+    raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False, "--version", "-V", callback=_version_callback, is_eager=True,
+        help="Print the quorum version and exit.",
+    ),
+    home: Path | None = typer.Option(
+        None, "--home",
+        help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum); also accepted after any subcommand.",
+    ),
+) -> None:
+    if home is not None:
+        # export so every subcommand (and any child it spawns) sees the same home
+        os.environ["QUORUM_HOME"] = str(home)
 
 _HOME_OPT = typer.Option(None, "--home", help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum).")
 
@@ -185,6 +218,14 @@ def status(home: Path | None = _HOME_OPT) -> None:
     else:
         typer.secho("supervisor: not running", fg="yellow")
 
+    attention = views.attention_summary(target)
+    if attention["count"]:
+        typer.secho(
+            f"⚠ {attention['count']} on #attention in the last {attention['days']}d "
+            "— `quorum board read attention`",
+            fg="yellow",
+        )
+
     rows = views.agent_rows(target)
     if rows:
         typer.echo("\nagents:")
@@ -202,6 +243,8 @@ def status(home: Path | None = _HOME_OPT) -> None:
         typer.echo("\ntasks:")
         for t in task_rows:
             _echo_task_row(t)
+    else:
+        typer.echo("\nno tasks — `quorum task add <project> \"<prompt>\"`")
 
     projects = views.project_rows(target)
     if projects:
@@ -213,6 +256,8 @@ def status(home: Path | None = _HOME_OPT) -> None:
                 if p["days_left"] is not None:
                     dl += f" ({p['days_left']}d)" if p["days_left"] >= 0 else f" (OVERDUE {-p['days_left']}d)"
             typer.echo(f"  {p['slug']:<24}{dl}")
+    else:
+        typer.echo("no projects registered — `quorum project add <dir>`")
 
 
 def _echo_task_row(t: dict) -> None:
@@ -243,7 +288,7 @@ def _echo_task_row(t: dict) -> None:
 def task_add(
     project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
     prompt: str = typer.Argument(help="What the harness should do."),
-    harness: str | None = typer.Option(None, "--harness", help="[harness.<name>] to use (default: [tasks].default_harness)."),
+    harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     home: Path | None = _HOME_OPT,
 ) -> None:
@@ -279,7 +324,7 @@ def task_adopt(
     description: str = typer.Argument("", help="What this session is working on (optional)."),
     session: str = typer.Option("", "--session", help="The harness's own session id (enables exact hook matching and later resume)."),
     directory: Path | None = typer.Option(None, "--dir", help="The session's working directory (default: current directory)."),
-    harness: str | None = typer.Option(None, "--harness", help="Which [harness.<name>] this session runs (default: [tasks].default_harness)."),
+    harness: str | None = typer.Option(None, "--harness", help="Which \\[harness.<name>] this session runs (default: \\[tasks].default_harness)."),
     herdr_pane: str = typer.Option("", "--herdr-pane", help="The herdr pane hosting the session (enables pane observation and the nudge doorbell)."),
     json_out: bool = typer.Option(False, "--json", help="Print the created task ids as JSON."),
     home: Path | None = _HOME_OPT,
@@ -822,6 +867,110 @@ def project_remove(slug: str, home: Path | None = _HOME_OPT) -> None:
         raise _fail(f"no project {slug!r}") from None
 
 
+# -- integrations ----------------------------------------------------------
+
+
+def _integrations_root() -> Path:
+    """The bundled harness adapters: inside the package in a wheel install,
+    at the repo root in a checkout."""
+    packaged = Path(__file__).resolve().parent / "integrations"
+    if packaged.is_dir():
+        return packaged
+    checkout = Path(__file__).resolve().parents[2] / "integrations"
+    if checkout.is_dir():
+        return checkout
+    raise _fail("no bundled integrations found — reinstall quorum-orchestrator")
+
+
+def _adapter_files(root: Path, name: str) -> list[tuple[Path, Path]]:
+    """(source, destination) pairs for a copy-installed adapter."""
+    if name == "codex":
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        return [
+            (root / "codex" / "hooks.json", codex_home / "hooks.json"),
+            (
+                root / "codex" / "prompts" / "quorum-adopt.md",
+                codex_home / "prompts" / "quorum-adopt.md",
+            ),
+        ]
+    if name == "opencode":
+        cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+        return [
+            (root / "opencode" / "plugin" / "quorum.js", cfg / "plugins" / "quorum.js"),
+            (
+                root / "opencode" / "commands" / "quorum-adopt.md",
+                cfg / "commands" / "quorum-adopt.md",
+            ),
+        ]
+    return []
+
+
+_ADAPTER_NOTES = {
+    "claude-code": "adopt with /quorum:adopt inside a session",
+    "codex": "Codex asks you to trust the new hooks once; adopt with /prompts:quorum-adopt",
+    "opencode": "adopt with /quorum-adopt inside a session",
+}
+
+
+@integration_app.command("list")
+def integration_list() -> None:
+    """Show the bundled harness adapters and whether they are installed."""
+    root = _integrations_root()
+    for name in ("claude-code", "codex", "opencode"):
+        if name == "claude-code":
+            state = "plugin-managed"
+            detail = f"`claude plugin install {root / name}`"
+        else:
+            files = _adapter_files(root, name)
+            installed = sum(1 for _, dest in files if dest.exists())
+            state = (
+                "installed" if installed == len(files)
+                else "partial" if installed
+                else "not installed"
+            )
+            detail = ", ".join(str(dest) for _, dest in files)
+        typer.echo(f"{name:<12} {state:<14} {detail}")
+    typer.echo("\ninstall one: `quorum integration install <name>`")
+
+
+@integration_app.command("install")
+def integration_install(
+    name: str = typer.Argument(help="Adapter: claude-code, codex, or opencode."),
+    force: bool = typer.Option(False, "--force", help="Overwrite existing destination files."),
+) -> None:
+    """Install a harness adapter so live sessions can be adopted (`quorum task adopt`).
+
+    Copies the adapter's hook config or plugin to the harness's user-wide
+    config location; per-project installs are described in the adapter's
+    README (integrations/<name>/README.md in the repo).
+    """
+    root = _integrations_root()
+    if name == "claude-code":
+        typer.echo("Claude Code adapters install through its plugin manager — run:")
+        typer.echo(f"  claude plugin install {root / 'claude-code'}")
+        typer.echo("then adopt a session with /quorum:adopt (manual, plugin-less install: "
+                   "see the README in that directory)")
+        return
+    files = _adapter_files(root, name)
+    if not files:
+        raise _fail(f"no adapter {name!r} (available: claude-code, codex, opencode)")
+    for src, dest in files:
+        if dest.exists() and not force:
+            if dest.read_bytes() == src.read_bytes():
+                typer.echo(f"{dest} already installed (identical)")
+                continue
+            raise _fail(
+                f"{dest} already exists with different content — merge the entries from "
+                f"{src} by hand (see {root / name / 'README.md'}), or re-run with --force to overwrite"
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(src.read_bytes())
+        typer.secho(f"installed {dest}", fg="green")
+    note = _ADAPTER_NOTES.get(name)
+    if note:
+        typer.echo(note)
+
+
 # -- dashboards ------------------------------------------------------------
 
 
@@ -830,7 +979,7 @@ def web(
     port: int = typer.Option(8787, "--port"),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Serve the local web dashboard on 127.0.0.1 (requires the [web] extra)."""
+    r"""Serve the local web dashboard on 127.0.0.1 (requires the \[web] extra)."""
     target = get_home(home)
     try:
         import uvicorn
@@ -960,7 +1109,7 @@ def agent_create(
     name: str,
     schedule: str = typer.Option("every 1h", "--schedule", help="'every <N><s|m|h|d>' or 'cron <5 fields>'."),
     type_: str = typer.Option("prompt", "--type", help="Agent type: builtin short name or module:Class."),
-    harness: str = typer.Option("", "--harness", help="Harness table for a prompt agent (default: [tasks].default_harness)."),
+    harness: str = typer.Option("", "--harness", help="Harness table for a prompt agent (default: \\[tasks].default_harness)."),
     prompt_file: Path | None = typer.Option(None, "--prompt-file", help="File whose contents seed prompts/<name>.md."),
     prompt_text: str = typer.Option("", "--prompt-text", help="Inline prompt body for prompts/<name>.md."),
     timeout: int = typer.Option(0, "--timeout", help="run_timeout_seconds for the agent's harness runs."),

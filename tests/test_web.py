@@ -91,3 +91,12 @@ def test_agent_create_detail_and_control(client: TestClient, home: Path):
     inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
     types = [fsio.read_json(p)["type"] for p in fsio.sorted_entries(inbox)]
     assert types == ["agent.reload", "agent.pause"]
+
+
+def test_overview_carries_attention(client: TestClient, home: Path):
+    empty = client.get("/api/overview").json()["attention"]
+    assert empty["count"] == 0
+    MessageBus(home).post("manager", "attention", text="stuck: need credentials")
+    attn = client.get("/api/overview").json()["attention"]
+    assert attn["count"] == 1
+    assert attn["recent"][0]["text"] == "stuck: need credentials"

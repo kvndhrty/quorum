@@ -264,7 +264,11 @@ quorum task adopt "refactoring the auth flow"    # from the session's directory
 ```
 
 or from inside the session itself, with the shipped adapter for your
-harness (each `integrations/<harness>/README.md` has install steps):
+harness — install one with `quorum integration install <harness>` (codex and
+opencode; `claude-code` goes through Claude's plugin manager, and the command
+prints the exact invocation). `quorum integration list` shows what's bundled
+and what's installed. Each `integrations/<harness>/README.md` has the
+details and per-project variants:
 
 - **Claude Code** (`integrations/claude-code/`): `/quorum:adopt <desc>`,
   plus Stop/SessionEnd hooks.
@@ -313,8 +317,14 @@ integration (`enabled = false`).
 All views are pure readers of the home directory — they work whether or not
 the supervisor is running, including over SSH, and never hold locks.
 
+Escalations are surfaced everywhere: recent posts on the `attention` topic
+(the manager's ask-a-human channel) show up as a warning line in `status`,
+in the TUI banner, and as a badge in the web header, so a manager asking
+for you is never silent.
+
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
-  tasks, project deadlines.
+  tasks, project deadlines, and the `#attention` warning when something
+  needs you.
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
   top; select one to see its transcript and reports, `n` to nudge, `esc`
   back to the board, `q` to quit. The agents table shows each agent's

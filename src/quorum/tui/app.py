@@ -127,9 +127,16 @@ class QuorumTUI(App):
         sup = views.supervisor_status(self.home)
         top = self.query_one("#top", Static)
         if sup.get("alive"):
-            top.update(f"● supervisor running (pid {sup.get('pid')}, since {sup.get('started_at')})")
+            banner = Text(f"● supervisor running (pid {sup.get('pid')}, since {sup.get('started_at')})")
         else:
-            top.update("○ supervisor not running — start it with `quorum up`")
+            banner = Text("○ supervisor not running — start it with `quorum up`")
+        attention = views.attention_summary(self.home)
+        if attention["count"]:
+            banner.append(
+                f"   ⚠ {attention['count']} on #attention — `quorum board read attention`",
+                style="bold yellow",
+            )
+        top.update(banner)
 
         tasks = self.query_one("#tasks", DataTable)
         tasks.clear()

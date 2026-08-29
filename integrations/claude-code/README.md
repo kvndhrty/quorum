@@ -18,6 +18,10 @@ From a checkout of this repo:
 claude plugin install /path/to/quorum/integrations/claude-code
 ```
 
+From an installed package there is no checkout path — `quorum integration
+install claude-code` prints the same command with the bundled adapter's
+real location filled in.
+
 Then, inside any session you want supervised:
 
 ```

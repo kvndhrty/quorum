@@ -90,7 +90,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   harness under `integrations/` (claude-code, codex, opencode — the last is
   a fail-soft JS plugin, kept a dumb pipe over the same CLI entry points),
   kept true by `tests/test_integrations.py` (the opencode plugin is driven
-  for real under node, skipped when node is absent).
+  for real under node, skipped when node is absent). The adapters ship
+  inside the wheel (hatch force-include → `quorum/integrations`) so
+  `quorum integration list|install` works from a package install;
+  `cli._integrations_root()` falls back to the repo dir in a checkout.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
@@ -136,7 +139,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   durable: `_schedule_agent` creates the job paused when the heartbeat says
   `paused`. An hourly janitor archives expired board messages and returns
   crash-orphaned `cur/` claims to `new/`.
-- `views.py` — the shared read-model assembled purely from files; `quorum status`, the
+- `views.py` — the shared read-model assembled purely from files (`overview` includes
+  `attention_summary`, a time-windowed read of the `attention` topic that `status`,
+  the TUI banner, and the web header all surface — the board has no read-state, so
+  "needs a look" is time-bounded, not tracked); `quorum status`, the
   web app, and the TUI are all pure readers of it. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/config calls shared with the

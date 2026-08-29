@@ -221,6 +221,30 @@ def recent_actions(home: Path, limit: int = 20) -> list[dict[str, Any]]:
     return fsio.read_jsonl(home / "logs" / "actions.jsonl")[-limit:]
 
 
+# The board has no read-state, so "needs a look" is time-bounded rather than
+# tracked: recent posts on the escalation topic. Old escalations age out of
+# the summary (and are eventually archived by the janitor).
+ATTENTION_WINDOW_DAYS = 7
+
+
+def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int = 5) -> dict[str, Any]:
+    """Recent posts on the `attention` topic — the manager's ask-a-human channel."""
+    floor = fsio.utc_now() - timedelta(days=days)
+    msgs = MessageBus(home).read_topic("attention", since=floor)
+    return {
+        "count": len(msgs),
+        "days": days,
+        "recent": [
+            {
+                "at": m.created_at,
+                "from": m.sender,
+                "text": m.payload.get("text", ""),
+            }
+            for m in msgs[-limit:]
+        ],
+    }
+
+
 def overview(home: Path) -> dict[str, Any]:
     try:
         config = load_config(home)
@@ -233,5 +257,6 @@ def overview(home: Path) -> dict[str, Any]:
         "tasks": task_rows(home),
         "projects": project_rows(home),
         "board": board_tail(home),
+        "attention": attention_summary(home),
         "actions": recent_actions(home),
     }
