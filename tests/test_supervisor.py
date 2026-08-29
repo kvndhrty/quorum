@@ -181,6 +181,78 @@ def test_control_inbox_pause_resume_run_now(home: Path):
         sup.scheduler.shutdown(wait=False)
 
 
+def test_agent_reload_hot_adds_and_removes_file_defined_agents(home: Path):
+    (home / "plugins" / "hot.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Hot(Agent):\n"
+        "    def tick(self):\n"
+        "        pass\n"
+    )
+    config = write_config(home, "")
+    sup = Supervisor(home, config)
+    sup.scheduler.start(paused=True)
+    try:
+        bus = MessageBus(home)
+
+        # create after startup: reload gives the new agent a job, no restart
+        fsio.atomic_write_text(
+            home / "agents" / "hot.toml", 'type = "hot:Hot"\nschedule = "every 10m"\n'
+        )
+        bus.send("user", "supervisor", type="agent.reload", payload={"agent": "hot"})
+        sup._control()
+        assert "hot" in sup.agents
+        assert sup.scheduler.get_job("hot") is not None
+
+        # edit: the schedule change is picked up on the next reload
+        fsio.atomic_write_text(
+            home / "agents" / "hot.toml", 'type = "hot:Hot"\nschedule = "every 2m"\n'
+        )
+        bus.send("user", "supervisor", type="agent.reload", payload={"agent": "hot"})
+        sup._control()
+        assert sup.config.agents["hot"].schedule == "every 2m"
+
+        # remove: the file disappearing unschedules the agent
+        (home / "agents" / "hot.toml").unlink()
+        bus.send("user", "supervisor", type="agent.reload", payload={"agent": "hot"})
+        sup._control()
+        assert "hot" not in sup.agents
+        assert sup.scheduler.get_job("hot") is None
+    finally:
+        sup.scheduler.shutdown(wait=False)
+
+
+def test_pause_survives_supervisor_restart(home: Path):
+    (home / "plugins" / "dur.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Dur(Agent):\n"
+        "    def tick(self):\n"
+        "        pass\n"
+    )
+    config = write_config(home, '[agents.dur]\ntype = "dur:Dur"\nschedule = "every 1h"\n')
+    sup = Supervisor(home, config)
+    sup.scheduler.start(paused=True)
+    try:
+        sup._schedule_agent("dur", sup.agents["dur"])
+        MessageBus(home).send("user", "supervisor", type="agent.pause", payload={"agent": "dur"})
+        sup._control()
+        assert sup.scheduler.get_job("dur").next_run_time is None
+    finally:
+        sup.scheduler.shutdown(wait=False)
+
+    # a fresh supervisor (the restart) must schedule the agent paused
+    sup2 = Supervisor(home, load_config(home))
+    sup2.scheduler.start(paused=True)
+    try:
+        sup2._schedule_agent("dur", sup2.agents["dur"])
+        assert sup2.scheduler.get_job("dur").next_run_time is None
+
+        MessageBus(home).send("user", "supervisor", type="agent.resume", payload={"agent": "dur"})
+        sup2._control()
+        assert sup2.scheduler.get_job("dur").next_run_time is not None
+    finally:
+        sup2.scheduler.shutdown(wait=False)
+
+
 def test_scheduled_tick_skips_when_lock_held_elsewhere(home: Path):
     (home / "plugins" / "lk.py").write_text(
         "from quorum.agent import Agent\n"

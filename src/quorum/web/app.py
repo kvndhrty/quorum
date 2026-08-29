@@ -1,7 +1,8 @@
 """Local web dashboard: a thin FastAPI layer over the same files every other
 view reads. Binds to 127.0.0.1 only. Reads dominate; the write actions are
-posting a board note, editing a project's deadline/notes, and sending
-guidance to a task — all routed through the same code paths as the CLI.
+posting a board note, editing a project's deadline/notes, sending guidance to
+a task, and creating/controlling agents — all routed through the same code
+paths as the CLI.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 from .. import views
 from ..messages import MessageBus
 from ..projects import ProjectRegistry
-from ..tasks import TaskStore, inbox_name, read_reports, read_transcript_tail, runner_alive
+from ..tasks import TaskStore, read_reports, read_transcript_tail, runner_alive
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -32,6 +33,15 @@ class ProjectPatch(BaseModel):
 
 class Nudge(BaseModel):
     text: str
+
+
+class AgentCreate(BaseModel):
+    name: str
+    schedule: str = "every 1h"
+    prompt_text: str
+    harness: str = ""
+    run_timeout_seconds: int = 0
+    max_actions_per_run: int = 0
 
 
 def create_app(home: Path) -> FastAPI:
@@ -68,10 +78,56 @@ def create_app(home: Path) -> FastAPI:
 
     @app.post("/api/tasks/{task_id}/nudge")
     def nudge(task_id: str, body: Nudge) -> dict:
+        from ..tasks import nudge as nudge_task
+
         task = TaskStore(home).get(task_id)
         if task is None:
             raise HTTPException(404, f"no task {task_id!r}")
-        msg = MessageBus(home).send("user@web", inbox_name(task.id), type="guidance", text=body.text)
+        msg = nudge_task(home, task, body.text, sender="user@web")
+        return {"id": msg.id}
+
+    @app.get("/api/agents/{name}")
+    def agent_detail(name: str) -> dict:
+        detail = views.agent_detail(home, name)
+        if detail is None:
+            raise HTTPException(404, f"no agent {name!r}")
+        return detail
+
+    @app.post("/api/agents")
+    def agent_create(body: AgentCreate) -> dict:
+        from ..config import ConfigError, create_agent
+
+        settings: dict = {}
+        if body.harness:
+            settings["harness"] = body.harness
+        if body.run_timeout_seconds:
+            settings["run_timeout_seconds"] = body.run_timeout_seconds
+        if body.max_actions_per_run:
+            settings["max_actions_per_run"] = body.max_actions_per_run
+        try:
+            create_agent(
+                home,
+                body.name,
+                schedule=body.schedule,
+                settings=settings,
+                prompt_text=body.prompt_text,
+            )
+        except ConfigError as e:
+            raise HTTPException(422, str(e)) from e
+        MessageBus(home).send(
+            "user@web", "supervisor", type="agent.reload", payload={"agent": body.name}
+        )
+        return {"name": body.name}
+
+    @app.post("/api/agents/{name}/{command}")
+    def agent_command(name: str, command: str) -> dict:
+        if command not in ("pause", "resume", "run-now", "reload"):
+            raise HTTPException(422, f"unknown agent command {command!r}")
+        if not any(r["name"] == name for r in views.agent_rows(home)):
+            raise HTTPException(404, f"no agent {name!r}")
+        msg = MessageBus(home).send(
+            "user@web", "supervisor", type=f"agent.{command}", payload={"agent": name}
+        )
         return {"id": msg.id}
 
     @app.get("/api/board/{topic}")

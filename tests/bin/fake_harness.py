@@ -15,6 +15,9 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
     manager_act     echo + act like a manager: find the first queued task in
                     the digest, `task run` it (foreground, for determinism),
                     nudge it, and journal a note
+    agent_act       echo + act like a generic prompt agent: post a board note,
+                    then journal a reasoning note — two capped actions, so a
+                    cap of 1 provably refuses the second
     manager_flood   echo + nudge the first task repeatedly until the CLI's
                     per-run action cap refuses; print the refusal
     inject          echo + speak the stream-json injection protocol: emit a
@@ -92,6 +95,14 @@ def main() -> int:
             print(f"ACT| task nudge {target} -> exit {nudged.returncode}")
             noted = quorum("manager", "note", f"launched and nudged {target}")
             print(f"ACT| note -> exit {noted.returncode}")
+
+    elif mode == "agent_act":
+        posted = quorum("board", "post", "notes", "hello from the prompt agent")
+        print(f"ACT| board post -> exit {posted.returncode}")
+        noted = quorum("manager", "note", "prompt agent reasoning note")
+        print(f"ACT| note -> exit {noted.returncode}")
+        if noted.returncode != 0 and noted.stderr.strip():
+            print(f"REFUSED| {noted.stderr.strip().splitlines()[0]}")
 
     elif mode == "inject":
         sys.stdout.flush()

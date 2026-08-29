@@ -14,8 +14,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 from .. import views
-from ..messages import MessageBus
-from ..tasks import inbox_name, read_reports, read_transcript_tail
+from ..tasks import read_reports, read_transcript_tail
 
 STATUS_STYLE = {
     "idle": "green",
@@ -75,7 +74,7 @@ class QuorumTUI(App):
         tasks.add_columns("task", "project", "status", "harness", "last report", "pr")
         tasks.cursor_type = "row"
         agents = self.query_one("#agents", DataTable)
-        agents.add_columns("agent", "status", "schedule", "last run")
+        agents.add_columns("agent", "status", "schedule", "last run", "next run")
         agents.cursor_type = "row"
         projects = self.query_one("#projects", DataTable)
         projects.add_columns("project", "deadline", "path")
@@ -108,8 +107,13 @@ class QuorumTUI(App):
         box.display = False
         if not text or self.selected_task is None:
             return
-        MessageBus(self.home).send("user", inbox_name(self.selected_task), type="guidance", text=text)
-        self.notify(f"guidance queued for {self.selected_task[:8].lower()}")
+        from ..tasks import TaskStore, nudge
+
+        task = TaskStore(self.home).get(self.selected_task)
+        if task is None:
+            return
+        nudge(self.home, task, text, sender="user")
+        self.notify(f"guidance queued for {task.short_id}")
         self.refresh_data()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -131,8 +135,8 @@ class QuorumTUI(App):
         tasks.clear()
         task_rows = views.task_rows(self.home)
         for t in task_rows:
-            status = t["status"] + (" ▶" if t["running"] else "")
-            style = "cyan" if t["running"] else TASK_STATUS_STYLE.get(t["status"], "")
+            status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
+            style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
             tasks.add_row(
                 t["id_short"],
                 t["project"],
@@ -149,11 +153,18 @@ class QuorumTUI(App):
         agents.clear()
         for r in views.agent_rows(self.home):
             style = STATUS_STYLE.get(r["status"], "")
+            status = Text(r["status"], style=style)
+            if r["error"]:
+                status = Text(f"{r['status']} !", style=style or "red")
+            next_run = r["next_run"] or "—"
+            if r["next_run"] and r["next_run_estimated"]:
+                next_run = f"~{r['next_run']}"
             agents.add_row(
                 r["name"],
-                Text(r["status"], style=style),
+                status,
                 r["schedule"],
                 (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
+                next_run.replace("T", " ").rstrip("Z"),
             )
 
         projects = self.query_one("#projects", DataTable)

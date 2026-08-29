@@ -7,15 +7,23 @@ view works whether or not the supervisor is running.
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from . import fsio
-from .config import Config, ConfigError, load_config
+from .config import Config, ConfigError, load_config, parse_schedule
 from .messages import MessageBus
 from .projects import ProjectRegistry
 from .supervisor import LOCK_TOUCH_SECONDS
-from .tasks import TERMINAL_STATUSES, TaskStore, read_reports, runner_alive, workdir_git_state
+from .tasks import (
+    TERMINAL_STATUSES,
+    TaskStore,
+    attached_state,
+    read_reports,
+    runner_alive,
+    workdir_git_state,
+)
 
 SUPERVISOR_STALE_AFTER = LOCK_TOUCH_SECONDS * 3
 
@@ -47,12 +55,37 @@ def supervisor_status(home: Path) -> dict[str, Any]:
     }
 
 
+def _estimate_next_run(schedule: str, hb: dict[str, Any], now) -> str | None:
+    """Best-effort next-fire estimate from the schedule alone, for when the
+    live scheduler's answer (heartbeat `next_run`) is missing or stale — the
+    heartbeat is only written by a running supervisor."""
+    try:
+        kwargs = parse_schedule(schedule)
+    except Exception:
+        return None
+    if kwargs.pop("trigger") == "interval":
+        try:
+            base = fsio.parse_iso(hb["last_end"]) if hb.get("last_end") else now
+        except (KeyError, ValueError):
+            base = now
+        nxt = base + timedelta(**kwargs)
+        return fsio.iso(max(nxt, now))  # overdue → due as soon as the supervisor is back
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        nxt = CronTrigger(**kwargs).get_next_fire_time(None, now)
+        return fsio.iso(nxt) if nxt else None
+    except Exception:
+        return None
+
+
 def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     if config is None:
         try:
             config = load_config(home)
         except ConfigError:
             config = Config()
+    now = fsio.utc_now()
     rows = []
     for name, acfg in sorted(config.agents.items()):
         hb_path = home / "state" / "agents" / name / "heartbeat.json"
@@ -61,21 +94,57 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
             hb = fsio.read_json(hb_path)
         except (OSError, ValueError):
             pass
+        status = hb.get("status", "never-ran")
+        next_run = hb.get("next_run")
+        estimated = False
+        if not acfg.enabled or status in ("paused", "removed"):
+            next_run = None
+        else:
+            try:
+                stale = next_run is None or fsio.parse_iso(next_run) < now
+            except ValueError:
+                stale = True
+            if stale:
+                est = _estimate_next_run(acfg.schedule, hb, now)
+                if est:
+                    next_run, estimated = est, True
         rows.append(
             {
                 "name": name,
                 "type": acfg.type,
                 "schedule": acfg.schedule,
                 "enabled": acfg.enabled,
-                "status": hb.get("status", "never-ran"),
+                "status": status,
                 "last_start": hb.get("last_start"),
                 "last_end": hb.get("last_end"),
                 "duration_ms": hb.get("duration_ms"),
-                "next_run": hb.get("next_run"),
+                "next_run": next_run,
+                "next_run_estimated": estimated,
                 "error": hb.get("error"),
             }
         )
     return rows
+
+
+def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
+    """One agent's row plus its recent activity: the auto-recorded action
+    journal (harness-driven agents) and its `logs/actions.jsonl` entries."""
+    from .actor import journal_path
+
+    try:
+        config = load_config(home)
+    except ConfigError:
+        config = Config()
+    row = next((r for r in agent_rows(home, config) if r["name"] == name), None)
+    if row is None:
+        return None
+    acfg = config.agents.get(name)
+    row["settings"] = dict(acfg.settings) if acfg else {}
+    row["journal"] = fsio.read_jsonl_tail(journal_path(home, name), limit=20)
+    row["actions"] = [
+        a for a in fsio.read_jsonl(home / "logs" / "actions.jsonl") if a.get("agent") == name
+    ][-20:]
+    return row
 
 
 def project_rows(home: Path) -> list[dict[str, Any]]:
@@ -115,6 +184,8 @@ def task_rows(home: Path) -> list[dict[str, Any]]:
                 "status": t.status,
                 "harness": t.harness,
                 "running": runner_alive(home, t.id),
+                "attached": t.attached,
+                "attached_state": attached_state(home, t.id) if t.attached else None,
                 "runs": len(t.runs),
                 "pr_url": t.pr_url,
                 "git": git_state,

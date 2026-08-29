@@ -162,6 +162,51 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     assert msg["type"] == "agent.pause" and msg["payload"]["agent"] == "manager"
 
 
+def test_agent_create_remove_and_reload(home: Path):
+    from quorum import fsio
+    from quorum.messages import MessageBus
+
+    r = runner.invoke(app, [
+        "agent", "create", "standup", "--schedule", "every 30m",
+        "--prompt-text", "post a standup note", "--harness", "fake", "--home", str(home),
+    ])
+    assert r.exit_code == 0, r.output
+    assert (home / "agents" / "standup.toml").exists()
+    assert (home / "prompts" / "standup.md").read_text() == "post a standup note"
+
+    inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
+    entries = fsio.sorted_entries(inbox)
+    assert len(entries) == 1
+    assert fsio.read_json(entries[0])["type"] == "agent.reload"
+
+    r = runner.invoke(app, ["agent", "list", "--home", str(home)])
+    assert "standup" in r.output
+
+    # duplicates and promptless prompt agents are refused
+    r = runner.invoke(app, [
+        "agent", "create", "standup", "--prompt-text", "again", "--home", str(home),
+    ])
+    assert r.exit_code == 1 and "already exists" in r.output
+    r = runner.invoke(app, ["agent", "create", "mute", "--home", str(home)])
+    assert r.exit_code == 1 and "--prompt-text or --prompt-file" in r.output
+
+    # editing + reload is the update path
+    r = runner.invoke(app, ["agent", "reload", "standup", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+
+    # removal deletes the file, keeps the prompt, and pokes the supervisor
+    r = runner.invoke(app, ["agent", "remove", "standup", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert not (home / "agents" / "standup.toml").exists()
+    assert (home / "prompts" / "standup.md").exists()
+    types = [fsio.read_json(p)["type"] for p in fsio.sorted_entries(inbox)]
+    assert types.count("agent.reload") == 3
+
+    # config.toml-defined agents are not removable from the CLI
+    r = runner.invoke(app, ["agent", "remove", "manager", "--home", str(home)])
+    assert r.exit_code == 1 and "config.toml" in r.output
+
+
 def test_run_once_respects_the_tick_lock(home: Path):
     write_plugin(home, "lockplug", OK_PLUGIN)
     lock = home / "state" / "agents" / "lockplug" / "tick.lock"
@@ -208,13 +253,37 @@ def test_mutating_commands_journal_only_for_the_manager_actor(
     assert fsio.read_jsonl(journal_path(home)) == []  # user actions: no journal
 
     monkeypatch.setenv("QUORUM_ACTOR", "manager")
-    monkeypatch.setenv("QUORUM_MANAGER_RUN", "01TESTRUN")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TESTRUN")
     r = runner.invoke(app, ["task", "add", slug, "manager-made task", "--harness", "fake", "--home", str(home)])
     assert r.exit_code == 0, r.output
     entries = fsio.read_jsonl(journal_path(home))
     assert len(entries) == 1
     assert entries[0]["action"] == "task.add"
     assert entries[0]["actor"] == "manager" and entries[0]["run"] == "01TESTRUN"
+
+
+def test_non_manager_actor_journals_to_its_own_path_and_hits_cap(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    from quorum import fsio
+    from quorum.actor import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    monkeypatch.setenv("QUORUM_ACTOR", "alpha")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01ALPHARUN")
+    monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
+
+    for i in range(2):
+        r = runner.invoke(app, ["task", "add", slug, f"alpha task {i}", "--harness", "fake", "--home", str(home)])
+        assert r.exit_code == 0, r.output
+    entries = fsio.read_jsonl(journal_path(home, "alpha"))
+    assert len(entries) == 2
+    assert all(e["actor"] == "alpha" and e["run"] == "01ALPHARUN" for e in entries)
+    assert fsio.read_jsonl(journal_path(home)) == []  # the manager journal stays untouched
+
+    r = runner.invoke(app, ["task", "add", slug, "one too many", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "alpha action cap (2) reached" in r.output
 
 
 def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkeypatch):
@@ -232,7 +301,7 @@ def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkey
     task = TaskStore(home).list()[0]
 
     monkeypatch.setenv("QUORUM_ACTOR", "manager")
-    monkeypatch.setenv("QUORUM_MANAGER_RUN", "01DETACH")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01DETACH")
     r = runner.invoke(app, ["task", "run", task.short_id, "--detach", "--home", str(home)])
     assert r.exit_code == 0, r.output
 

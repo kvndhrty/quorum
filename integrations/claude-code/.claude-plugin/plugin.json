@@ -1,0 +1,5 @@
+{
+  "name": "quorum",
+  "description": "Adopt a live Claude Code session into quorum so its manager can observe and nudge it.",
+  "version": "0.1.0"
+}

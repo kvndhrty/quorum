@@ -95,6 +95,7 @@ auto_pause = false
 """
 
 SUBDIRS = [
+    "agents",
     "projects",
     "prompts",
     "messages/board",
@@ -134,6 +135,7 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
     },
     "manager.md": {
         "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
+        "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",
     },
 }
 
