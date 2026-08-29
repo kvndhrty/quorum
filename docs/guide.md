@@ -587,6 +587,20 @@ Test it immediately: `quorum agent run-once wordcount`.
 | `ctx.log_action(type, text, **data)` | feed the dashboards' activity log |
 | `ctx.now()` | injectable clock |
 
+`ctx.llm` needs an optional `[llm]` table in config.toml (the manager does
+*not* use this — it runs a full harness); without one, `complete()` returns
+`None`:
+
+```toml
+[llm]
+backend = "cli"
+executable = "claude"
+args = ["-p"]
+input = "stdin"           # "stdin" | "argv" (use "{prompt}" in args)
+timeout_seconds = 120
+max_prompt_chars = 24000
+```
+
 **Testing** (see `tests/test_example_steward.py` for the full pattern):
 
 ```python
