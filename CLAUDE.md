@@ -39,10 +39,12 @@ policy lives in `prompts/manager.md`, not Python.
 Read `docs/architecture.md` first — it is the design record. The three invariants
 below govern nearly every change:
 
-1. **No privileged infrastructure.** `quorum up` is one ordinary foreground process
-   hosting an APScheduler `BackgroundScheduler`; task runs are detached child
-   processes (they survive supervisor restarts). No cron, systemd, daemonization,
-   root, or open ports (the web dashboard is opt-in, localhost-only).
+1. **No privileged infrastructure.** `quorum up` is one ordinary process hosting an
+   APScheduler `BackgroundScheduler` — foreground by default, or detached with
+   `up --detach` the same way task runs detach (`quorum down` SIGTERMs it and polls
+   the lock). Task runs are detached child processes (they survive supervisor
+   restarts). No cron, systemd, daemonization frameworks, root, or open ports (the
+   web dashboard is opt-in, localhost-only).
 2. **All state is plain files** under `QUORUM_HOME` (resolution: `--home` > `$QUORUM_HOME`
    > `./quorum-home` if present > `~/.quorum`). No database. Adding new durable state
    means adding a file layout, documented in `docs/architecture.md`.

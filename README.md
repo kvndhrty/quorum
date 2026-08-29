@@ -68,13 +68,14 @@ progress protocol, without a blanket permission bypass.)
 Register a repo and queue work:
 
 ```bash
+quorum doctor                           # verify the setup end to end
 quorum project add ~/work/my-api
 quorum task add my-api "fix the flaky auth tests and open a PR"
-quorum up                               # foreground; Ctrl-C stops
+quorum up --detach                      # supervisor in the background (`quorum down` stops it)
 ```
 
-Background `quorum up` however you like — `nohup`, tmux, a `screen` session.
-Then, from another shell:
+(`quorum up` without `--detach` runs it in the foreground — Ctrl-C stops.)
+Then:
 
 ```bash
 quorum status                # supervisor, agents, tasks, deadlines

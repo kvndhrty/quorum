@@ -66,6 +66,8 @@ class ProjectRegistry:
         write_marker: bool = False,
     ) -> Project:
         pdir = Path(path).expanduser().resolve()
+        if not pdir.is_dir():
+            raise ValueError(f"{pdir} does not exist (or is not a directory)")
         name = name or pdir.name
         slug = fsio.slugify(name)
         if self._path(slug).exists():

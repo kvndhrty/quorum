@@ -52,7 +52,13 @@ itself; and the manager has its own inbox for your directives.
 uv tool install quorum-orchestrator              # `quorum` command + TUI dashboard
 uv tool install "quorum-orchestrator[web]"       # add the localhost web dashboard
 quorum init                    # scaffolds ~/.quorum and a starter config.toml
+quorum doctor                  # after editing config.toml: checks config,
+                               # harness binaries, projects, supervisor
 ```
+
+The supervisor runs however you prefer: `quorum up` in the foreground
+(Ctrl-C stops it), or `quorum up --detach` in the background with output in
+`logs/supervisor.log` — `quorum down` stops a detached (or any) supervisor.
 
 `config.toml` is yours: quorum reads it and **never writes it back**. The
 scaffold contains commented examples of everything below. The `[tasks]`

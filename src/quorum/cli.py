@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -149,6 +151,16 @@ def _actor_guard(
     fsio.append_jsonl(journal, entry)
 
 
+def _confirm(yes: bool, what: str) -> None:
+    """Interactive-only guard for destructive commands: prompts on a TTY,
+    passes through everywhere else (scripts and harness-driven agents keep
+    working; the actor guard remains their only rail)."""
+    if yes or not sys.stdin.isatty():
+        return
+    if not typer.confirm(what):
+        raise typer.Exit(1)
+
+
 def _resolve_task(home: Path, prefix: str):
     from .tasks import TaskStore
 
@@ -167,7 +179,13 @@ def init(home: Path | None = _HOME_OPT) -> None:
     fresh, prompts = home_mod.scaffold(target)
     if fresh:
         typer.secho(f"initialized quorum home at {target}", fg="green")
-        typer.echo(f"next: edit {target / home_mod.CONFIG_NAME}, then `quorum up`")
+        typer.echo("next:")
+        typer.echo(f"  1. edit {target / home_mod.CONFIG_NAME} — uncomment a [harness.*] table "
+                   "and set [tasks].default_harness")
+        typer.echo("  2. `quorum doctor` — verify the setup")
+        typer.echo("  3. `quorum project add <dir>` — register a repo to work on")
+        typer.echo("  4. `quorum task add <project> \"<prompt>\"` — queue work")
+        typer.echo("  5. `quorum up` — start the supervisor (`--detach` for the background)")
     else:
         typer.echo(f"quorum home at {target} already initialized (config left untouched)")
     for name, outcome in sorted(prompts.items()):
@@ -189,15 +207,53 @@ def init(home: Path | None = _HOME_OPT) -> None:
 @app.command()
 def up(
     home: Path | None = _HOME_OPT,
+    detach: bool = typer.Option(
+        False, "--detach", help="Start the supervisor in the background and return (`quorum down` stops it)."
+    ),
     self_sandbox: bool = typer.Option(
         False, "--self-sandbox", help="Apply a nono-py kernel sandbox to this process before starting."
     ),
 ) -> None:
-    """Run the supervisor in the foreground (background it with nohup/tmux)."""
+    """Run the supervisor: `quorum up` in the foreground (Ctrl-C stops it),
+    `quorum up --detach` in the background."""
+    from . import views
     from .supervisor import Supervisor
 
     target = get_home(home)
     config = _load_config(target)
+    if detach:
+        sup = views.supervisor_status(target)
+        if sup.get("alive"):
+            raise _fail(f"supervisor already running (pid {sup.get('pid')}) — `quorum down` first")
+        from .actor import strip_actor_env
+
+        log_path = target / "logs" / "supervisor.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        argv = [sys.executable, "-m", "quorum", "up", "--home", str(target)]
+        if self_sandbox:
+            argv.append("--self-sandbox")
+        with open(log_path, "ab") as log:
+            proc = subprocess.Popen(
+                argv,
+                stdout=log,
+                stderr=log,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=strip_actor_env({**os.environ, "QUORUM_HOME": str(target)}),
+            )
+        for _ in range(12):  # give the child up to 3s to take the lock
+            time.sleep(0.25)
+            if proc.poll() is not None or views.supervisor_status(target).get("alive"):
+                break
+        if proc.poll() is None and views.supervisor_status(target).get("alive"):
+            typer.secho(
+                f"supervisor running detached (pid {proc.pid}) — `quorum status` to watch, "
+                "`quorum down` to stop",
+                fg="green",
+            )
+        else:
+            raise _fail(f"supervisor did not come up — see {log_path}")
+        return
     if self_sandbox:
         from .sandbox import self_sandbox as apply_sandbox
 
@@ -207,11 +263,131 @@ def up(
 
 
 @app.command()
-def status(home: Path | None = _HOME_OPT) -> None:
-    """Show supervisor liveness, agents, tasks, and project deadlines."""
+def down(home: Path | None = _HOME_OPT) -> None:
+    """Stop a running supervisor (started with `quorum up` or `up --detach`)."""
     from . import views
 
     target = get_home(home)
+    sup = views.supervisor_status(target)
+    if not sup.get("alive"):
+        raise _fail("supervisor is not running")
+    pid = int(sup["pid"])
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(20):
+        # the supervisor releases its lock on shutdown — poll that, not the
+        # pid (a detached child can linger as a zombie for its parent)
+        if not views.supervisor_status(target).get("alive"):
+            typer.secho(f"supervisor stopped (pid {pid})", fg="green")
+            return
+        time.sleep(0.25)
+    raise _fail(f"supervisor (pid {pid}) did not exit within 5s — check `quorum status`")
+
+
+@app.command()
+def doctor(home: Path | None = _HOME_OPT) -> None:
+    """Check the setup end to end: config, harnesses, projects, supervisor.
+
+    Read-only. Every failing line names the fix; exits 1 when something
+    would keep tasks from running.
+    """
+    import shutil
+
+    from .config import ConfigError, load_config
+
+    failed = False
+
+    def ok(text: str) -> None:
+        typer.secho(f"  ✓ {text}", fg="green")
+
+    def warn(text: str) -> None:
+        typer.secho(f"  ⚠ {text}", fg="yellow")
+
+    def bad(text: str) -> None:
+        nonlocal failed
+        failed = True
+        typer.secho(f"  ✗ {text}", fg="red")
+
+    target = home_mod.resolve_home(home)
+    typer.echo(f"home: {target}")
+    if not (target / home_mod.CONFIG_NAME).exists():
+        bad(f"no quorum home at {target} — run `quorum init` first")
+        raise typer.Exit(1)
+    ok("home initialized")
+
+    try:
+        config = load_config(target)
+    except ConfigError as e:
+        bad(f"config.toml does not load: {e}")
+        raise typer.Exit(1) from None
+    ok("config.toml parses")
+
+    if not config.harness:
+        bad("no [harness.<name>] table — uncomment one in config.toml (see the comments there)")
+    else:
+        for name, h in sorted(config.harness.items()):
+            exe = h.start[0] if h.start else ""
+            if exe and shutil.which(exe):
+                ok(f"harness {name!r}: {exe} on PATH")
+            else:
+                bad(f"harness {name!r}: {exe or '<empty argv>'} not found on PATH")
+    default = config.tasks.default_harness
+    if not default:
+        bad("[tasks].default_harness is unset — tasks will need an explicit --harness")
+    elif default not in config.harness:
+        bad(f"[tasks].default_harness = {default!r} names no [harness.{default}] table")
+    else:
+        ok(f"default harness: {default}")
+
+    from .projects import ProjectRegistry
+
+    projects = ProjectRegistry(target).list()
+    if not projects:
+        warn("no projects registered — `quorum project add <dir>`")
+    for p in projects:
+        pdir = Path(p.path)
+        if not pdir.is_dir():
+            bad(f"project {p.slug}: {pdir} does not exist — `quorum project remove {p.slug}` or fix the path")
+        elif not (pdir / ".git").exists():
+            warn(f"project {p.slug}: {pdir} is not a git repository — tasks there need --no-worktree")
+        else:
+            ok(f"project {p.slug}: {pdir}")
+
+    from . import views
+
+    sup = views.supervisor_status(target)
+    if sup.get("alive"):
+        ok(f"supervisor running (pid {sup.get('pid')})")
+    else:
+        warn("supervisor not running — `quorum up` (or `quorum up --detach`)")
+
+    if failed:
+        raise typer.Exit(1)
+    typer.secho("all checks passed", fg="green")
+
+
+STATUS_LEGEND = """glyphs:
+  tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
+          ⚠ uncommitted/unpushed work in the task's workdir
+  agents: ● idle   ◐ running   ✗ error   ‖ paused   ○ never ran"""
+
+
+@app.command()
+def status(
+    legend: bool = typer.Option(False, "--legend", help="Explain the status glyphs and exit."),
+    json_out: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Show supervisor liveness, agents, tasks, and project deadlines
+    (`--legend` explains the glyphs)."""
+    from . import views
+
+    if legend:
+        typer.echo(STATUS_LEGEND)
+        return
+    target = get_home(home)
+    if json_out:
+        typer.echo(json.dumps(views.overview(target), indent=2, ensure_ascii=False))
+        return
     sup = views.supervisor_status(target)
     if sup["alive"]:
         typer.secho(f"supervisor: running (pid {sup['pid']}, since {sup['started_at']})", fg="green")
@@ -293,7 +469,10 @@ def task_add(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
-    yourself with `quorum task run`."""
+    yourself with `quorum task run`.
+
+    Example: quorum task add my-api "fix the flaky auth tests"
+    """
     from .projects import ProjectRegistry
     from .tasks import TaskStore
 
@@ -334,7 +513,9 @@ def task_adopt(
     Creates an *attached* task pointing at the session's own directory —
     quorum never spawns runs for it. The manager observes it like any task
     and guides it with `quorum task nudge`; a harness-side hook (see
-    integrations/) delivers the guidance into the live session.
+    `quorum integration list`) delivers the guidance into the live session.
+
+    Example: quorum task adopt "refactoring the auth flow"  (from the session's directory)
     """
     from .projects import ProjectRegistry
     from .tasks import TaskStore, write_attached_state
@@ -443,7 +624,7 @@ def _read_hook_payload() -> dict:
         return {}
 
 
-@task_app.command("hook-stop")
+@task_app.command("hook-stop", rich_help_panel="Harness protocol")
 def task_hook_stop(
     format: str = typer.Option(
         "decision",
@@ -500,7 +681,7 @@ def task_hook_stop(
         c.ack()
 
 
-@task_app.command("hook-session-start")
+@task_app.command("hook-session-start", rich_help_panel="Harness protocol")
 def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
     """Harness SessionStart-hook entry point: refreshes an adopted task's
     liveness record and learns the (possibly new) session id — harnesses
@@ -521,7 +702,7 @@ def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
         TaskStore(target).update(task.id, session=session_id)
 
 
-@task_app.command("hook-session-end")
+@task_app.command("hook-session-end", rich_help_panel="Harness protocol")
 def task_hook_session_end(home: Path | None = _HOME_OPT) -> None:
     """Harness SessionEnd-hook entry point: records that an adopted session
     ended (the task stays attached — sessions get reopened)."""
@@ -540,11 +721,17 @@ def task_hook_session_end(home: Path | None = _HOME_OPT) -> None:
 
 
 @task_app.command("list")
-def task_list(home: Path | None = _HOME_OPT) -> None:
-    """List tasks, newest last."""
+def task_list(
+    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """List tasks, newest last (`quorum status --legend` explains the glyphs)."""
     from . import views
 
     rows = views.task_rows(get_home(home))
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
     if not rows:
         typer.echo("no tasks — `quorum task add <project> \"<prompt>\"`")
         return
@@ -553,19 +740,48 @@ def task_list(home: Path | None = _HOME_OPT) -> None:
 
 
 @task_app.command("show")
-def task_show(task_id: str, home: Path | None = _HOME_OPT) -> None:
-    """Show one task's full record and recent reports."""
+def task_show(
+    task_id: str,
+    json_out: bool = typer.Option(False, "--json", help="Dump the full task record as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Show one task: what it is, where it stands, and its recent reports."""
     from .tasks import read_reports, runner_alive
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
-    typer.echo(f"runner: {'alive' if runner_alive(target, task.id) else 'not running'}")
+    if json_out:
+        typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
+        return
+    running = runner_alive(target, task.id)
+    state = task.status
+    if task.attached:
+        state += " (attached to a live session)"
+    elif running:
+        state += " (runner alive)"
+    typer.echo(f"task {task.short_id}  ({task.id})")
+    typer.echo(f"  project:  {task.project}")
+    typer.echo(f"  status:   {state}")
+    typer.echo(f"  harness:  {task.harness}")
+    typer.echo(f"  prompt:   {task.prompt}")
+    typer.echo(f"  workdir:  {task.workdir or '(worktree created on first run)'}")
+    if task.session:
+        typer.echo(f"  session:  {task.session}")
+    if task.pr_url:
+        typer.echo(f"  pr:       {task.pr_url}")
+    if task.runs:
+        last = task.runs[-1]
+        typer.echo(
+            f"  runs:     {len(task.runs)} (last: {last.started_at} → "
+            f"{last.ended_at or 'running'}, exit {last.exit_code if last.exit_code is not None else '—'})"
+        )
+    typer.echo(f"  updated:  {task.updated_at}")
     reports = read_reports(target, task.id, limit=10)
     if reports:
-        typer.echo("\nrecent reports:")
+        typer.echo("recent reports:")
         for r in reports:
             typer.echo(f"  [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
+    typer.echo(f"more: `quorum task tail {task.short_id}` for the transcript, `--json` for the raw record")
 
 
 @task_app.command("run")
@@ -640,7 +856,7 @@ def _render_transcript_entry(entry: dict) -> str:
     return f"[{at}] {json.dumps(entry.get('event'), ensure_ascii=False)}"
 
 
-@task_app.command("report")
+@task_app.command("report", rich_help_panel="Harness protocol")
 def task_report(
     task_id: str,
     text: str = typer.Argument("", help="Short human-readable progress note."),
@@ -698,7 +914,10 @@ def task_inbox(
 @task_app.command("nudge")
 def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
     """Send guidance to a task; the next run (or a cooperative harness
-    mid-run) will see it."""
+    mid-run) will see it.
+
+    Example: quorum task nudge a3f2k9 "use the existing retry helper"
+    """
     from .tasks import nudge
 
     target = get_home(home)
@@ -713,6 +932,7 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
 def task_cancel(
     task_id: str,
     kill: bool = typer.Option(False, "--kill", help="Also SIGTERM a live runner."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Mark a task cancelled so the manager stops attending to it."""
@@ -720,6 +940,8 @@ def task_cancel(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    if kill:
+        _confirm(yes, f"cancel task {task.short_id} and SIGTERM its live runner?")
     _actor_guard(target, "task.cancel", target=task.short_id, target_status=task.status)
     TaskStore(target).update(task.id, status="cancelled")
     typer.echo(f"task {task.short_id} cancelled")
@@ -787,14 +1009,24 @@ def project_add(
     name: str | None = typer.Option(None, "--name", help="Display name (default: dir name)."),
     deadline: str | None = typer.Option(None, "--deadline", help="ISO date, e.g. 2026-09-15."),
     tags: str = typer.Option("", "--tags", help="Comma-separated tags."),
-    notes: str = typer.Option("", "--notes"),
+    notes: str = typer.Option("", "--notes", help="Free-form notes shown in views."),
     marker: bool = typer.Option(False, "--marker", help="Also write a .quorum.toml into the project dir."),
+    force: bool = typer.Option(False, "--force", help="Register even if the directory is not a git repository."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Register a project directory (tasks run against registered projects)."""
+    """Register a project directory (tasks run against registered projects).
+
+    Example: quorum project add ~/work/my-api --deadline 2026-09-15
+    """
     from .projects import ProjectRegistry
 
     target = get_home(home)
+    resolved = path.expanduser().resolve()
+    if resolved.is_dir() and not (resolved / ".git").exists() and not force:
+        raise _fail(
+            f"{resolved} is not a git repository — tasks need one for worktrees; "
+            "`git init` it, or pass --force to register anyway (tasks there will need --no-worktree)"
+        )
     _actor_guard(target, "project.add", args=str(path))
     registry = ProjectRegistry(target)
     try:
@@ -812,11 +1044,17 @@ def project_add(
 
 
 @project_app.command("list")
-def project_list(home: Path | None = _HOME_OPT) -> None:
+def project_list(
+    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
     """List registered projects (marker-file fields merged in)."""
     from . import views
 
     rows = views.project_rows(get_home(home))
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
     if not rows:
         typer.echo("no projects registered — `quorum project add <dir>`")
         return
@@ -855,11 +1093,16 @@ def project_set(
 
 
 @project_app.command("remove")
-def project_remove(slug: str, home: Path | None = _HOME_OPT) -> None:
+def project_remove(
+    slug: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    home: Path | None = _HOME_OPT,
+) -> None:
     """Unregister a project (its directory is untouched)."""
     from .projects import ProjectRegistry
 
     target = get_home(home)
+    _confirm(yes, f"unregister project {slug!r}? (its directory is untouched)")
     _actor_guard(target, "project.remove", target=slug)
     if ProjectRegistry(target).remove(slug):
         typer.echo(f"removed {slug}")
@@ -1014,17 +1257,28 @@ def tui(home: Path | None = _HOME_OPT) -> None:
 
 
 @agent_app.command("list")
-def agent_list(home: Path | None = _HOME_OPT) -> None:
+def agent_list(
+    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
     """List configured agents and their last heartbeat."""
     from . import views
 
-    for r in views.agent_rows(get_home(home)):
+    rows = views.agent_rows(get_home(home))
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    for r in rows:
         state = r["status"] + ("" if r["enabled"] else " (disabled)")
         typer.echo(f"{r['name']:<14} type={r['type']:<20} {r['schedule']:<18} {state}")
 
 
 @agent_app.command("run-once")
-def agent_run_once(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_run_once(
+    name: str,
+    verbose: bool = typer.Option(False, "--verbose", help="Show the full traceback when the tick fails."),
+    home: Path | None = _HOME_OPT,
+) -> None:
     """Construct an agent and run a single tick (no supervisor needed)."""
     from .agent import AgentContext, tick_lock_path, write_heartbeat
     from .registry import AgentResolutionError, resolve
@@ -1061,7 +1315,11 @@ def agent_run_once(name: str, home: Path | None = _HOME_OPT) -> None:
             last_end=fsio.iso(fsio.utc_now()),
             error=f"{type(e).__name__}: {e}",
         )
-        raise
+        if verbose:
+            raise
+        raise _fail(
+            f"{name}: tick failed — {type(e).__name__}: {e} (re-run with --verbose for the traceback)"
+        ) from None
     finally:
         fsio.release_pid_lock(lock)
     ended = fsio.utc_now()
@@ -1158,7 +1416,11 @@ def agent_create(
 
 
 @agent_app.command("remove")
-def agent_remove(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_remove(
+    name: str,
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    home: Path | None = _HOME_OPT,
+) -> None:
     """Remove a file-defined agent (keeps its prompt and state files)."""
     from .config import agent_file_path
 
@@ -1171,6 +1433,7 @@ def agent_remove(name: str, home: Path | None = _HOME_OPT) -> None:
                 f"{name!r} is defined in config.toml — remove it there and restart `quorum up`"
             ) from None
         raise _fail(f"no agent {name!r} — `quorum agent list`") from None
+    _confirm(yes, f"remove agents/{name}.toml? (its prompt and state files are kept)")
     _actor_guard(target, "agent.remove", target=name)
     path.unlink()
     MessageBus(target).send(current_actor(), "supervisor", type="agent.reload", payload={"agent": name})
