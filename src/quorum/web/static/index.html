@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>quorum</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%232f6fde'/%3E%3Ctext x='8' y='12' font-size='10' font-family='sans-serif' fill='white' text-anchor='middle'%3Eq%3C/text%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #66707f;
@@ -50,12 +51,17 @@
   li .meta { color: var(--muted); font-size: 12px; }
   form { display: flex; gap: 8px; margin-top: 10px; }
   input, button { font: inherit; }
-  input[type=text] { flex: 1; background: var(--bg); color: var(--ink);
+  input[type=text], input[type=date] { background: var(--bg); color: var(--ink);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; }
+  input[type=text] { flex: 1; }
   button { background: var(--accent); color: #fff; border: 0; border-radius: 6px;
            padding: 6px 12px; cursor: pointer; }
   button.small { font-size: 12px; padding: 3px 9px; }
+  button.quiet { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
   .task-row, .agent-row { cursor: pointer; }
+  .task-row:hover td, .agent-row:hover td { background: var(--bg); }
+  tr.selected td { background: var(--bg); }
+  tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   #task-detail, #agent-detail { margin-top: 10px; display: none; }
   #agent-detail-buttons { display: flex; gap: 6px; margin: 6px 0; }
   form.stack { flex-direction: column; align-items: stretch; }
@@ -67,19 +73,27 @@
              background: var(--bg); border: 1px solid var(--line);
              border-radius: 6px; padding: 8px 10px; }
   .editable { cursor: pointer; border-bottom: 1px dashed var(--muted); }
+  .deadline-edit { display: inline-flex; gap: 6px; align-items: center; }
   a { color: var(--accent); }
+  #toast { position: fixed; right: 20px; bottom: 20px; max-width: 380px;
+           background: var(--panel); color: var(--ink); border: 1px solid var(--bad);
+           border-left: 4px solid var(--bad); border-radius: 8px; padding: 10px 14px;
+           font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.15);
+           opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #toast.show { opacity: 1; }
+  #toast.ok { border-color: var(--ok); border-left-color: var(--ok); }
 </style>
 </head>
 <body>
 <header>
   <h1>quorum</h1>
-  <span id="sup"><span class="dot"></span><span id="sup-text">checking…</span></span>
+  <span id="sup"><span class="dot"></span><span id="sup-text">loading…</span></span>
   <span id="attn"></span>
 </header>
 <main>
   <section class="wide">
     <h2>Tasks</h2>
-    <table id="tasks"></table>
+    <table id="tasks"><tr><td class="muted">loading…</td></tr></table>
     <div id="task-detail">
       <div id="task-detail-head" class="muted"></div>
       <pre class="tail" id="task-tail"></pre>
@@ -91,13 +105,13 @@
   </section>
   <section>
     <h2>Agents</h2>
-    <table id="agents"></table>
+    <table id="agents"><tr><td class="muted">loading…</td></tr></table>
     <div id="agent-detail">
       <div id="agent-detail-head" class="muted"></div>
       <div id="agent-detail-buttons">
-        <button class="small" onclick="agentCmd('pause')">Pause</button>
-        <button class="small" onclick="agentCmd('resume')">Resume</button>
-        <button class="small" onclick="agentCmd('run-now')">Run now</button>
+        <button class="small" data-cmd="pause">Pause</button>
+        <button class="small" data-cmd="resume">Resume</button>
+        <button class="small" data-cmd="run-now">Run now</button>
       </div>
       <pre class="tail" id="agent-tail"></pre>
     </div>
@@ -114,23 +128,43 @@
   </section>
   <section>
     <h2>Projects</h2>
-    <table id="projects"></table>
+    <table id="projects"><tr><td class="muted">loading…</td></tr></table>
   </section>
   <section>
     <h2>Board</h2>
-    <ul id="board"></ul>
+    <ul id="board"><li class="muted">loading…</li></ul>
     <form id="post-form">
       <input type="text" id="post-text" placeholder="post a note to #notes…" required>
       <button>Post</button>
     </form>
   </section>
 </main>
+<div id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtTs = (s) => (s || "").replace("T", " ").replace("Z", "").slice(5, 16);
 let selectedTask = null;
 let selectedAgent = null;
+let editingProject = null;      // slug with an open deadline editor: skip its re-render
+const rendered = {};            // per-section content cache: rewrite only on change
+
+let toastTimer = null;
+function toast(msg, ok = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.toggle("ok", ok);
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+function setSection(id, html) {
+  if (rendered[id] === html) return;   // keep selection/scroll on quiet polls
+  rendered[id] = html;
+  $(id).innerHTML = html;
+}
 
 async function refresh() {
   let data;
@@ -146,54 +180,60 @@ async function refresh() {
   $("attn").style.display = attn.count ? "inline" : "none";
   $("attn").textContent = attn.count ? `⚠ ${attn.count} on #attention` : "";
 
-  $("tasks").innerHTML = (data.tasks || []).map(t => {
+  setSection("tasks", (data.tasks || []).map(t => {
     const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""));
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
-    return `<tr class="task-row" onclick="selectTask('${esc(t.id)}')">
+    const sel = t.id === selectedTask ? " selected" : "";
+    return `<tr class="task-row${sel}" data-id="${esc(t.id)}">
       <td class="muted">${esc(t.id_short)}</td>
       <td><b>${esc(t.project)}</b><br><span class="muted">${esc((t.last_report || t.prompt).slice(0, 90))}</span></td>
       <td class="${cls}">${status}</td>
       <td class="muted">${esc(t.harness)}</td>
       <td>${pr}</td></tr>`;
-  }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`;
+  }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`);
 
-  $("agents").innerHTML = (data.agents || []).map(a => {
+  setSection("agents", (data.agents || []).map(a => {
     const next = a.next_run
       ? (a.next_run_estimated ? "~" : "") + fmtTs(a.next_run) : "";
     const err = a.error ? ` title="${esc(a.error)}"` : "";
-    return `<tr class="agent-row" onclick="selectAgent('${esc(a.name)}')"${err}>
+    const sel = a.name === selectedAgent ? " selected" : "";
+    return `<tr class="agent-row${sel}" data-name="${esc(a.name)}"${err}>
       <td>${esc(a.name)}${a.error ? ' <span class="status-error">!</span>' : ""}</td>
       <td class="status-${esc(a.status)}">${esc(a.status)}</td>
       <td class="muted">${esc(a.schedule)}</td>
       <td class="muted">last ${fmtTs(a.last_end) || "—"}</td>
       <td class="muted">next ${next || "—"}</td></tr>`;
-  }).join("");
+  }).join("") || `<tr><td class="muted">no agents — quorum agent create, or the form below</td></tr>`);
 
-  $("projects").innerHTML = (data.projects || []).map(p => {
-    let due = "";
-    if (p.deadline) {
-      const cls = p.days_left < 0 ? "overdue" : (p.days_left <= 3 ? "due-soon" : "");
-      const label = p.days_left < 0 ? `overdue ${-p.days_left}d` : `${p.days_left}d`;
-      due = `<span class="${cls}">${esc(p.deadline)} (${label})</span>`;
-    }
-    return `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.path)}</span></td>
-      <td><span class="editable" title="click to change deadline"
-        onclick="editDeadline('${esc(p.slug)}','${esc(p.deadline || "")}')">${due || '<span class="muted">no deadline</span>'}</span></td></tr>`;
-  }).join("") || `<tr><td class="muted">none registered</td></tr>`;
+  if (!editingProject) {
+    setSection("projects", (data.projects || []).map(p => {
+      let due = "";
+      if (p.deadline) {
+        const cls = p.days_left < 0 ? "overdue" : (p.days_left <= 3 ? "due-soon" : "");
+        const label = p.days_left < 0 ? `overdue ${-p.days_left}d` : `${p.days_left}d`;
+        due = `<span class="${cls}">${esc(p.deadline)} (${label})</span>`;
+      }
+      return `<tr><td><b>${esc(p.name)}</b><br><span class="muted">${esc(p.path)}</span></td>
+        <td><span class="editable" title="click to change the deadline" data-slug="${esc(p.slug)}"
+          data-deadline="${esc(p.deadline || "")}">${due || '<span class="muted">no deadline</span>'}</span></td></tr>`;
+    }).join("") || `<tr><td class="muted">none registered — quorum project add &lt;dir&gt;</td></tr>`);
+  }
 
-  $("board").innerHTML = (data.board || []).slice().reverse().map(m =>
+  setSection("board", (data.board || []).slice().reverse().map(m =>
     `<li${m.topic === "attention" ? ' class="attn"' : ""}>${esc(m.text)}<br><span class="meta">#${esc(m.topic)} · ${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))}</span></li>`
-  ).join("") || `<li class="muted">no messages yet</li>`;
+  ).join("") || `<li class="muted">no messages yet</li>`);
 
   if (selectedTask) renderTaskDetail();
   if (selectedAgent) renderAgentDetail();
 }
 
-async function selectAgent(name) {
+function selectAgent(name) {
   selectedAgent = (selectedAgent === name) ? null : name;
+  delete rendered["agents"];  // reflect the selection highlight now
   $("agent-detail").style.display = selectedAgent ? "block" : "none";
   if (selectedAgent) renderAgentDetail();
+  refresh();
 }
 
 async function renderAgentDetail() {
@@ -213,14 +253,17 @@ async function renderAgentDetail() {
 async function agentCmd(cmd) {
   if (!selectedAgent) return;
   const r = await fetch(`/api/agents/${selectedAgent}/${cmd}`, { method: "POST" });
-  if (!r.ok) alert((await r.json()).detail || `${cmd} failed`);
+  if (!r.ok) { toast((await r.json()).detail || `${cmd} failed`); return; }
+  toast(`${cmd} queued for ${selectedAgent}`, true);
   refresh();
 }
 
-async function selectTask(id) {
+function selectTask(id) {
   selectedTask = (selectedTask === id) ? null : id;
+  delete rendered["tasks"];
   $("task-detail").style.display = selectedTask ? "block" : "none";
   if (selectedTask) renderTaskDetail();
+  refresh();
 }
 
 async function renderTaskDetail() {
@@ -228,33 +271,68 @@ async function renderTaskDetail() {
   try { t = await (await fetch(`/api/tasks/${selectedTask}`)).json(); }
   catch { return; }
   $("task-detail-head").textContent =
-    `task ${t.id.slice(0, 8).toLowerCase()} · ${t.status}${t.running ? " · running" : ""} · ${t.workdir || ""}`;
+    `task ${t.id.slice(-6).toLowerCase()} · ${t.status}${t.running ? " · running" : ""} · ${t.workdir || ""}`;
   const lines = (t.transcript || []).map(e =>
     e.line !== undefined ? e.line : JSON.stringify(e.event).slice(0, 200));
   const reports = (t.reports || []).map(r => `» [${r.status}] ${r.text}`);
-  $("task-tail").textContent =
-    [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
+  const text = [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
+  if ($("task-tail").textContent !== text) $("task-tail").textContent = text;
 }
 
-async function editDeadline(slug, current) {
-  const v = prompt("Deadline (YYYY-MM-DD, empty to keep):", current);
-  if (!v) return;
-  const r = await fetch(`/api/projects/${slug}`, {
-    method: "PATCH", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ deadline: v }),
+function openDeadlineEditor(cell, slug, current) {
+  editingProject = slug;
+  cell.outerHTML = `<span class="deadline-edit">
+    <input type="date" id="dl-input" value="${esc(current)}">
+    <button class="small" id="dl-save">Save</button>
+    <button class="small quiet" id="dl-clear">Clear</button>
+  </span>`;
+  $("dl-input").focus();
+  const done = () => { editingProject = null; delete rendered["projects"]; refresh(); };
+  const patch = async (deadline) => {
+    const r = await fetch(`/api/projects/${slug}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deadline }),
+    });
+    if (!r.ok) toast((await r.json()).detail || "update failed");
+    else toast(deadline ? `deadline set: ${deadline}` : "deadline cleared", true);
+    done();
+  };
+  $("dl-save").addEventListener("click", () => patch($("dl-input").value));
+  $("dl-clear").addEventListener("click", () => patch(""));
+  $("dl-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); patch($("dl-input").value); }
+    if (e.key === "Escape") done();
   });
-  if (!r.ok) alert((await r.json()).detail || "update failed");
-  refresh();
 }
+
+// Delegated clicks: no inline handlers, so ids/slugs never travel through
+// attribute-quoting (an apostrophe in a slug used to break the row).
+$("tasks").addEventListener("click", (e) => {
+  const row = e.target.closest(".task-row");
+  if (row && !e.target.closest("a")) selectTask(row.dataset.id);
+});
+$("agents").addEventListener("click", (e) => {
+  const row = e.target.closest(".agent-row");
+  if (row) selectAgent(row.dataset.name);
+});
+$("projects").addEventListener("click", (e) => {
+  const cell = e.target.closest(".editable");
+  if (cell) openDeadlineEditor(cell, cell.dataset.slug, cell.dataset.deadline);
+});
+$("agent-detail-buttons").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-cmd]");
+  if (btn) agentCmd(btn.dataset.cmd);
+});
 
 $("nudge-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("nudge-text").value.trim();
   if (!text || !selectedTask) return;
-  await fetch(`/api/tasks/${selectedTask}/nudge`, {
+  const r = await fetch(`/api/tasks/${selectedTask}/nudge`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+  if (r.ok) toast("guidance queued", true);
   $("nudge-text").value = "";
 });
 
@@ -271,7 +349,8 @@ $("agent-create-form").addEventListener("submit", async (e) => {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) { alert((await r.json()).detail || "create failed"); return; }
+  if (!r.ok) { toast((await r.json()).detail || "create failed"); return; }
+  toast(`agent ${body.name} created`, true);
   $("agent-create").open = false;
   $("na-name").value = ""; $("na-prompt").value = "";
   refresh();

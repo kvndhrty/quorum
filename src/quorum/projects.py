@@ -119,7 +119,10 @@ class ProjectRegistry:
         if not path.exists():
             raise KeyError(slug)
         record = Project.model_validate(fsio.read_json(path))
-        record = record.model_copy(update={k: v for k, v in fields.items() if v is not None})
+        updates = {k: v for k, v in fields.items() if v is not None}
+        if updates.get("deadline") == "":  # None means "unchanged", so "" is the clear signal
+            updates["deadline"] = None
+        record = record.model_copy(update=updates)
         Project.model_validate(record.model_dump())  # re-check validators
         fsio.atomic_write_json(path, record.model_dump())
         return _merge_marker(record)

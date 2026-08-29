@@ -1067,7 +1067,7 @@ def project_list(
 @project_app.command("set")
 def project_set(
     slug: str,
-    deadline: str | None = typer.Option(None, "--deadline"),
+    deadline: str | None = typer.Option(None, "--deadline", help="ISO date; an empty string clears it."),
     notes: str | None = typer.Option(None, "--notes"),
     name: str | None = typer.Option(None, "--name"),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
