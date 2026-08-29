@@ -24,7 +24,10 @@ Five words carry the whole system:
 - **Home** — one directory (`~/.quorum` by default, `$QUORUM_HOME` or
   `--home` to override) holding every durable byte quorum touches. Plain
   JSON/JSONL/TOML/Markdown; `ls` and `cat` are debuggers; copying the
-  directory migrates the whole setup.
+  directory migrates the whole setup. One more resolution rule to know: a
+  `quorum-home/` directory in the current working directory wins over
+  `~/.quorum` (handy for per-repo experiments, surprising if you forget
+  it's there).
 - **Project** — a directory you registered with `quorum project add`,
   usually a git repo. Tasks run against projects.
 - **Task** — a prompt pointed at a project, executed by a *harness* as a
