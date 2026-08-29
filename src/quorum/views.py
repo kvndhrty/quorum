@@ -142,7 +142,9 @@ def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     row["settings"] = dict(acfg.settings) if acfg else {}
     row["journal"] = fsio.read_jsonl_tail(journal_path(home, name), limit=20)
     row["actions"] = [
-        a for a in fsio.read_jsonl(home / "logs" / "actions.jsonl") if a.get("agent") == name
+        a
+        for a in fsio.read_jsonl_tail(home / "logs" / "actions.jsonl", max_bytes=512 * 1024)
+        if a.get("agent") == name
     ][-20:]
     return row
 

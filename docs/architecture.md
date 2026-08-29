@@ -161,7 +161,11 @@ rewritten by harness-side hooks (`quorum task hook-session-start`,
 `hook-stop`, `hook-session-end`) with the latest lifecycle event. The hook
 entry points are harness-agnostic — JSON with `session_id`/`cwd` on stdin,
 matched to an attached task by exact session id first, then working
-directory (which is also how an id-less adoption *learns* its session id) —
+directory. The cwd fallback is how an id-less adoption *learns* its session
+id, and it only fires while the task has no live session of its own (none
+recorded, or the recorded one ended — a resume under a fresh id), so a
+second concurrent session in the adopted checkout can't steal guidance or
+the session id —
 and `integrations/` ships an adapter per harness: `claude-code/` and
 `codex/` wire native Stop/SessionEnd(/SessionStart) hooks straight to the
 CLI, both speaking the same stdin payload and `{"decision": "block"}`

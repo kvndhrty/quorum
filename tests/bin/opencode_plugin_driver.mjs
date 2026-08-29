@@ -37,6 +37,14 @@ if (mode === "adopt") {
   })
   console.log(JSON.stringify({ injected }))
 } else if (mode === "dispose") {
+  // a real instance has seen its session's events before shutdown; dispose
+  // names the sessions it hosted when recording session-end
+  await hooks.event({
+    event: {
+      type: "session.status",
+      properties: { sessionID, status: { type: "busy" } },
+    },
+  })
   await hooks.dispose()
   console.log(JSON.stringify({ disposed: true }))
 } else {

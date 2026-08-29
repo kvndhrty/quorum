@@ -371,7 +371,7 @@ Each tick, a prompt agent renders its prompt and runs your harness over it,
 with the same authority and the same rails as the manager: every mutating
 `quorum` command it issues is auto-journaled to
 `state/agents/<name>/journal.jsonl` and rate-capped per run
-(`max_actions_per_run`, default 10 for prompt agents). Send it a mid-run or
+(`max_actions_per_run`, default 20). Send it a mid-run or
 between-run directive with the bus (`quorum agent list` shows it; messages
 to the `<name>` inbox appear in its `{directives}` placeholder). Useful
 settings in `agents/<name>.toml`:
@@ -384,7 +384,7 @@ schedule = "every 1d"
 harness = "claude"            # defaults to [tasks].default_harness
 prompt = "standup"            # template name, defaults to the agent's name
 run_timeout_seconds = 300
-max_actions_per_run = 10
+max_actions_per_run = 10      # tighten the rail below the default of 20
 ```
 
 After editing, `quorum agent reload standup` applies the change to a running

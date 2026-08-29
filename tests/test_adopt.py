@@ -162,6 +162,40 @@ def test_hook_stop_matches_by_cwd_and_learns_the_session(home: Path, repo: Path)
     assert TaskStore(home).get(task.id).session == "sess-learned"
 
 
+def test_hook_stop_ignores_a_second_session_in_the_same_checkout(home: Path, repo: Path):
+    """The cwd fallback must not let a concurrent, unadopted session in the
+    adopted directory steal the task's guidance or overwrite its session id —
+    but once the known session has ended, a new session (a resume under a
+    fresh id) re-associates by cwd."""
+    task = adopt(home, repo)
+    bus = MessageBus(home)
+    bus.send("manager", inbox_name(task.id), type="guidance", text="for the adopted session only")
+
+    intruder = json.dumps({"session_id": "sess-intruder", "cwd": str(repo)})
+    r = runner.invoke(app, ["task", "hook-stop"], input=intruder)
+    assert r.exit_code == 0 and r.output.strip() == ""
+    assert TaskStore(home).get(task.id).session == "sess-live-1"
+    assert bus.pending(inbox_name(task.id))  # guidance not stolen
+
+    # the adopted session ends; a session under a fresh id now re-associates
+    r = runner.invoke(app, ["task", "hook-session-end"], input=stop_payload(task))
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["task", "hook-stop"], input=intruder)
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["decision"] == "block"
+    assert TaskStore(home).get(task.id).session == "sess-intruder"
+    assert not bus.pending(inbox_name(task.id))
+
+
+def test_task_run_detach_refuses_attached_tasks(home: Path, repo: Path):
+    """--detach must surface the substrate rail in the parent, not report a
+    green success and let only the detached child refuse."""
+    task = adopt(home, repo)
+    r = runner.invoke(app, ["task", "run", task.short_id, "--detach", "--home", str(home)])
+    assert r.exit_code != 0
+    assert "attached to a live interactive session" in r.output
+
+
 def test_hook_stop_ignores_unadopted_sessions(home: Path, repo: Path, tmp_path: Path):
     adopt(home, repo)
     payload = json.dumps({"session_id": "sess-other", "cwd": str(tmp_path / "elsewhere")})

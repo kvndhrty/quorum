@@ -37,6 +37,7 @@ function quorum(args, payload) {
 
 export const QuorumPlugin = async ({ client, directory }) => {
   const inflight = new Set() // serialize per-session idle handling
+  const seen = new Set() // session ids this instance has hosted, for dispose
 
   async function onIdle(sessionID) {
     if (!sessionID || inflight.has(sessionID)) return
@@ -61,6 +62,7 @@ export const QuorumPlugin = async ({ client, directory }) => {
 
   return {
     "command.execute.before": async (input, output) => {
+      if (input.sessionID) seen.add(input.sessionID)
       if (input.command !== "quorum-adopt") return
       const out = await quorum([
         "task", "adopt", input.arguments || "", "--json",
@@ -83,17 +85,24 @@ export const QuorumPlugin = async ({ client, directory }) => {
       ]
     },
     event: async ({ event }) => {
+      const sid = event.properties?.sessionID
+      if (sid) seen.add(sid)
       // session.status{idle} is current; session.idle is its deprecated
       // predecessor — handling both double-calls hook-stop, which is safe
       // (guidance is consumed by whichever claim wins; the loser is silent).
       if (event.type === "session.status" && event.properties?.status?.type === "idle") {
         await onIdle(event.properties.sessionID)
       } else if (event.type === "session.idle") {
-        await onIdle(event.properties?.sessionID)
+        await onIdle(sid)
       }
     },
     dispose: async () => {
-      await quorum(["task", "hook-session-end"], { cwd: directory })
+      // name each ended session: a cwd-only payload can't (and shouldn't)
+      // claim the end of a session the task knows to be someone else's
+      const payloads = seen.size
+        ? [...seen].map((s) => ({ session_id: s, cwd: directory }))
+        : [{ cwd: directory }]
+      for (const p of payloads) await quorum(["task", "hook-session-end"], p)
     },
   }
 }

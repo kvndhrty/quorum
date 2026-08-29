@@ -360,8 +360,12 @@ def task_detach(task_id: str, home: Path | None = _HOME_OPT) -> None:
 
 def _match_attached(home: Path, session_id: str, cwd: str):
     """The task a harness hook is speaking for: exact session match first,
-    then the working directory."""
-    from .tasks import TERMINAL_STATUSES, TaskStore
+    then the working directory. The cwd fallback only fires when the task
+    has no *live* session of its own — adopted id-less, or its known session
+    already ended (a resume under a fresh id) — so a second concurrent
+    session in the same checkout can't steal an adopted task's guidance or
+    overwrite its session id."""
+    from .tasks import TERMINAL_STATUSES, TaskStore, attached_state
 
     candidates = [
         t
@@ -375,7 +379,12 @@ def _match_attached(home: Path, session_id: str, cwd: str):
     if cwd:
         resolved = str(Path(cwd).expanduser().resolve())
         for t in candidates:
-            if t.workdir and str(Path(t.workdir).expanduser().resolve()) == resolved:
+            if not (t.workdir and str(Path(t.workdir).expanduser().resolve()) == resolved):
+                continue
+            if t.session is None:
+                return t
+            state = attached_state(home, t.id)
+            if state and state.get("event") == "session-end":
                 return t
     return None
 
@@ -526,6 +535,13 @@ def task_run(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    # mirror the runner's substrate rail here so --detach fails in the
+    # parent too, instead of journaling a success and refusing in the child
+    if task.attached:
+        raise _fail(
+            f"task {task.short_id} is attached to a live interactive session — "
+            "guide it with `quorum task nudge`, or `quorum task detach` it first"
+        )
     _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
         pid = launch_detached(target, task.id)
