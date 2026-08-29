@@ -36,7 +36,7 @@ Needs Python 3.11+.
 ```bash
 uv tool install quorum-orchestrator              # includes the TUI dashboard
 uv tool install "quorum-orchestrator[web]"       # + the localhost web dashboard
-uvx quorum-orchestrator --help                   # zero-install trial run
+uvx --from quorum-orchestrator quorum --help     # zero-install trial run
 ```
 
 (or `pip install "quorum-orchestrator[web]"` if you don't use uv.)
@@ -104,7 +104,9 @@ The session becomes an *attached* task: the manager observes it (liveness,
 git state, reports) but never runs it — your nudges and the manager's pokes
 are delivered *inside* the live session by the harness's hook the next time
 it stops. `quorum task detach` hands it back to the headless runner. See
-[docs/guide.md#adopting-a-live-session](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#adopting-a-live-session).
+[docs/guide.md#adopting-a-live-session](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#adopting-a-live-session)
+and the per-harness adapters under
+[integrations/](https://github.com/kvndhrty/quorum/tree/main/integrations).
 
 ## How it works
 
@@ -174,3 +176,6 @@ uv sync --all-extras
 uv run pytest
 uv run ruff check .
 ```
+
+Repo conventions and the layer-by-layer map live in
+[CLAUDE.md](https://github.com/kvndhrty/quorum/blob/main/CLAUDE.md).

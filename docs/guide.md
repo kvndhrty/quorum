@@ -180,15 +180,16 @@ attention.
 
 ```bash
 quorum task list                  # every task, one line each
-quorum task show a3f2k9           # full record + recent reports
+quorum task show a3f2k9           # what/where/how it stands (--json: raw record)
 quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
 quorum status                     # tasks alongside agents and projects
 ```
 
 **Finishing and undoing.** A task that opens a PR reports the URL, which
 shows up in every view. `quorum task cancel <id>` stops the manager's
-attention (`--kill` also SIGTERMs a live runner). The work itself lives on
-the `quorum/<short-id>` branch either way.
+attention (`--kill` also SIGTERMs a live runner, and asks first on an
+interactive shell — `--yes` skips). The work itself lives on the
+`quorum/<short-id>` branch either way.
 
 **Delivery.** The preamble also teaches the harness to deliver with plain
 git — commit everything and `git push -u origin HEAD` before reporting
@@ -279,14 +280,16 @@ prints the exact invocation). `quorum integration list` shows what's bundled
 and what's installed. Each `integrations/<harness>/README.md` has the
 details and per-project variants:
 
-- **Claude Code** (`integrations/claude-code/`): `/quorum:adopt <desc>`,
-  plus Stop/SessionEnd hooks.
-- **Codex CLI** (`integrations/codex/`): `/prompts:quorum-adopt <desc>`,
-  plus SessionStart/Stop/SessionEnd hooks — Codex speaks the same hook
-  protocol as Claude Code. Adoption starts id-less (Codex prompts can't see
-  their own session id); the next hook firing learns it by directory match.
-- **opencode** (`integrations/opencode/`): `/quorum-adopt <desc>`, backed by
-  a plugin that watches idle events and injects guidance as a user turn.
+- **Claude Code** ([integrations/claude-code/](../integrations/claude-code/README.md)):
+  `/quorum:adopt <desc>`, plus Stop/SessionEnd hooks.
+- **Codex CLI** ([integrations/codex/](../integrations/codex/README.md)):
+  `/prompts:quorum-adopt <desc>`, plus SessionStart/Stop/SessionEnd hooks —
+  Codex speaks the same hook protocol as Claude Code. Adoption starts
+  id-less (Codex prompts can't see their own session id); the next hook
+  firing learns it by directory match.
+- **opencode** ([integrations/opencode/](../integrations/opencode/README.md)):
+  `/quorum-adopt <desc>`, backed by a plugin that watches idle events and
+  injects guidance as a user turn.
 
 Adoption creates an **attached** task (`⚭` in every dashboard): its workdir
 is your own checkout, quorum never spawns runs for it (`task run` refuses,
@@ -333,16 +336,31 @@ for you is never silent.
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something
-  needs you.
+  needs you. `--legend` explains the glyphs; `--json` emits the whole
+  overview for scripting (so do `task list`, `project list`, and
+  `agent list`).
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
-  top; select one to see its transcript and reports, `n` to nudge, `esc`
-  back to the board, `q` to quit. The agents table shows each agent's
-  status, schedule, last and next run (`~` marks an estimate computed from
-  the schedule when the supervisor isn't around to say for sure).
-- `quorum web` — the same picture at `http://127.0.0.1:8787` (`[web]`
-  extra). Localhost only, no exposed ports. Click an agent for its recent
-  actions and journal plus pause/resume/run-now buttons, and use the "new
-  agent…" form to create a prompt agent without leaving the browser.
+  top; arrow around freely, press enter on a task to open its transcript
+  and reports in the bottom pane (`esc` returns to the board feed, `n`
+  nudges, `q` quits — the header above the pane always says which view
+  you're in). The agents table shows each agent's status, schedule, last
+  and next run (`~` marks an estimate computed from the schedule when the
+  supervisor isn't around to say for sure).
+
+  ![quorum terminal dashboard](images/tui.png)
+
+- `quorum web` — the same files, more affordances, at
+  `http://127.0.0.1:8787` (`[web]` extra). Localhost only, no exposed
+  ports. Beyond what the TUI shows, you can pause/resume/run-now an agent,
+  create a prompt agent with the "new agent…" form, post to the board, and
+  click a project's deadline to edit or clear it — all without leaving the
+  browser.
+
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
+    <img alt="quorum web dashboard" src="images/web-light.png">
+  </picture>
+
 - `quorum board read [topic]` — the raw message stream (`--json` for
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.

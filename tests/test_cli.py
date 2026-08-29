@@ -378,14 +378,21 @@ def test_superseded_hashes_never_contain_the_current_defaults():
 # -- Phase-A UX rails: help rendering, version, attention surfacing ----------
 
 
+def _plain(text: str) -> str:
+    """Help output minus ANSI codes — Rich force-colors on CI (GitHub Actions)."""
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 def test_help_keeps_config_table_names():
     """Rich treats [bracketed] text as markup; unescaped, the help would tell
     users to edit "" instead of [harness.<name>] / [tasks] / [web]."""
     r = runner.invoke(app, ["task", "add", "--help"])
-    assert "[harness.<name>]" in r.output
-    assert "[tasks].default_harness" in r.output
+    assert "[harness.<name>]" in _plain(r.output)
+    assert "[tasks].default_harness" in _plain(r.output)
     r = runner.invoke(app, ["web", "--help"])
-    assert "[web]" in r.output
+    assert "[web]" in _plain(r.output)
 
 
 def test_version_flag():
