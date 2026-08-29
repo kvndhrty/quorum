@@ -157,14 +157,25 @@ user's live checkout from a racing headless run, not supervision policy.
 `quorum task detach` lifts it.
 
 Liveness for a run quorum didn't spawn comes from `tasks/<id>/attached.json`,
-rewritten by harness-side hooks (`quorum task hook-stop`, `hook-session-end`
-— see `integrations/claude-code/`) with the latest lifecycle event. The
-digest renders attached tasks in their own section (never as
-`runner=dead`-launchable), and guidance flows through the ordinary task
-inbox: the Stop hook claims pending messages and continues the session with
-them, so `task nudge` — from the CLI, manager, TUI, or web — reaches the
-human's live session at its next stop. The maildir claim keeps that
-delivery point race-free against a future headless run after detach.
+rewritten by harness-side hooks (`quorum task hook-session-start`,
+`hook-stop`, `hook-session-end`) with the latest lifecycle event. The hook
+entry points are harness-agnostic — JSON with `session_id`/`cwd` on stdin,
+matched to an attached task by exact session id first, then working
+directory (which is also how an id-less adoption *learns* its session id) —
+and `integrations/` ships an adapter per harness: `claude-code/` and
+`codex/` wire native Stop/SessionEnd(/SessionStart) hooks straight to the
+CLI, both speaking the same stdin payload and `{"decision": "block"}`
+continuation protocol, while `opencode/` (no hook commands; an in-process
+plugin bus instead) ships a fail-soft JS plugin that calls
+`hook-stop --format text` on idle events and injects whatever the CLI
+prints as a user turn via the SDK. Either way the digest renders attached
+tasks in their own section (never as `runner=dead`-launchable), and
+guidance flows through the ordinary task inbox: the stop/idle hook claims
+pending messages and continues the session with them, so `task nudge` —
+from the CLI, manager, TUI, or web — reaches the human's live session at
+its next stop. Delivery consumes the guidance, so continuation can't loop,
+and the maildir claim keeps the delivery point race-free against a future
+headless run after detach.
 
 **herdr (optional).** When the session runs inside a
 [herdr](https://herdr.dev) pane (`task adopt --herdr-pane <id>`), `herdr.py`
@@ -172,8 +183,8 @@ delivery point race-free against a future headless run after detach.
 the pane's detected agent status (`herdr: state=working|blocked|idle` in
 the digest; a busy session fires no hooks, so this outclasses mtimes) and a
 doorbell on `task nudge` (the pane is poked that guidance is waiting;
-harnesses without a hook system — codex, opencode — get their delivery
-prompt this way). The adapter fails *soft* by design — the mirror image of
+sessions with no quorum adapter installed get their delivery prompt this
+way). The adapter fails *soft* by design — the mirror image of
 sandbox.py's fail-closed — because observation enrichment must never break
 a digest. The inbox remains the single transport: the doorbell never
 carries the payload, so delivery stays exactly-once across all delivery

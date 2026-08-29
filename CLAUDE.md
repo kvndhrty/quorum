@@ -10,6 +10,8 @@ uv run pytest                   # full suite
 uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs
 uv run pytest -m nono_integration -v      # real kernel sandbox tests (need [nono] + Landlock/Seatbelt)
+QUORUM_HARNESS_TESTS=1 uv run pytest -m "codex_integration or opencode_integration" -v
+                                # real codex/opencode adoption tests (binaries + auth; spend tokens)
 uv run ruff check .             # lint (line-length 100; E4,E7,E9,F,I,UP,B)
 uv run quorum <cmd>             # run the CLI from a checkout
 ```
@@ -80,9 +82,15 @@ and `docs/architecture.md` in the same commit so the record stays true.
   the preamble tells harnesses to commit+push with plain git before reporting done.
   `attached = true` marks an *adopted* live interactive session (`quorum task
   adopt`): workdir = the user's checkout, no worktree, liveness from
-  `tasks/<id>/attached.json` (rewritten by `task hook-stop`/`hook-session-end`,
-  which also deliver pending inbox guidance into the session via the hook
-  block-protocol — see `integrations/claude-code/`); `task detach` reverts it.
+  `tasks/<id>/attached.json` (rewritten by `task hook-session-start`/
+  `hook-stop`/`hook-session-end`, which also learn the session id by cwd
+  match and deliver pending inbox guidance — as the Stop-hook block-protocol
+  JSON, or bare text via `hook-stop --format text` for shims that inject the
+  continuation themselves); `task detach` reverts it. One adapter per
+  harness under `integrations/` (claude-code, codex, opencode — the last is
+  a fail-soft JS plugin, kept a dumb pipe over the same CLI entry points),
+  kept true by `tests/test_integrations.py` (the opencode plugin is driven
+  for real under node, skipped when node is absent).
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the

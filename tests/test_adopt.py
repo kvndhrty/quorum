@@ -84,6 +84,74 @@ def test_hook_stop_delivers_pending_guidance_and_consumes_it(home: Path, repo: P
     assert r.exit_code == 0 and r.output.strip() == ""
 
 
+def test_hook_stop_text_format_prints_bare_guidance(home: Path, repo: Path):
+    task = adopt(home, repo)
+    bus = MessageBus(home)
+    bus.send("manager", inbox_name(task.id), type="guidance", text="run the tests before pushing")
+
+    r = runner.invoke(app, ["task", "hook-stop", "--format", "text"], input=stop_payload(task))
+    assert r.exit_code == 0, r.output
+    # bare text for shims that inject the continuation themselves — no JSON
+    assert "run the tests before pushing" in r.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(r.output)
+    assert not bus.pending(inbox_name(task.id))
+
+    r = runner.invoke(app, ["task", "hook-stop", "--format", "text"], input=stop_payload(task))
+    assert r.exit_code == 0 and r.output.strip() == ""
+
+
+def test_hook_stop_rejects_unknown_format(home: Path, repo: Path):
+    task = adopt(home, repo)
+    r = runner.invoke(app, ["task", "hook-stop", "--format", "xml"], input=stop_payload(task))
+    assert r.exit_code != 0
+
+
+def test_hook_stop_accepts_codex_shaped_payload(home: Path, repo: Path):
+    """Codex's Stop hook sends the same session_id/cwd fields plus extras;
+    the extras must be ignored, the protocol identical."""
+    task = adopt(home, repo)
+    bus = MessageBus(home)
+    bus.send("manager", inbox_name(task.id), type="guidance", text="prefer smaller commits")
+
+    payload = json.dumps(
+        {
+            "session_id": task.session,
+            "cwd": task.workdir,
+            "hook_event_name": "Stop",
+            "turn_id": "42",
+            "stop_hook_active": False,
+            "last_assistant_message": "done, I think",
+            "model": "gpt-5.6-sol",
+            "permission_mode": "default",
+            "transcript_path": None,
+        }
+    )
+    r = runner.invoke(app, ["task", "hook-stop"], input=payload)
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["decision"] == "block" and "prefer smaller commits" in out["reason"]
+    assert not bus.pending(inbox_name(task.id))
+
+
+def test_hook_session_start_refreshes_liveness_and_learns_the_session(home: Path, repo: Path):
+    task = adopt(home, repo)
+    TaskStore(home).update(task.id, session=None)  # adopted id-less (Codex prompt path)
+
+    payload = json.dumps(
+        {"session_id": "sess-from-start", "cwd": str(repo), "source": "startup"}
+    )
+    r = runner.invoke(app, ["task", "hook-session-start"], input=payload)
+    assert r.exit_code == 0 and r.output.strip() == ""
+    assert attached_state(home, task.id)["event"] == "session-start"
+    assert TaskStore(home).get(task.id).session == "sess-from-start"
+
+    # un-adopted sessions stay silent
+    payload = json.dumps({"session_id": "sess-other", "cwd": "/nowhere"})
+    r = runner.invoke(app, ["task", "hook-session-start"], input=payload)
+    assert r.exit_code == 0 and r.output.strip() == ""
+
+
 def test_hook_stop_matches_by_cwd_and_learns_the_session(home: Path, repo: Path):
     task = adopt(home, repo)
     TaskStore(home).update(task.id, session=None)  # adopted without --session

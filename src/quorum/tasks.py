@@ -115,8 +115,9 @@ def attached_path(home: Path, task_id: str) -> Path:
 def write_attached_state(
     home: Path, task_id: str, event: str, session: str | None = None, now: Any = None
 ) -> None:
-    """Record the adopted session's latest lifecycle event ("adopt", "stop",
-    "session-end") — the liveness signal for a run quorum didn't spawn."""
+    """Record the adopted session's latest lifecycle event ("adopt",
+    "session-start", "stop", "session-end") — the liveness signal for a run
+    quorum didn't spawn."""
     fsio.atomic_write_json(
         attached_path(home, task_id),
         {"at": fsio.iso(now or fsio.utc_now()), "event": event, "session": session},

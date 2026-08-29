@@ -256,23 +256,32 @@ nudge box on each task.
 ## Adopting a live session
 
 Sometimes the work is already underway — you're deep in a problem inside an
-interactive Claude Code session and want quorum's manager watching over it.
+interactive coding session and want quorum's manager watching over it.
 Adopt the session instead of re-queuing the work:
 
 ```bash
 quorum task adopt "refactoring the auth flow"    # from the session's directory
 ```
 
-or, with the shipped Claude Code plugin (`integrations/claude-code/`), type
-`/quorum:adopt refactoring the auth flow` inside the session itself.
+or from inside the session itself, with the shipped adapter for your
+harness (each `integrations/<harness>/README.md` has install steps):
+
+- **Claude Code** (`integrations/claude-code/`): `/quorum:adopt <desc>`,
+  plus Stop/SessionEnd hooks.
+- **Codex CLI** (`integrations/codex/`): `/prompts:quorum-adopt <desc>`,
+  plus SessionStart/Stop/SessionEnd hooks — Codex speaks the same hook
+  protocol as Claude Code. Adoption starts id-less (Codex prompts can't see
+  their own session id); the next hook firing learns it by directory match.
+- **opencode** (`integrations/opencode/`): `/quorum-adopt <desc>`, backed by
+  a plugin that watches idle events and injects guidance as a user turn.
 
 Adoption creates an **attached** task (`⚭` in every dashboard): its workdir
 is your own checkout, quorum never spawns runs for it (`task run` refuses,
 by design), and the manager treats it as human-driven — observing its git
 state and reports, nudging rather than relaunching, escalating to the
 `attention` topic if it looks abandoned. Guidance queued with `task nudge`
-is delivered *inside* the session by the plugin's Stop hook the next time
-Claude stops, as an instruction to continue; the session can also call
+is delivered *inside* the session by the adapter the next time the agent
+stops or goes idle, as an instruction to continue; the session can also call
 `quorum task report` like any harness. If the directory wasn't a registered
 project yet, adoption registers it. When the interactive phase is over,
 `quorum task detach <id>` turns it back into an ordinary task the manager
@@ -293,7 +302,7 @@ Two things light up, both fail-soft (herdr stopped or absent changes
 nothing): the manager digest shows the pane's live agent status
 (`herdr: state=working|blocked|idle`), and every `task nudge` also rings a
 doorbell in the pane telling the session guidance is waiting — which is how
-nudges reach harnesses that have no hook system (codex, opencode). The
+nudges reach sessions with no quorum adapter installed. The
 guidance itself always stays in the task inbox; the session collects it
 with `quorum task inbox <id> --claim`. An optional `[herdr]` table in
 config.toml overrides the socket path (`socket = "..."`) or disables the

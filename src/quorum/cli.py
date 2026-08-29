@@ -390,18 +390,30 @@ def _read_hook_payload() -> dict:
 
 
 @task_app.command("hook-stop")
-def task_hook_stop(home: Path | None = _HOME_OPT) -> None:
-    """Harness Stop-hook entry point (reads the hook's JSON on stdin).
+def task_hook_stop(
+    format: str = typer.Option(
+        "decision",
+        "--format",
+        help="Output when guidance is waiting: 'decision' (the Claude Code/Codex "
+        "Stop-hook block protocol) or 'text' (bare guidance lines, for shims that "
+        "inject the continuation themselves, e.g. the opencode plugin).",
+    ),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Harness stop/idle-hook entry point (reads the hook's JSON on stdin).
 
     For an adopted session this refreshes its liveness record and, when
-    guidance is waiting in the task inbox, emits the hook-protocol JSON that
-    continues the session with it. For everything else it exits 0 silently —
-    the hook is installed globally, so this must stay cheap and mute.
+    guidance is waiting in the task inbox, emits it — by default as the
+    Stop-hook block-protocol JSON that continues the session (Claude Code and
+    Codex speak the same one). For everything else it exits 0 silently — the
+    hook is installed globally, so this must stay cheap and mute.
     """
     from .messages import MessageBus
     from .runner import guidance_note
     from .tasks import TaskStore, inbox_name, write_attached_state
 
+    if format not in ("decision", "text"):
+        raise _fail(f"unknown --format {format!r} (expected 'decision' or 'text')")
     payload = _read_hook_payload()
     target = home_mod.resolve_home(home)
     if not (target / home_mod.CONFIG_NAME).exists():
@@ -422,13 +434,37 @@ def task_hook_stop(home: Path | None = _HOME_OPT) -> None:
         f"- {guidance_note(c.message)}" for c in claimed
     )
     try:
-        typer.echo(json.dumps({"decision": "block", "reason": reason}))
+        if format == "text":
+            typer.echo(reason)
+        else:
+            typer.echo(json.dumps({"decision": "block", "reason": reason}))
     except Exception:
         for c in claimed:
             c.reject()
         raise
     for c in claimed:
         c.ack()
+
+
+@task_app.command("hook-session-start")
+def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
+    """Harness SessionStart-hook entry point: refreshes an adopted task's
+    liveness record and learns the (possibly new) session id — harnesses
+    whose sessions can't shell out with their own id at adopt time (Codex)
+    get it associated here instead."""
+    from .tasks import TaskStore, write_attached_state
+
+    payload = _read_hook_payload()
+    target = home_mod.resolve_home(home)
+    if not (target / home_mod.CONFIG_NAME).exists():
+        raise typer.Exit(0)
+    session_id = str(payload.get("session_id") or "")
+    task = _match_attached(target, session_id, str(payload.get("cwd") or ""))
+    if task is None:
+        raise typer.Exit(0)
+    write_attached_state(target, task.id, "session-start", session_id or task.session)
+    if session_id and session_id != task.session:
+        TaskStore(target).update(task.id, session=session_id)
 
 
 @task_app.command("hook-session-end")

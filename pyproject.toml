@@ -35,6 +35,8 @@ packages = ["src/quorum"]
 testpaths = ["tests"]
 markers = [
     "nono_integration: real nono-py sandbox enforcement tests (need the [nono] extra and Landlock/Seatbelt support; self-skip elsewhere)",
+    "codex_integration: real Codex CLI adoption tests (need codex on PATH, auth, and QUORUM_HARNESS_TESTS=1; spend model tokens)",
+    "opencode_integration: real opencode adoption tests (need opencode on PATH, a provider, and QUORUM_HARNESS_TESTS=1; spend model tokens)",
 ]
 
 [tool.ruff]
