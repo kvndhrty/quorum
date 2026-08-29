@@ -3,10 +3,14 @@
 Quorum orchestrates long-running coding tasks executed by user-supplied
 harnesses (claude, codex, opencode, …), built around three commitments:
 
-1. **No privileged infrastructure.** One ordinary foreground process
-   (`quorum up`) hosts APScheduler. No cron, no systemd, no root, no ports
-   (the web dashboard is opt-in and binds to localhost). Background it with
-   `nohup` or tmux. Task runs are ordinary detached child processes.
+1. **No privileged infrastructure.** One ordinary process (`quorum up`)
+   hosts APScheduler — foreground by default, or detached into the
+   background with `quorum up --detach` (the same `start_new_session`
+   pattern task runs use; stdout/stderr land in `logs/supervisor.log`, and
+   `quorum down` SIGTERMs the pid recorded in `supervisor.lock`, then polls
+   the lock's release). No cron, no systemd, no root, no ports (the web
+   dashboard is opt-in and binds to localhost). Task runs are ordinary
+   detached child processes.
 2. **Everything is a plain file.** All state lives under one directory,
    `QUORUM_HOME`, as JSON/JSONL/TOML/Markdown. `ls` and `cat` are debuggers;
    copying the directory migrates the whole system; sandbox profiles reduce

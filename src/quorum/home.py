@@ -17,34 +17,23 @@ from . import fsio
 CONFIG_NAME = "config.toml"
 
 DEFAULT_CONFIG = """\
-# quorum configuration — human-edited; quorum never rewrites this file.
-
-[quorum]
-timezone = "local"        # display only; stored timestamps are always UTC
-retention_days = 30       # board messages older than this are archived
+# quorum config — yours to edit; quorum never writes this file.
+# To start: uncomment ONE [harness.*] block below and set default_harness.
+# Everything else can wait. All options: docs/guide.md
 
 [tasks]
-worktree = true           # run each task in its own git worktree under QUORUM_HOME
-default_harness = ""      # e.g. "claude" — used by `quorum task add` and the manager
+default_harness = ""      # e.g. "claude"
+worktree = true           # each task runs in its own git worktree
 
-# A harness is any coding-agent CLI that takes a prompt and works autonomously
-# in the current directory. "{prompt}" and "{session}" are substituted; a
-# template without "{prompt}" gets the prompt appended as the last argument.
-# `resume` is optional — quorum captures a session_id (or codex thread_id)
-# from JSON output when the harness emits one. `inject = "stream-json"`
-# delivers nudges into a *running* session over stdin; it requires the
-# stream-json flags shown below. See docs/guide.md#harnesses.
-#
-# Runs are unattended, so the harness needs permission to act without asking —
-# otherwise it stalls silently on its first denied tool call. Prefer a scoped
-# allowlist covering the report protocol (Bash(quorum:*)) and the work itself
-# over blanket permission bypasses. See docs/guide.md#harnesses.
+# A harness is any coding-agent CLI; {prompt} and {session} are substituted.
+# Runs are unattended — the flags below let the harness act without asking,
+# otherwise it stalls silently at its first permission prompt.
 #[harness.claude]
 #start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
 #resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
-#inject = "stream-json"
+#inject = "stream-json"   # delivers nudges into a running session
 
 #[harness.codex]
 #start  = ["codex", "exec", "--json", "{prompt}"]
@@ -53,45 +42,32 @@ default_harness = ""      # e.g. "claude" — used by `quorum task add` and the 
 #[harness.opencode]
 #start = ["opencode", "run", "{prompt}"]
 
+# Any agentic CLI works as a harness — point start at your own binary:
+#[harness.custom]
+#start = ["/path/to/your-agent", "--prompt", "{prompt}"]
+
 # Optional small-completion LLM for plugin agents (ctx.llm.complete()).
-# The manager does NOT use this — it runs a full harness (above).
+# Any binary that takes a prompt and prints text; the manager does not
+# use this — it runs a full harness (above).
 #[llm]
 #backend = "cli"
 #executable = "claude"
 #args = ["-p"]
-#input = "stdin"           # "stdin" | "argv" (use "{prompt}" placeholder in args)
+#input = "stdin"          # "stdin" | "argv" ({prompt} placeholder in args)
 #timeout_seconds = 120
-#max_prompt_chars = 24000
 
-[sandbox]
-use_nono = false          # true: sandbox task runs + LLM subprocesses via nono-py
-profile = ""              # optional nono profile name (used with `nono run`)
-#profile_file = "~/.config/nono/profiles/quorum.json"  # your own nono-style
-#                         # JSON profile (fs_read/fs_write/network), merged
-#                         # into the grants quorum derives for modes 2 and 3
-#task_read  = []          # extra read grants for sandboxed task runs
-#task_write = ["~/.claude"]  # harness state dirs need write (claude: ~/.claude)
-
-# The manager is itself harness-driven: each run it reads a digest of every
-# active task plus its own action journal, and acts through the quorum CLI.
-# Supervision policy lives in prompts/manager.md — edit it there.
-# auto_pause=false: if the LLM service is down the tick fails loudly but the
-# schedule keeps firing, so the manager self-recovers when service returns.
+# The manager checks on everything every 5 minutes, driven by the same
+# harness. Its policy is a prompt you can edit: prompts/manager.md
 [agents.manager]
 type = "manager"
 schedule = "every 5m"
-auto_pause = false
-[agents.manager.settings]
-#harness = "claude"          # default: [tasks].default_harness
-#run_timeout_seconds = 300
-#max_actions_per_run = 20
+auto_pause = false        # keep trying while the LLM service is down
 
-# Plugin agents: drop a .py file into QUORUM_HOME/plugins/ and point a stanza
-# at it (see docs/guide.md; examples/steward.py in the quorum repo is a
-# complete worked example):
-#[agents.steward]
-#type = "steward:Steward"
-#schedule = "every 1h"
+[quorum]
+retention_days = 30       # board messages older than this are archived
+
+[sandbox]
+use_nono = false          # sandbox task runs via nono-py (docs/guide.md#sandboxing)
 """
 
 SUBDIRS = [

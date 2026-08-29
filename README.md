@@ -31,11 +31,15 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 
 ## Install
 
+Needs Python 3.11+.
+
 ```bash
 uv tool install quorum-orchestrator              # includes the TUI dashboard
 uv tool install "quorum-orchestrator[web]"       # + the localhost web dashboard
-uvx quorum-orchestrator --help                   # zero-install trial run
+uvx --from quorum-orchestrator quorum --help     # zero-install trial run
 ```
+
+(or `pip install "quorum-orchestrator[web]"` if you don't use uv.)
 
 The PyPI distribution is `quorum-orchestrator`; the command it installs is
 plain `quorum` (and the import name is `quorum` too).
@@ -48,33 +52,24 @@ From a checkout: `uv sync --all-extras`, then prefix commands with `uv run`.
 quorum init                             # scaffold ~/.quorum
 ```
 
-Tell quorum how to invoke your harness (uncomment in `~/.quorum/config.toml`):
-
-```toml
-[tasks]
-default_harness = "claude"
-
-[harness.claude]
-start  = ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose",
-          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
-resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--verbose",
-          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(gh:*)"]
-```
-
-(Runs are unattended, so the harness needs permission to act without asking —
-the scoped `--allowedTools` list covers editing, git, the PR, and quorum's
-progress protocol, without a blanket permission bypass.)
+Tell quorum how to invoke your harness: the scaffolded
+`~/.quorum/config.toml` ships ready-to-uncomment blocks for claude, codex,
+and opencode, plus a template for any custom agentic binary — uncomment one
+and set `default_harness`. (Runs are unattended, so the harness needs
+permission to act without asking; the shipped blocks use a scoped tool
+allowlist, not a blanket bypass.)
 
 Register a repo and queue work:
 
 ```bash
+quorum doctor                           # verify the setup end to end
 quorum project add ~/work/my-api
 quorum task add my-api "fix the flaky auth tests and open a PR"
-quorum up                               # foreground; Ctrl-C stops
+quorum up --detach                      # supervisor in the background (`quorum down` stops it)
 ```
 
-Background `quorum up` however you like — `nohup`, tmux, a `screen` session.
-Then, from another shell:
+(`quorum up` without `--detach` runs it in the foreground — Ctrl-C stops.)
+Then:
 
 ```bash
 quorum status                # supervisor, agents, tasks, deadlines
@@ -85,6 +80,33 @@ quorum manager journal       # what the manager did, and why
 quorum tui                   # dashboard; select a task, press n to steer
 quorum web                   # http://127.0.0.1:8787
 ```
+
+## What it looks like
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-dark.png">
+  <img alt="quorum web dashboard" src="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-light.png">
+</picture>
+
+![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
+
+## Adopt a live session
+
+The work is already underway in an interactive session? Don't re-queue it —
+adopt it:
+
+```bash
+quorum integration install codex     # once per harness (also: opencode, claude-code)
+quorum task adopt "refactoring the auth flow"    # from the session's directory
+```
+
+The session becomes an *attached* task: the manager observes it (liveness,
+git state, reports) but never runs it — your nudges and the manager's pokes
+are delivered *inside* the live session by the harness's hook the next time
+it stops. `quorum task detach` hands it back to the headless runner. See
+[docs/guide.md#adopting-a-live-session](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#adopting-a-live-session)
+and the per-harness adapters under
+[integrations/](https://github.com/kvndhrty/quorum/tree/main/integrations).
 
 ## How it works
 
@@ -132,7 +154,7 @@ Quorum pairs naturally with [nono](https://github.com/nolabs-ai/nono)
 `nono run --profile quorum -- quorum up`, or set `[sandbox] use_nono = true`
 to confine each task run to its worktree plus `QUORUM_HOME`. Fails closed:
 if sandboxing was requested and nono-py is missing, nothing runs unsandboxed.
-See [docs/guide.md](docs/guide.md#sandboxing).
+See [docs/guide.md](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#sandboxing).
 
 ## Customizing
 
@@ -141,11 +163,11 @@ See [docs/guide.md](docs/guide.md#sandboxing).
 - **Retune** the task preamble and the manager's policy by editing
   `~/.quorum/prompts/*.md`; delete a file to restore the default.
 - **Extend** with your own agents: drop a ~20-line Python file into
-  `~/.quorum/plugins/` — [examples/steward.py](examples/steward.py) is a
+  `~/.quorum/plugins/` — [examples/steward.py](https://github.com/kvndhrty/quorum/blob/main/examples/steward.py) is a
   complete worked example (a rule-based file organizer with undo).
 
-Everything above, in depth: **[docs/guide.md](docs/guide.md)**.
-Design record: [docs/architecture.md](docs/architecture.md).
+Everything above, in depth: **[docs/guide.md](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md)**.
+Design record: [docs/architecture.md](https://github.com/kvndhrty/quorum/blob/main/docs/architecture.md).
 
 ## Development
 
@@ -154,3 +176,6 @@ uv sync --all-extras
 uv run pytest
 uv run ruff check .
 ```
+
+Repo conventions and the layer-by-layer map live in
+[CLAUDE.md](https://github.com/kvndhrty/quorum/blob/main/CLAUDE.md).

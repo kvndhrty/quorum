@@ -31,6 +31,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/quorum"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Ship the harness adapters inside the wheel so `quorum integration install`
+# works from a package install; the top-level integrations/ dir stays the
+# source of truth for checkouts.
+"integrations" = "quorum/integrations"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

@@ -144,3 +144,84 @@ def test_opencode_plugin_fails_soft_without_the_quorum_cli(
     assert out["injected"] == []
     out = drive(node, missing, home, "adopt", repo, "ses_oc_driver_2")
     assert "failed" in out["parts"][0]["text"]
+
+
+# -- `quorum integration` CLI ------------------------------------------------
+
+from typer.testing import CliRunner  # noqa: E402
+
+from quorum.cli import app  # noqa: E402
+
+runner = CliRunner()
+
+
+def test_wheel_ships_the_integrations(tmp_path: Path):
+    """The force-include mapping is what makes `integration install` work from
+    a package install — removing it silently strands PyPI users again."""
+    import tomllib
+
+    pyproject = tomllib.loads(
+        (Path(__file__).parent.parent / "pyproject.toml").read_text()
+    )
+    force = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force["integrations"] == "quorum/integrations"
+
+
+def test_integration_install_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    r = runner.invoke(app, ["integration", "install", "codex"])
+    assert r.exit_code == 0, r.output
+    hooks = codex_home / "hooks.json"
+    prompt = codex_home / "prompts" / "quorum-adopt.md"
+    assert hooks.read_bytes() == (INTEGRATIONS / "codex" / "hooks.json").read_bytes()
+    assert prompt.exists()
+    assert "trust" in r.output  # the one-time trust gate is called out
+
+    # identical re-install is a quiet no-op
+    r = runner.invoke(app, ["integration", "install", "codex"])
+    assert r.exit_code == 0
+    assert "already installed" in r.output
+
+    # a diverged file is refused with merge guidance, and --force overwrites
+    hooks.write_text('{"hooks": {}}')
+    r = runner.invoke(app, ["integration", "install", "codex"])
+    assert r.exit_code == 1
+    assert "merge" in r.output and "--force" in r.output
+    r = runner.invoke(app, ["integration", "install", "codex", "--force"])
+    assert r.exit_code == 0
+    assert hooks.read_bytes() == (INTEGRATIONS / "codex" / "hooks.json").read_bytes()
+
+
+def test_integration_install_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    r = runner.invoke(app, ["integration", "install", "opencode"])
+    assert r.exit_code == 0, r.output
+    base = tmp_path / "xdg" / "opencode"
+    assert (base / "plugins" / "quorum.js").read_bytes() == PLUGIN.read_bytes()
+    assert (base / "commands" / "quorum-adopt.md").exists()
+
+
+def test_integration_claude_code_points_at_the_plugin_manager():
+    r = runner.invoke(app, ["integration", "install", "claude-code"])
+    assert r.exit_code == 0
+    assert "claude plugin install" in r.output
+    quoted = r.output.split("claude plugin install", 1)[1].split()[0]
+    assert Path(quoted).is_dir()
+
+
+def test_integration_list_reports_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ch"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    r = runner.invoke(app, ["integration", "list"])
+    assert r.exit_code == 0
+    assert "not installed" in r.output and "plugin-managed" in r.output
+    runner.invoke(app, ["integration", "install", "opencode"])
+    r = runner.invoke(app, ["integration", "list"])
+    assert "installed" in r.output
+
+
+def test_unknown_integration_lists_the_known_ones():
+    r = runner.invoke(app, ["integration", "install", "cursor"])
+    assert r.exit_code == 1
+    assert "claude-code, codex, opencode" in r.output

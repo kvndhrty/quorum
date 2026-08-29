@@ -136,7 +136,7 @@ def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
                             "--pr-url", "https://example.com/pr/1", "--home", str(home)])
     assert r.exit_code == 0
     r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
-    assert '"status": "pr"' in r.output and "https://example.com/pr/1" in r.output
+    assert "status:   pr" in r.output and "https://example.com/pr/1" in r.output
     r = runner.invoke(app, ["task", "tail", short, "--home", str(home)])
     assert "tidy the docs" in r.output  # the fake harness echoes its prompt
 
@@ -373,3 +373,166 @@ def test_superseded_hashes_never_contain_the_current_defaults():
             continue
         digest = hashlib.sha256(entry.read_bytes()).hexdigest()
         assert digest not in home_mod.SUPERSEDED_PROMPT_HASHES.get(entry.name, set())
+
+
+# -- Phase-A UX rails: help rendering, version, attention surfacing ----------
+
+
+def _plain(text: str) -> str:
+    """Help output minus ANSI codes — Rich force-colors on CI (GitHub Actions)."""
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def test_help_keeps_config_table_names():
+    """Rich treats [bracketed] text as markup; unescaped, the help would tell
+    users to edit "" instead of [harness.<name>] / [tasks] / [web]."""
+    r = runner.invoke(app, ["task", "add", "--help"])
+    assert "[harness.<name>]" in _plain(r.output)
+    assert "[tasks].default_harness" in _plain(r.output)
+    r = runner.invoke(app, ["web", "--help"])
+    assert "[web]" in _plain(r.output)
+
+
+def test_version_flag():
+    r = runner.invoke(app, ["--version"])
+    assert r.exit_code == 0
+    assert r.output.startswith("quorum ")
+
+
+def test_top_level_home_is_accepted(home: Path, monkeypatch):
+    monkeypatch.delenv("QUORUM_HOME")
+    r = runner.invoke(app, ["--home", str(home), "task", "list"])
+    assert r.exit_code == 0, r.output
+    assert "no tasks" in r.output
+
+
+def test_status_surfaces_attention_and_empty_state(home: Path):
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0
+    assert "no tasks" in r.output
+    assert "no projects registered" in r.output
+    assert "#attention" not in r.output
+
+    from quorum.messages import MessageBus
+
+    MessageBus(home).post("manager", "attention", text="need a human decision")
+    r = runner.invoke(app, ["status"])
+    assert "1 on #attention" in r.output
+    assert "quorum board read attention" in r.output
+
+
+# -- Phase-B UX rails: doctor, lifecycle, humanized output, validation -------
+
+
+def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
+    # fresh scaffold: no harness uncommented yet
+    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "no [harness.<name>] table" in r.output
+
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "default_harness is unset" in r.output
+
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace('default_harness = ""', 'default_harness = "fake"'))
+    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "all checks passed" in r.output
+    assert f"project {slug}" in r.output
+
+    # a harness whose binary is missing fails loudly
+    with open(cfg, "a", encoding="utf-8") as f:
+        f.write('\n[harness.ghost]\nstart = ["no-such-binary-xyz"]\n')
+    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "no-such-binary-xyz" in r.output and "not found on PATH" in r.output
+
+
+def test_task_show_is_human_first_json_on_request(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert r.exit_code == 0
+    assert "project:  " + slug in r.output
+    assert "tidy the docs" in r.output
+    assert not r.output.lstrip().startswith("{")
+
+    r = runner.invoke(app, ["task", "show", short, "--json", "--home", str(home)])
+    record = json.loads(r.output)
+    assert record["prompt"] == "tidy the docs"
+
+
+def test_list_commands_emit_json(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["task", "add", slug, "a task", "--harness", "fake", "--home", str(home)])
+    tasks = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    assert tasks[0]["project"] == slug
+    projects = json.loads(runner.invoke(app, ["project", "list", "--json", "--home", str(home)]).output)
+    assert projects[0]["slug"] == slug
+    agents = json.loads(runner.invoke(app, ["agent", "list", "--json", "--home", str(home)]).output)
+    assert any(a["name"] == "manager" for a in agents)
+    overview = json.loads(runner.invoke(app, ["status", "--json", "--home", str(home)]).output)
+    assert overview["attention"]["count"] == 0
+
+
+def test_status_legend_names_the_glyphs(home: Path):
+    r = runner.invoke(app, ["status", "--legend"])
+    assert r.exit_code == 0
+    assert "⚭" in r.output and "▶" in r.output and "‖" in r.output
+
+
+def test_project_add_validates_the_directory(home: Path, tmp_path: Path):
+    r = runner.invoke(app, ["project", "add", str(tmp_path / "nope"), "--home", str(home)])
+    assert r.exit_code == 1
+    assert "does not exist" in r.output
+
+    plain = tmp_path / "plain-dir"
+    plain.mkdir()
+    r = runner.invoke(app, ["project", "add", str(plain), "--home", str(home)])
+    assert r.exit_code == 1
+    assert "not a git repository" in r.output and "--force" in r.output
+
+    r = runner.invoke(app, ["project", "add", str(plain), "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "registered project" in r.output
+
+
+def test_destructive_commands_pass_through_without_a_tty(home: Path, tmp_path: Path):
+    """CliRunner's stdin is not a tty, so scripts and harness-driven agents
+    keep working with no prompt; --yes is for interactive shells."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["project", "remove", slug, "--home", str(home)])
+    assert r.exit_code == 0
+    assert "removed" in r.output
+
+
+def test_up_detach_and_down(home: Path):
+    r = runner.invoke(app, ["up", "--detach", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "running detached" in r.output
+    try:
+        r = runner.invoke(app, ["status", "--home", str(home)])
+        assert "supervisor: running" in r.output
+        r = runner.invoke(app, ["up", "--detach", "--home", str(home)])
+        assert r.exit_code == 1 and "already running" in r.output
+    finally:
+        r = runner.invoke(app, ["down", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "supervisor stopped" in r.output
+    r = runner.invoke(app, ["down", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "not running" in r.output
+
+
+def test_run_once_failure_is_one_line_not_a_traceback(home: Path):
+    write_plugin(home, "boom2", BOOM_PLUGIN)
+    r = runner.invoke(app, ["agent", "run-once", "boom2", "--home", str(home)])
+    assert r.exit_code == 1
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+    assert "intentional explosion" in r.output and "--verbose" in r.output

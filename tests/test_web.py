@@ -91,3 +91,21 @@ def test_agent_create_detail_and_control(client: TestClient, home: Path):
     inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
     types = [fsio.read_json(p)["type"] for p in fsio.sorted_entries(inbox)]
     assert types == ["agent.reload", "agent.pause"]
+
+
+def test_overview_carries_attention(client: TestClient, home: Path):
+    empty = client.get("/api/overview").json()["attention"]
+    assert empty["count"] == 0
+    MessageBus(home).post("manager", "attention", text="stuck: need credentials")
+    attn = client.get("/api/overview").json()["attention"]
+    assert attn["count"] == 1
+    assert attn["recent"][0]["text"] == "stuck: need credentials"
+
+
+def test_patch_deadline_empty_clears_it(client: TestClient, home: Path, tmp_path: Path):
+    ProjectRegistry(home).add(tmp_path, name="Clearable", deadline="2026-09-01")
+    r = client.patch("/api/projects/clearable", json={"deadline": ""})
+    assert r.status_code == 200
+    assert r.json()["deadline"] is None
+    r = client.patch("/api/projects/clearable", json={"notes": "kept"})
+    assert r.json()["deadline"] is None and r.json()["notes"] == "kept"

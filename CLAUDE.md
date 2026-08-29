@@ -39,10 +39,12 @@ policy lives in `prompts/manager.md`, not Python.
 Read `docs/architecture.md` first — it is the design record. The three invariants
 below govern nearly every change:
 
-1. **No privileged infrastructure.** `quorum up` is one ordinary foreground process
-   hosting an APScheduler `BackgroundScheduler`; task runs are detached child
-   processes (they survive supervisor restarts). No cron, systemd, daemonization,
-   root, or open ports (the web dashboard is opt-in, localhost-only).
+1. **No privileged infrastructure.** `quorum up` is one ordinary process hosting an
+   APScheduler `BackgroundScheduler` — foreground by default, or detached with
+   `up --detach` the same way task runs detach (`quorum down` SIGTERMs it and polls
+   the lock). Task runs are detached child processes (they survive supervisor
+   restarts). No cron, systemd, daemonization frameworks, root, or open ports (the
+   web dashboard is opt-in, localhost-only).
 2. **All state is plain files** under `QUORUM_HOME` (resolution: `--home` > `$QUORUM_HOME`
    > `./quorum-home` if present > `~/.quorum`). No database. Adding new durable state
    means adding a file layout, documented in `docs/architecture.md`.
@@ -90,7 +92,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   harness under `integrations/` (claude-code, codex, opencode — the last is
   a fail-soft JS plugin, kept a dumb pipe over the same CLI entry points),
   kept true by `tests/test_integrations.py` (the opencode plugin is driven
-  for real under node, skipped when node is absent).
+  for real under node, skipped when node is absent). The adapters ship
+  inside the wheel (hatch force-include → `quorum/integrations`) so
+  `quorum integration list|install` works from a package install;
+  `cli._integrations_root()` falls back to the repo dir in a checkout.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
@@ -136,7 +141,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   durable: `_schedule_agent` creates the job paused when the heartbeat says
   `paused`. An hourly janitor archives expired board messages and returns
   crash-orphaned `cur/` claims to `new/`.
-- `views.py` — the shared read-model assembled purely from files; `quorum status`, the
+- `views.py` — the shared read-model assembled purely from files (`overview` includes
+  `attention_summary`, a time-windowed read of the `attention` topic that `status`,
+  the TUI banner, and the web header all surface — the board has no read-state, so
+  "needs a look" is time-bounded, not tracked); `quorum status`, the
   web app, and the TUI are all pure readers of it. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/config calls shared with the

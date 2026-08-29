@@ -66,6 +66,8 @@ class ProjectRegistry:
         write_marker: bool = False,
     ) -> Project:
         pdir = Path(path).expanduser().resolve()
+        if not pdir.is_dir():
+            raise ValueError(f"{pdir} does not exist (or is not a directory)")
         name = name or pdir.name
         slug = fsio.slugify(name)
         if self._path(slug).exists():
@@ -117,7 +119,10 @@ class ProjectRegistry:
         if not path.exists():
             raise KeyError(slug)
         record = Project.model_validate(fsio.read_json(path))
-        record = record.model_copy(update={k: v for k, v in fields.items() if v is not None})
+        updates = {k: v for k, v in fields.items() if v is not None}
+        if updates.get("deadline") == "":  # None means "unchanged", so "" is the clear signal
+            updates["deadline"] = None
+        record = record.model_copy(update=updates)
         Project.model_validate(record.model_dump())  # re-check validators
         fsio.atomic_write_json(path, record.model_dump())
         return _merge_marker(record)
