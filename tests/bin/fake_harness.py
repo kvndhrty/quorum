@@ -2,7 +2,8 @@
 """A fake coding-harness CLI for tests.
 
 Invoked the way quorum invokes any harness: the prompt arrives as the last
-argv element (we take the longest argument). Behavior is controlled by env
+argv element (we take the longest argument), except in inject mode, where —
+like the real stream-json CLIs — it arrives on stdin. Behavior is controlled by env
 vars — in tests each [harness.<name>] table pins its own mode via its `env`
 field, so a fake *task* harness and a fake *manager* harness coexist:
 
@@ -20,13 +21,17 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     cap of 1 provably refuses the second
     manager_flood   echo + nudge the first task repeatedly until the CLI's
                     per-run action cap refuses; print the refusal
-    inject          echo + speak the stream-json injection protocol: emit a
-                    `result` event per turn and echo every stdin line back
-                    as an event; exits when the runner closes stdin. Before
-                    the first result it can seed its own mid-run message
-                    (FAKE_HARNESS_INJECT_POST below), which makes pump tests
-                    deterministic: the message provably lands *during* the
-                    run, yet before the runner could close an idle stdin.
+    inject          speak the real stream-json protocol, like claude does:
+                    the prompt arrives as the *first user turn on stdin*
+                    (never via argv — the real CLI ignores an argv prompt in
+                    this mode, the regression that motivated this fidelity);
+                    echo it, emit a `result` event per turn, and echo every
+                    further stdin line back as an event; exits when the
+                    runner closes stdin. Before the first result it can seed
+                    its own mid-run message (FAKE_HARNESS_INJECT_POST
+                    below), which makes pump tests deterministic: the
+                    message provably lands *during* the run, yet before the
+                    runner could close an idle stdin.
     hang            sleep far past any test timeout (exercises run timeouts)
     fail            exit 3 without output
 
@@ -55,6 +60,42 @@ def task_id_from(prompt: str) -> str | None:
     return m.group(1) if m else None
 
 
+def inject_main() -> int:
+    print(json.dumps({"argv": sys.argv[1:]}))
+    print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
+    # If the close logic ever regresses, die loudly instead of wedging CI.
+    watchdog = threading.Timer(30, lambda: os._exit(7))
+    watchdog.daemon = True
+    watchdog.start()
+    first = sys.stdin.readline().strip()
+    if not first:
+        print("no prompt turn arrived on stdin", file=sys.stderr)
+        return 4
+    content = json.loads(first).get("message", {}).get("content", [])
+    prompt = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
+    for line in prompt.splitlines():
+        print(f"PROMPT| {line}")
+    print(f"CWD| {os.getcwd()}")
+
+    post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
+    if post == "nudge":
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        quorum("task", "nudge", task_id, "switch to the fallback plan")
+    elif post == "tell":
+        quorum("manager", "tell", "pause new launches until tests pass")
+    print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        print(json.dumps({"type": "stdin", "received": json.loads(line)}), flush=True)
+        print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
+    return 0
+
+
 def main() -> int:
     mode = os.environ.get("FAKE_HARNESS_MODE", "echo")
     if mode == "fail":
@@ -62,6 +103,8 @@ def main() -> int:
     if mode == "hang":
         time.sleep(120)
         return 0
+    if mode == "inject":
+        return inject_main()
     prompt = max(sys.argv[1:], key=len) if len(sys.argv) > 1 else ""
     print(json.dumps({"argv": sys.argv[1:]}))
     print(json.dumps({"type": "system", "session_id": "sess-fake-123"}))
@@ -103,29 +146,6 @@ def main() -> int:
         print(f"ACT| note -> exit {noted.returncode}")
         if noted.returncode != 0 and noted.stderr.strip():
             print(f"REFUSED| {noted.stderr.strip().splitlines()[0]}")
-
-    elif mode == "inject":
-        sys.stdout.flush()
-        # If the close logic ever regresses, die loudly instead of wedging CI.
-        watchdog = threading.Timer(30, lambda: os._exit(7))
-        watchdog.daemon = True
-        watchdog.start()
-        post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
-        if post == "nudge":
-            task_id = task_id_from(prompt)
-            if not task_id:
-                print("no task id found in prompt", file=sys.stderr)
-                return 4
-            quorum("task", "nudge", task_id, "switch to the fallback plan")
-        elif post == "tell":
-            quorum("manager", "tell", "pause new launches until tests pass")
-        print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            print(json.dumps({"type": "stdin", "received": json.loads(line)}), flush=True)
-            print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
 
     elif mode == "manager_flood":
         m = re.search(r"- \[\w+\] (\S+)", prompt)

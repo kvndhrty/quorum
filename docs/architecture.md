@@ -108,7 +108,9 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
 4. compose the prompt: preamble template (teaches the report/inbox protocol)
    + task prompt + guidance section; pick the harness argv template
    (`resume` when a session id is known, else `start`) and substitute
-   `{prompt}`/`{session}`,
+   `{prompt}`/`{session}` — except for an inject harness, whose prompt
+   travels over stdin instead (below) and whose `{prompt}` elements are
+   dropped from the argv,
 5. spawn the harness with `cwd=<workdir>` and `QUORUM_HOME` in its
    environment; stream stdout line-by-line into `transcript.jsonl`,
    capturing a `session_id` (or codex-style `thread_id`) from any JSON
@@ -118,14 +120,19 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
 `--output-format stream-json`) can opt into steering *during* a run: the
-runner spawns it with a pipe on stdin, and a `GuidancePump` thread polls the
-task inbox and writes each claimed message as a stream-json user turn
-(`{"type": "user", "message": {...}}`), which the harness queues and picks
-up at its next turn boundary. Because a stream-json harness runs until
+runner spawns it with a pipe on stdin, and a `GuidancePump` thread writes
+the run's composed prompt as the opening stream-json user turn (`{"type":
+"user", "message": {...}}`), then polls the task inbox and writes each
+claimed message as a further turn, which the harness queues and picks up at
+its next turn boundary. Stdin is the whole prompt channel here — a
+stream-json CLI ignores an argv prompt and blocks until a turn arrives on
+stdin, so an inject harness that only got its prompt via argv would hang
+silently until the run timeout. Because a stream-json harness runs until
 stdin closes, the pump also owns ending the run: the protocol emits one
-`result` event per completed user turn, so the pump closes stdin once every
-delivered turn has its result and `new/` is empty — a run extends while
-guidance keeps arriving and ends at the first idle turn boundary. A message
+`result` event per completed user turn (the prompt turn is the first), so
+the pump closes stdin once every delivered turn has its result and `new/`
+is empty — a run extends while guidance keeps arriving and ends at the
+first idle turn boundary. A message
 that arrives after close, or lands on a harness without `inject`, waits in
 `new/` for the next run start, exactly as before; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgment: a message

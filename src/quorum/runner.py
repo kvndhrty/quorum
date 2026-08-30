@@ -15,10 +15,12 @@ A run is the unit of control for a generic harness. The runner:
    `resume` templates),
 6. records the run's exit in task.json and releases the lock.
 
-A harness with `inject = "stream-json"` additionally gets guidance *during*
-the run: the runner holds its stdin open and a `GuidancePump` forwards inbox
-messages as stream-json user turns, closing stdin at the first idle turn
-boundary so the run still ends on its own.
+A harness with `inject = "stream-json"` speaks over stdin instead of argv: a
+stream-json CLI reads user turns only from stdin (claude ignores an argv
+prompt entirely in this mode), so the runner delivers the composed prompt as
+the first user turn, and a `GuidancePump` forwards inbox messages as further
+turns *during* the run, closing stdin at the first idle turn boundary so the
+run still ends on its own.
 
 The runner never sets a task's status: status is whatever the harness last
 reported via `quorum task report`. A run that exits without reporting is the
@@ -66,35 +68,39 @@ GUIDANCE_POLL_SECONDS = 2.0
 
 
 class GuidancePump:
-    """Forwards inbox messages into a live harness over stream-json stdin.
+    """Speaks stream-json stdin to a live harness: the run's prompt first,
+    then inbox messages as they arrive.
 
     For a harness with `inject = "stream-json"` the runner spawns it with a
-    pipe on stdin and holds the pipe open; a background thread polls the
-    given inbox and writes each claimed message as a stream-json user turn
-    (`{"type": "user", "message": {...}}`), which the harness queues and
-    picks up at its next turn boundary. This is the Claude Code
-    `--input-format stream-json` protocol; the harness's argv template must
-    include the matching flags.
+    pipe on stdin and holds the pipe open; a background thread writes the
+    run's prompt as the opening stream-json user turn (`{"type": "user",
+    "message": {...}}`), then polls the given inbox and writes each claimed
+    message as a further turn, which the harness queues and picks up at its
+    next turn boundary. This is the Claude Code `--input-format stream-json`
+    protocol; the harness's argv template must include the matching flags.
+    Stdin is the *only* prompt channel — a stream-json CLI ignores an argv
+    prompt, so `build_harness_argv` strips `{prompt}` for inject harnesses.
 
     A stream-json harness runs until stdin closes, so ending the run is the
     pump's job too. The protocol emits one `result` event per completed user
-    turn (the argv prompt is the first). The pump counts results against
+    turn (the prompt turn is the first). The pump counts results against
     deliveries and closes stdin once every delivered turn has its result and
     nothing is waiting in the inbox — so a run naturally extends while
     guidance keeps arriving and ends at the first idle turn boundary.
     Anything arriving after close stays in `new/` for the next run.
 
     The lock guards only the counters and the closed flag; inbox and stdin
-    I/O runs outside it (there is one delivering thread), so a `result`
-    event on the transcript thread never waits on filesystem work. A claim
-    is counted *before* its write so the close condition can't fire while a
-    message is in flight.
+    I/O runs outside it (there is one delivering thread, so the prompt turn
+    always precedes guidance), and a `result` event on the transcript thread
+    never waits on filesystem work. A claim is counted *before* its write so
+    the close condition can't fire while a message is in flight.
     """
 
-    def __init__(self, home: Path, inbox: str, stdin):
+    def __init__(self, home: Path, inbox: str, stdin, prompt: str):
         self._bus = MessageBus(home)
         self._inbox = inbox
         self._stdin = stdin
+        self._prompt = prompt
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._closed = False
@@ -120,9 +126,27 @@ class GuidancePump:
         self._close()
 
     def _loop(self) -> None:
+        if not self._write_turn(self._prompt):
+            return  # harness died before its prompt; the run fails at exit
         while not self._stop.is_set():
             self._deliver_pending()
             self._stop.wait(GUIDANCE_POLL_SECONDS)
+
+    def _write_turn(self, text: str) -> bool:
+        turn = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+            },
+        }
+        try:
+            self._stdin.write(json.dumps(turn) + "\n")
+            self._stdin.flush()
+        except (OSError, ValueError):
+            self._close()
+            return False
+        return True
 
     def _deliver_pending(self) -> None:
         for claimed in self._bus.claim(self._inbox):
@@ -131,21 +155,10 @@ class GuidancePump:
                     claimed.reject()
                     return
                 self._delivered += 1
-            turn = {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": guidance_note(claimed.message)}],
-                },
-            }
-            try:
-                self._stdin.write(json.dumps(turn) + "\n")
-                self._stdin.flush()
-            except (OSError, ValueError):
+            if not self._write_turn(guidance_note(claimed.message)):
                 with self._lock:
                     self._delivered -= 1
                 claimed.reject()  # harness is gone; back to new/ for the next run
-                self._close()
                 return
             claimed.ack()
 
@@ -171,17 +184,21 @@ class GuidancePump:
 
 
 @contextmanager
-def guidance_pump(home: Path, inbox: str, harness: HarnessConfig, proc: subprocess.Popen):
+def guidance_pump(
+    home: Path, inbox: str, harness: HarnessConfig, proc: subprocess.Popen, prompt: str
+):
     """Attach a GuidancePump to a live harness run when its config opts in.
 
     The one seam for inject-mode lifecycle: yields the started pump (or None
-    for a harness without `inject`) and stops it on exit. Callers pipe the
-    process's stdin iff `harness.inject` is set.
+    for a harness without `inject`, whose prompt travels via argv instead)
+    and stops it on exit. Callers pipe the process's stdin iff
+    `harness.inject` is set; the pump then owns delivering `prompt` as the
+    opening user turn.
     """
     if not harness.inject:
         yield None
         return
-    pump = GuidancePump(home, inbox, proc.stdin)
+    pump = GuidancePump(home, inbox, proc.stdin, prompt)
     pump.start()
     try:
         yield pump
@@ -257,8 +274,18 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
 
 
 def build_harness_argv(harness: HarnessConfig, prompt: str, session: str | None = None) -> list[str]:
-    """Substitute {prompt}/{session} into the start or resume template."""
+    """Substitute {prompt}/{session} into the start or resume template.
+
+    A template with no "{prompt}" gets the prompt appended as the final
+    argument — except for an inject harness: a stream-json CLI reads user
+    turns only from stdin and ignores an argv prompt, so the prompt travels
+    through the `GuidancePump` instead and "{prompt}" elements are dropped
+    (`claude -p "{prompt}" ...` becomes `claude -p ...`).
+    """
     template = harness.resume if (session and harness.resume) else harness.start
+    if harness.inject:
+        template = [e for e in template if e != "{prompt}"]
+        return [e.replace("{prompt}", "").replace("{session}", session or "") for e in template]
     argv, saw_prompt = [], False
     for element in template:
         if "{prompt}" in element:
@@ -354,7 +381,7 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         )
         session = task.session
 
-        with guidance_pump(home, inbox_name(task.id), harness, proc) as pump:
+        with guidance_pump(home, inbox_name(task.id), harness, proc, prompt) as pump:
 
             def on_event(event: object) -> None:
                 nonlocal session

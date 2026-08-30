@@ -100,9 +100,11 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
   `[harness.<name>]` argv template → stream stdout to `transcript.jsonl`, capturing
-  `session_id`/`thread_id`. A harness with `inject = "stream-json"` also gets
-  mid-run guidance: `GuidancePump` holds stdin open, forwards inbox messages as
-  stream-json user turns, and closes stdin at the first idle `result` event (the
+  `session_id`/`thread_id`. A harness with `inject = "stream-json"` gets its
+  prompt over stdin instead of argv (stream-json CLIs ignore an argv prompt, so
+  `{prompt}` is dropped from its argv): `GuidancePump` holds stdin open, writes
+  the prompt as the opening user turn, forwards inbox messages as further
+  turns, and closes stdin at the first idle `result` event (the
   manager reuses the pump over the `manager` inbox). The runner **never sets task
   status**, and refuses attached tasks outright — a substrate rail (same class as
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting

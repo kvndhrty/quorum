@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, runner, tasks
-from quorum.config import load_config
+from quorum.config import HarnessConfig, load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.runner import RunnerError, run_task
@@ -178,6 +178,39 @@ def test_inject_pump_delivers_mid_run_guidance(home: Path, project: str, monkeyp
     inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
     assert fsio.sorted_entries(inbox / "new") == []  # consumed, not re-delivered next run
     assert fsio.sorted_entries(inbox / "cur") == []
+
+
+def test_build_harness_argv_strips_prompt_for_inject_harnesses():
+    """A stream-json CLI reads user turns only from stdin and ignores an argv
+    prompt (this is how real claude behaves), so inject templates lose their
+    "{prompt}" element and never get the prompt appended."""
+    inject = HarnessConfig(start=["h", "-p", "{prompt}", "--flag"], inject="stream-json")
+    assert runner.build_harness_argv(inject, "the prompt") == ["h", "-p", "--flag"]
+    bare = HarnessConfig(start=["h"], inject="stream-json")
+    assert runner.build_harness_argv(bare, "the prompt") == ["h"]
+    plain = HarnessConfig(start=["h"])
+    assert runner.build_harness_argv(plain, "the prompt") == ["h", "the prompt"]
+
+
+def test_inject_prompt_arrives_over_stdin_not_argv(home: Path, project: str, monkeypatch):
+    """The composed prompt reaches an inject harness as the pump's opening
+    stream-json user turn — the regression that hung every real claude run:
+    the prompt sat on argv, which the stream-json protocol ignores, and the
+    harness waited on stdin until the run timeout killed it."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject")
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "improve the README", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    entries = fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    argvs = [e["event"]["argv"] for e in entries if "argv" in e.get("event", {})]
+    assert argvs and all("improve the README" not in arg for arg in argvs[0])
+    text = transcript_text(home, task.id)
+    assert "improve the README" in text  # the prompt reached the harness via stdin…
+    assert f"Task ID: {task.short_id}" in text  # …preamble included
 
 
 def test_inject_pump_closes_an_idle_run(home: Path, project: str, monkeypatch):
