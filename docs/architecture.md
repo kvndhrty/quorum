@@ -115,7 +115,49 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
    environment; stream stdout line-by-line into `transcript.jsonl`,
    capturing a `session_id` (or codex-style `thread_id`) from any JSON
    event that carries one,
-6. append the run (exit code, timestamps) to `task.json`; release the lock.
+6. optionally auto-commit (below),
+7. append the run (exit code, timestamps) to `task.json`; release the lock.
+
+**Auto-commit (`[tasks].auto_commit`, default off).** The delivery protocol
+in the task preamble and the `STRANDED-WORK` flag in views and the digest
+are advisory and corrective: neither *guarantees* work survives a harness
+that crashes mid-edit or ignores its instructions. This flag is the hard
+guarantee — after the harness exits, if the working tree is dirty, the
+runner does `git add -A` and commits it as "quorum: auto-commit uncommitted
+work after run". Branches outlive worktrees, so the work can then only be
+found, never lost. Deliberately narrow:
+
+- it only ever fires inside a task's *own* worktree (paths compared
+  `resolve()`d, so a symlinked home spelling can't silently disable it) — a
+  `--no-worktree` task runs in the user's checkout on whatever branch they
+  had out, which quorum does not own,
+- it never pushes: that would assume a remote and credentials, and an
+  unpushed branch is already reported as stranded work,
+- it is mechanical, not a judgement — the runner still never sets status,
+  and a tree the harness committed itself gets no empty extra commit,
+- it is built for messy crash states: `status`/staging use
+  `--untracked-files=all` (a repo-level `status.showUntrackedFiles no` must
+  not hide an untracked-only crash — `workdir_git_state` sees through it
+  too), and the commit runs `--no-verify` with signing off, because a
+  failing pre-commit hook or a pinentry prompt would defeat the net in
+  exactly the unattended case it exists for,
+- two states it refuses to conclude, leaving the tree dirty and flagged:
+  a detached HEAD (the commit would belong to no branch and die with the
+  worktree) and an in-progress merge/rebase/cherry-pick (`git add -A` +
+  commit would finish it, conflict markers and all),
+- a task whose harness already reported a terminal status keeps its tree as
+  the harness left it — sweeping stray scratch files into a *finished*
+  branch would re-flag a done task as stranded and push junk toward its PR,
+- under `[sandbox].use_nono` the runner is already inside the kernel
+  sandbox when the run ends and cannot run git at all, so the net skips
+  with an explicit transcript note instead of failing cryptically,
+- what happened is recorded twice: a `quorum: auto-committed N path(s) as
+  <sha>` transcript line, and durably as `auto_commit` on the run's entry
+  in `task.json` — the record that quorum, not the harness, made that
+  commit,
+- a failure (no git identity, a stale index lock) is recorded the same two
+  ways rather than raised: the tree simply stays dirty, which is the state
+  `workdir_git_state` already reports for the manager to chase.
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`

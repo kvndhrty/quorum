@@ -105,7 +105,14 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `{prompt}` is dropped from its argv): `GuidancePump` holds stdin open, writes
   the prompt as the opening user turn, forwards inbox messages as further
   turns, and closes stdin at the first idle `result` event (the
-  manager reuses the pump over the `manager` inbox). The runner **never sets task
+  manager reuses the pump over the `manager` inbox). With `[tasks].auto_commit`
+  (default off) a dirty worktree is committed to the task branch after the harness
+  exits — `auto_commit_workdir` + `_maybe_auto_commit`, a mechanical safety net
+  that never pushes, never sets status, never fires outside a task's own
+  (resolved) worktree or on a terminal-status task, refuses detached-HEAD and
+  mid-merge trees, bypasses hooks/signing, skips (with a note) under the nono
+  sandbox, and records what it did on the `TaskRun` (`auto_commit`) and in the
+  transcript instead of raising. The runner **never sets task
   status**, and refuses attached tasks outright — a substrate rail (same class as
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
   the user's live checkout. `launch_detached` spawns `python -m quorum task run`
@@ -183,7 +190,7 @@ and `docs/architecture.md` in the same commit so the record stays true.
   (file-defined agents, atomic whole-file writes via `write_agent_file`/`create_agent`;
   merged over `[agents.*]` at load, file wins; names validated + reserved-checked).
   `[harness.<name>]` tables are argv templates; `[tasks]` holds
-  worktree/default-harness; `AgentConfig.auto_pause=false` exempts an agent from the
+  worktree/default-harness/auto-commit; `AgentConfig.auto_pause=false` exempts an agent from the
   5-failure auto-pause (the manager uses it). Schedules are validated by regex and
   translated to APScheduler trigger kwargs by `parse_schedule`.
 - `projects.py` — `projects/<slug>.json` is canonical, but a `.quorum.toml` marker inside

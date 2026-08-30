@@ -59,6 +59,7 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        errors="replace",  # a stray non-UTF-8 byte must not kill the tick
         bufsize=1,
         env=env,
     )
