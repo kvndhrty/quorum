@@ -296,6 +296,34 @@ def test_pause_landing_mid_tick_survives_the_completion_write(home: Path):
     assert hb["last_end"]                # timing fields still recorded
 
 
+def test_recovered_tick_clears_stale_failure_fields(home: Path):
+    """Heartbeat writes are merges, so a successful tick must actively clear
+    `error`/`consecutive_failures` — otherwise an agent that failed once reads
+    as broken in every dashboard until someone edits the file by hand."""
+    (home / "plugins" / "recovers.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Recovers(Agent):\n"
+        "    def tick(self):\n"
+        "        if not (self.ctx.home / 'fixed').exists():\n"
+        "            raise RuntimeError('llm service down')\n"
+    )
+    config = write_config(
+        home,
+        '[agents.rec]\ntype = "recovers:Recovers"\nschedule = "every 5m"\nauto_pause = false\n',
+    )
+    sup = Supervisor(home, config)
+    sup.run_agent_tick("rec")
+    hb = fsio.read_json(home / "state/agents/rec/heartbeat.json")
+    assert hb["status"] == "error" and hb["consecutive_failures"] == 1
+
+    (home / "fixed").write_text("")
+    sup.run_agent_tick("rec")
+    hb = fsio.read_json(home / "state/agents/rec/heartbeat.json")
+    assert hb["status"] == "idle"
+    assert not hb.get("error")
+    assert hb["consecutive_failures"] == 0
+
+
 def test_auto_pause_false_keeps_a_failing_agent_scheduled(home: Path):
     """The manager's crash story: LLM down => every tick fails, but the agent
     must never be paused, so the first tick after service returns recovers."""
