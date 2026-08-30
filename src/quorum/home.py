@@ -33,7 +33,7 @@ worktree = true           # each task runs in its own git worktree
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
 #resume = ["claude", "-p", "{prompt}", "--resume", "{session}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
 #          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)"]
-#inject = "stream-json"   # delivers nudges into a running session
+#inject = "stream-json"   # delivers the prompt + nudges over stdin (stream-json CLIs ignore an argv prompt)
 
 #[harness.codex]
 #start  = ["codex", "exec", "--json", "{prompt}"]

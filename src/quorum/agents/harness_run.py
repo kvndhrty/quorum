@@ -62,7 +62,7 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
         bufsize=1,
         env=env,
     )
-    with guidance_pump(ctx.home, ctx.name, harness, proc) as pump:
+    with guidance_pump(ctx.home, ctx.name, harness, proc, prompt) as pump:
         reader = threading.Thread(
             target=stream_transcript,
             args=(proc, transcript),

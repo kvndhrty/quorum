@@ -48,10 +48,14 @@ class HarnessConfig(BaseModel):
     persists between runs, so a fresh session still sees prior progress.
 
     `inject = "stream-json"` opts a harness into mid-run guidance delivery:
-    the runner keeps the harness's stdin open and forwards inbox messages as
-    stream-json user turns (the Claude Code `--input-format stream-json`
-    protocol). The argv template must include the matching flags; harnesses
-    without it get guidance at the next run start, as before.
+    the runner keeps the harness's stdin open, delivers the composed prompt
+    as the opening stream-json user turn, and forwards inbox messages as
+    further turns (the Claude Code `--input-format stream-json` protocol,
+    which reads user turns only from stdin and ignores an argv prompt — so
+    "{prompt}" elements are dropped from an inject template's argv). The
+    argv template must include the matching flags; harnesses without
+    `inject` get the prompt via argv and guidance at the next run start,
+    as before.
     """
 
     start: list[str]

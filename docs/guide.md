@@ -112,14 +112,20 @@ Notes:
   at the start of its *next* run. A harness that speaks the Claude Code
   stream-json protocol can do better: set `inject = "stream-json"` and pair
   `--input-format stream-json` with `--output-format stream-json` in its
-  templates (both matter — the runner writes nudges to the harness's stdin
-  as user turns, and it watches stdout `result` events to know when the
-  harness is idle so it can end the run). A nudge sent while the run is
-  live then reaches the agent at its next turn boundary, in the same
-  session, no new run needed; the run ends on its own at the first idle
-  turn with an empty inbox. Don't set `inject` without the flags: a
-  harness that never emits stream-json `result` events will wait on stdin
-  indefinitely.
+  templates (both matter — the runner writes user turns to the harness's
+  stdin, and it watches stdout `result` events to know when the harness is
+  idle so it can end the run). With `inject` set, stdin becomes the *only*
+  prompt channel: a stream-json CLI ignores an argv prompt entirely, so the
+  runner delivers the composed prompt as the opening user turn and drops any
+  `{prompt}` element from the template (`claude -p "{prompt}" ...` is
+  invoked as `claude -p ...`; you can omit `{prompt}` from inject templates
+  altogether). A nudge sent while the run is live then reaches the agent at
+  its next turn boundary, in the same session, no new run needed; the run
+  ends on its own at the first idle turn with an empty inbox. Don't set
+  `inject` without the flags: a harness that never emits stream-json
+  `result` events will wait on stdin indefinitely — and don't pair the
+  flags with an unset `inject`, or the CLI waits for a stdin prompt the
+  runner never sends.
 - **Autonomy flags.** Runs are unattended: a harness that stops to ask for
   interactive permission stalls silently on its first denied tool call, and
   the manager will eventually poke and resume it to no effect. Grant
