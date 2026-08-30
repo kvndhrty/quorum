@@ -77,7 +77,8 @@ class TasksConfig(BaseModel):
     # Opt-in safety net (runner.py): after a run, commit whatever the harness
     # left uncommitted in its worktree, so a crashed or forgetful harness can
     # never lose work — branches outlive worktrees. Off by default, and only
-    # ever applied to a task's own worktree, never the user's checkout.
+    # ever applied to a task's own worktree, never the user's checkout; a
+    # nono-sandboxed run skips it with a note (the sandbox blocks git).
     auto_commit: bool = False
 
 

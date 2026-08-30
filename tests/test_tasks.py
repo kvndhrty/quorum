@@ -294,6 +294,7 @@ def test_auto_commit_captures_work_the_harness_left_behind(home: Path, project: 
     assert "auto-committed 1 path(s)" in transcript_text(home, task.id)
     fresh = TaskStore(home).get(task.id)
     assert fresh.runs[0].exit_code == 0 and fresh.status == "queued"
+    assert fresh.runs[0].auto_commit.startswith("auto-committed 1 path(s)")  # durable record
 
 
 def test_auto_commit_is_off_by_default(home: Path, project: str, monkeypatch):
@@ -338,15 +339,152 @@ def test_auto_commit_is_a_no_op_on_a_clean_tree(tmp_path: Path):
 def test_auto_commit_failure_is_recorded_not_raised(home: Path, project: str, tmp_path: Path):
     """A net that cannot fire leaves a note and the dirty tree behind — never
     an exception that would cost the run its record."""
-    task = TaskStore(home).add(project, "x", "fake")
     loose = tmp_path / "loose"
     loose.mkdir()
     with pytest.raises(RunnerError, match="git status failed"):
         runner.auto_commit_workdir(loose)
 
-    runner._auto_commit_after_run(home, task, loose)  # same failure, absorbed
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "x", "fake")
+    assert run_task(home, config, task.id) == 0  # creates the worktree
+    workdir = tasks.worktree_path(home, task.id)
+    (workdir / "left.txt").write_text("x")
+    repo_git(workdir, "checkout", "--detach")  # a state the net refuses to commit in
 
+    note = runner._maybe_auto_commit(home, config, store, store.get(task.id), workdir)
+
+    assert note.startswith("auto-commit failed")  # absorbed into a note...
     assert "auto-commit failed" in transcript_text(home, task.id)
+    assert "left.txt" in git_out(workdir, "status", "--porcelain")  # ...tree left dirty
+
+
+def test_auto_commit_sees_untracked_files_hidden_by_repo_config(
+    home: Path, project: str, tmp_path: Path, monkeypatch
+):
+    """`status.showUntrackedFiles no` (a git-recommended perf setting on big
+    repos, shared with linked worktrees) must not blind the net to an
+    untracked-only crash — the net's core case."""
+    repo_git(tmp_path / "proj", "config", "status.showUntrackedFiles", "no")
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    workdir = tasks.worktree_path(home, task.id)
+    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
+    # the stranded-work probe must see through the same setting
+    (workdir / "more.txt").write_text("x")
+    assert tasks.workdir_git_state(TaskStore(home).get(task.id))["dirty"] == 1
+
+
+def test_auto_commit_bypasses_hooks_and_signing(
+    home: Path, project: str, tmp_path: Path, monkeypatch
+):
+    """A failing pre-commit hook (or a signing prompt) would defeat the net in
+    exactly the crashed-harness case it exists for — commits go through with
+    --no-verify and signing off."""
+    hook = tmp_path / "proj" / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    workdir = tasks.worktree_path(home, task.id)
+    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
+
+
+def test_auto_commit_declines_off_branch_and_in_progress_states(tmp_path: Path):
+    """Detached HEAD: the commit would belong to no branch and die with the
+    worktree. Merge in progress: add -A + commit would *conclude* the merge,
+    conflict markers and all. Both raise; the tree stays dirty and flagged."""
+    detached = make_repo(tmp_path, "detached")
+    repo_git(detached, "checkout", "--detach")
+    (detached / "x.txt").write_text("x")
+    with pytest.raises(RunnerError, match="detached"):
+        runner.auto_commit_workdir(detached)
+
+    merging = make_repo(tmp_path, "merging")
+    (merging / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    (merging / "y.txt").write_text("y")
+    with pytest.raises(RunnerError, match="in progress"):
+        runner.auto_commit_workdir(merging)
+
+
+def test_auto_commit_leaves_a_terminal_task_alone(home: Path, project: str, monkeypatch):
+    """A harness that reported done owns its tree's final state: sweeping
+    leftovers into a finished branch would re-flag the task as stranded and
+    push junk toward its PR."""
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "report")  # reports status=done
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    workdir = tasks.worktree_path(home, task.id)
+    assert git_out(workdir, "log", "-1", "--pretty=%s") == "init"
+    assert "scratch.txt" in git_out(workdir, "status", "--porcelain")
+    assert TaskStore(home).get(task.id).runs[0].auto_commit is None
+
+
+def test_auto_commit_skips_sandboxed_runs_with_a_note(home: Path, project: str):
+    """Under [sandbox].use_nono the runner can no longer run git at all, so
+    the net says so instead of failing cryptically every run."""
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "x", "fake")
+    assert run_task(home, config, task.id) == 0  # creates the worktree
+    workdir = tasks.worktree_path(home, task.id)
+    (workdir / "left.txt").write_text("x")
+    with open(home / "config.toml", "a") as fh:
+        fh.write("[sandbox]\nuse_nono = true\n")
+    sandboxed = load_config(home)
+
+    note = runner._maybe_auto_commit(home, sandboxed, store, store.get(task.id), workdir)
+
+    assert "sandboxed" in note and note in transcript_text(home, task.id)
+    assert "left.txt" in git_out(workdir, "status", "--porcelain")  # untouched
+
+
+def test_auto_commit_counts_paths_not_status_lines(tmp_path: Path):
+    """An untracked directory is one porcelain line however many files it
+    holds; the note must count the files actually committed."""
+    repo = make_repo(tmp_path, "many")
+    gen = repo / "gen"
+    gen.mkdir()
+    for i in range(3):
+        (gen / f"f{i}.txt").write_text("x")
+    assert runner.auto_commit_workdir(repo).startswith("auto-committed 3 path(s)")
+
+
+def test_auto_commit_ownership_check_survives_symlinked_home(
+    home: Path, project: str, tmp_path: Path
+):
+    """The workdir/worktree comparison resolves both sides, so a symlinked
+    spelling of the home never silently disables the net."""
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "x", "fake")
+    assert run_task(home, config, task.id) == 0
+    workdir = tasks.worktree_path(home, task.id)
+    (workdir / "left.txt").write_text("x")
+    alias = tmp_path / "home-alias"
+    alias.symlink_to(home)
+
+    note = runner._maybe_auto_commit(alias, config, store, store.get(task.id), workdir)
+
+    assert note.startswith("auto-committed 1 path(s)")
 
 
 def test_missing_harness_and_unknown_task_fail_loud(home: Path, project: str):

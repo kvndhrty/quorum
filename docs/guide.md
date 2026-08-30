@@ -80,9 +80,17 @@ told to commit and push before reporting done, and quorum flags a task whose
 worktree still holds uncommitted or unpushed work — but a harness that
 crashes mid-edit obeys neither. Turn this on and the runner commits anything
 left behind onto the task branch (`quorum: auto-commit uncommitted work
-after run`), so it can be reviewed or reset later instead of vanishing with
-the worktree. It never pushes, and never touches a `--no-worktree` task,
-which runs in your own checkout.
+after run`, bypassing commit hooks and signing — the run is unattended), so
+it can be reviewed or reset later instead of vanishing with the worktree.
+It never pushes; never touches a `--no-worktree` task, which runs in your
+own checkout; leaves a task alone once its harness reported `done` (the
+finished tree is the harness's statement, not quorum's to amend); and
+declines a detached HEAD or half-finished merge rather than commit
+something misleading — the tree then stays dirty and flagged as stranded.
+Each rescue (or failure) is noted in the transcript and on the run's entry
+in `task.json`. One interaction to know: with `[sandbox] use_nono = true`
+the sandboxed runner cannot run git after the harness exits, so the net
+skips with a transcript note — rely on the stranded-work flag there.
 
 ## Harnesses
 

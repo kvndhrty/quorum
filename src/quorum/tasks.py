@@ -44,6 +44,10 @@ class TaskRun(BaseModel):
     started_at: str
     ended_at: str | None = None
     exit_code: int | None = None
+    # The runner's auto-commit note for this run ("auto-committed N path(s)
+    # as <sha>" / "auto-commit failed: ..."), None when the net didn't fire —
+    # the durable record that quorum, not the harness, committed that work.
+    auto_commit: str | None = None
 
 
 class Task(BaseModel):
@@ -344,7 +348,9 @@ def workdir_git_state(task: Task) -> dict[str, Any] | None:
         except (OSError, subprocess.SubprocessError):
             return None
 
-    status = git("status", "--porcelain")
+    # --untracked-files=all: a repo-level `status.showUntrackedFiles no`
+    # must not hide an untracked-only dirty tree from the stranded-work probe.
+    status = git("status", "--porcelain", "--untracked-files=all")
     if status is None or status.returncode != 0:
         return None
     dirty = sum(1 for line in status.stdout.splitlines() if line.strip())
