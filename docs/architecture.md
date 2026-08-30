@@ -260,15 +260,25 @@ without ever second-guessing a choice.
 spinning inside a single run, repeating the same failing tool call while
 `runner.lock` stays live and the transcript keeps growing, which to every
 other signal looks like healthy work. `loop_signal` (still pure over files,
-no state file) scans the last `LOOP_SCAN_LINES` (120) transcript entries,
-extracts tool calls, and scores the last `LOOP_WINDOW_CALLS` (12) of them.
+no state file) scans a transcript tail bounded twice — `LOOP_SCAN_LINES`
+(120) entries from at most `LOOP_SCAN_BYTES` (2 MiB), the byte cap being
+the binding one on payload-heavy transcripts — extracts tool calls, and
+scores the last `LOOP_WINDOW_CALLS` (12) of them. The evidence must be
+current: only a live runner is scored (the transcript is append-only; a
+dead task would stay flagged forever) and only entries newer than the last
+*completed* run (a relaunch is not indicted by its predecessor's spinning).
 Extraction is deliberately loose — a recursive walk for any nested dict
 tagged `tool_use` / `tool_call` / `function_call` / `command_execution` /
-`local_shell_call` (or carrying a `tool_name`), so claude-, codex- and
-opencode-shaped events all normalize — and each call becomes
-`name + sha256(arguments)[:12]`. Hashing is what keeps argument payloads
-(paths, secrets, file contents) out of the rendered digest: the line carries
-a tool name and counts, never a payload.
+`local_shell_call` (or carrying a string `tool_name`), counted once per
+call id, so harnesses that pair started/completed events (codex) don't
+double-count — and each call becomes `name + sha256(arguments)[:12]`.
+It sees only structured JSON events: a harness that prints plain text (the
+shipped opencode template, most custom scripts) is unobservable here, and
+absence of the flag is not evidence of health. The hash keeps argument
+payloads (paths, secrets, file contents) off the *flag line itself* — a
+tool name and counts, never a payload — but it is not a secrecy boundary:
+the digest's adjacent `out|` tail lines still quote raw events, truncated
+to 160 characters.
 
 A flag needs **both** a call repeated `LOOP_REPEAT_THRESHOLD` (4) times *and*
 that repetition dominating the window (`distinct/total <= LOOP_DISTINCT_RATIO`,

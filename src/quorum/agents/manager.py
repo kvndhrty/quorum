@@ -56,15 +56,20 @@ RECENT_TERMINAL_HOURS = 24
 # observation the manager judges, never a rail, so a wrong threshold costs a
 # noisy digest line rather than a killed run.
 #
-# The tradeoff is set to prefer false negatives. LOOP_SCAN_LINES bounds the
-# read (the digest stays cheap); only the last LOOP_WINDOW_CALLS *tool calls*
-# are scored, and a flag needs BOTH a call repeated LOOP_REPEAT_THRESHOLD
-# times AND that repetition dominating the window (distinct/total ratio at or
-# below LOOP_DISTINCT_RATIO). The ratio gate is what keeps legitimate
-# patterns quiet — polling that interleaves other work, retries with backoff,
-# a handful of repeated reads amid varied calls — at the cost of missing a
-# slow loop that only repeats three times in the window.
+# The tradeoff is set to prefer false negatives. The scan is bounded twice —
+# LOOP_SCAN_LINES entries, read from at most LOOP_SCAN_BYTES of transcript
+# (the byte cap is the binding one on transcripts with big tool payloads, so
+# the effective scan depth is data-dependent; it is sized so that even a loop
+# of ~60KB entries keeps well over a window of calls in view). Only the last
+# LOOP_WINDOW_CALLS *tool calls* are scored, and a flag needs BOTH a call
+# repeated LOOP_REPEAT_THRESHOLD times AND that repetition dominating the
+# window (distinct/total ratio at or below LOOP_DISTINCT_RATIO). The ratio
+# gate is what keeps legitimate patterns quiet — polling that interleaves
+# other work, retries with backoff, a handful of repeated reads amid varied
+# calls — at the cost of missing a slow loop that only repeats three times
+# in the window.
 LOOP_SCAN_LINES = 120
+LOOP_SCAN_BYTES = 2 * 1024 * 1024
 LOOP_WINDOW_CALLS = 12
 LOOP_REPEAT_THRESHOLD = 4
 LOOP_DISTINCT_RATIO = 0.5
@@ -72,16 +77,18 @@ LOOP_DISTINCT_RATIO = 0.5
 # Tool-call extraction is harness-shape-dependent, so it is loose by design:
 # any nested dict tagged with one of these kinds counts as a call, whatever
 # harness emitted it (claude `tool_use`, codex `command_execution`, ...).
+# It only sees structured JSON events: a harness that prints plain text (the
+# shipped opencode template, most custom scripts) is unobservable here, and
+# the absence of a flag says nothing about it.
 TOOL_CALL_KINDS = frozenset(
     {"tool_use", "tool_call", "function_call", "command_execution", "local_shell_call"}
 )
-TOOL_NAME_KEYS = ("name", "tool_name", "tool", "item_type", "type")
-TOOL_ARG_KEYS = ("input", "arguments", "args", "parameters", "command", "cmd")
-# Per-call identifiers and timings differ every call; including them would
-# make every call look unique and the detector would never fire.
-VOLATILE_KEYS = frozenset(
-    {"id", "at", "call_id", "tool_use_id", "timestamp", "time", "duration", "duration_ms"}
-)
+TOOL_NAME_KEYS = ("name", "tool_name", "tool")
+TOOL_ARG_KEYS = ("input", "arguments", "argv", "args", "parameters", "params", "command", "cmd")
+# A harness may emit more than one event per call (codex pairs item.started
+# with item.completed, both carrying the full call); the call id is how one
+# call is counted once, whatever the event multiplicity.
+CALL_ID_KEYS = ("id", "call_id", "tool_use_id")
 LOOP_RECURSION_DEPTH = 8
 
 
@@ -89,14 +96,26 @@ def transcript_path(home: Path) -> Path:
     return actor.transcript_path(home, "manager")
 
 
-def _tool_fingerprints(node: object, depth: int = 0) -> list[str]:
-    """Best-effort tool calls in one transcript entry, as stable fingerprints.
+def _tool_fingerprints(node: object, depth: int = 0) -> list[tuple[str | None, str]]:
+    """Best-effort tool calls in one transcript entry: (call id, fingerprint).
 
     Walks the event structure rather than pattern-matching one harness's
-    schema, and fingerprints `name + hash(arguments)`. The hash matters twice:
-    it makes "the same call" comparable across harnesses, and it keeps raw
-    argument text (paths, secrets, whole file contents) out of the digest —
-    the rendered flag carries a count and a tool name, never a payload.
+    schema. A call is a dict tagged with a TOOL_CALL_KINDS kind or carrying a
+    string `tool_name`; its fingerprint is `name + sha256(arguments)[:12]`,
+    the arguments taken from the first TOOL_ARG_KEYS hit. No recognized arg
+    key hashes the name alone — a coarser signal, but a predictable one (a
+    whole-node fallback made any per-call counter or output field render
+    every iteration of a genuine loop unique, so it could never fire). The
+    call id, when present, lets the caller count a call once even when the
+    harness emits paired started/completed events for it.
+
+    The hash keeps argument text (paths, secrets, file contents) off the
+    rendered *flag line*; it is not a secrecy boundary — the adjacent `out|`
+    tail lines still quote raw events, truncated.
+
+    A matched call is not descended into: its arguments are data, and a
+    tool-call-shaped dict inside another call's payload is not a call this
+    run made.
     """
     if depth > LOOP_RECURSION_DEPTH:
         return []
@@ -104,17 +123,18 @@ def _tool_fingerprints(node: object, depth: int = 0) -> list[str]:
         return [fp for item in node for fp in _tool_fingerprints(item, depth + 1)]
     if not isinstance(node, dict):
         return []
-    out: list[str] = []
     kinds = {str(node.get(k)) for k in ("type", "item_type") if node.get(k) is not None}
-    if kinds & TOOL_CALL_KINDS or "tool_name" in node:
+    matched = sorted(kinds & TOOL_CALL_KINDS)
+    if matched or isinstance(node.get("tool_name"), str):
         name = next(
-            (str(node[k]) for k in TOOL_NAME_KEYS if isinstance(node.get(k), str)), "tool"
+            (str(node[k]) for k in TOOL_NAME_KEYS if isinstance(node.get(k), str)),
+            matched[0] if matched else "tool",
         )
         args = next((node[k] for k in TOOL_ARG_KEYS if k in node), None)
-        if args is None:
-            args = {k: v for k, v in node.items() if k not in VOLATILE_KEYS}
         payload = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
-        out.append(f"{name}:{hashlib.sha256(payload.encode()).hexdigest()[:12]}")
+        call_id = next((str(node[k]) for k in CALL_ID_KEYS if node.get(k) is not None), None)
+        return [(call_id, f"{name}:{hashlib.sha256(payload.encode()).hexdigest()[:12]}")]
+    out: list[tuple[str | None, str]] = []
     for value in node.values():
         out.extend(_tool_fingerprints(value, depth + 1))
     return out
@@ -128,7 +148,18 @@ def loop_signal(entries: list[dict]) -> dict | None:
     flag and decides. Returns the window it judged so the annotation is
     auditable when these thresholds move.
     """
-    calls = [fp for e in entries for fp in _tool_fingerprints(e.get("event"))]
+    calls: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for e in entries:
+        for call_id, fp in _tool_fingerprints(e.get("event")):
+            if call_id is not None:
+                # One call, however many events announce it (codex emits
+                # item.started AND item.completed with the same id — counting
+                # both would halve the effective repeat threshold).
+                if (call_id, fp) in seen:
+                    continue
+                seen.add((call_id, fp))
+            calls.append(fp)
     window = calls[-LOOP_WINDOW_CALLS:]
     if len(window) < LOOP_REPEAT_THRESHOLD:
         return None  # too little to say anything: a short tail is not a loop
@@ -137,7 +168,9 @@ def loop_signal(entries: list[dict]) -> dict | None:
     if repeats < LOOP_REPEAT_THRESHOLD or distinct / len(window) > LOOP_DISTINCT_RATIO:
         return None
     return {
-        "tool": fingerprint.split(":", 1)[0],
+        # rsplit: the tool name may itself contain a colon (server:read_file);
+        # the hex hash never does.
+        "tool": fingerprint.rsplit(":", 1)[0],
         "repeats": repeats,
         "window": len(window),
         "distinct": distinct,
@@ -175,11 +208,21 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
             )
         for r in tasks.read_reports(home, t.id, limit=3):
             lines.append(f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}")
-        scan = tasks.read_transcript_tail(home, t.id, limit=LOOP_SCAN_LINES)
-        loop = loop_signal(scan)
+        scan = tasks.read_transcript_tail(
+            home, t.id, limit=LOOP_SCAN_LINES, max_bytes=LOOP_SCAN_BYTES
+        )
+        # Loop evidence must be current: only a live runner (the transcript is
+        # append-only, so a dead task would stay flagged forever), and only
+        # entries newer than the last *completed* run — after a relaunch, the
+        # previous run's spinning must not indict the fresh one.
+        loop = None
+        if alive:
+            boundary = t.runs[-1].ended_at if t.runs else None
+            current = [e for e in scan if not boundary or e.get("at", "") >= boundary]
+            loop = loop_signal(current)
         if loop:
             lines.append(
-                f"  possible-loop: tool={loop['tool']} repeated={loop['repeats']}x "
+                f"  possible-loop: tool={loop['tool'][:80]} repeated={loop['repeats']}x "
                 f"in last {loop['window']} tool calls (distinct={loop['distinct']}) "
                 f"— an observation, not a verdict"
             )
