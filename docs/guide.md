@@ -249,9 +249,7 @@ the journal.
 
 The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
-[architecture.md](architecture.md#the-manager); why a harness-driven
-supervisor on plain files is unusual is in the README's
-[what's genuinely different](../README.md#whats-genuinely-different).
+[architecture.md](architecture.md#the-manager).
 
 **When the LLM service is down, supervision halts loudly — and heals
 itself.** There is no dumbed-down fallback: the manager's tick simply fails
@@ -319,9 +317,6 @@ continue the same conversation).
 How attached tasks are represented, how hooks match a session to a task,
 and why the runner refuses to run one: see
 [architecture.md](architecture.md#attached-tasks-adopting-a-live-session).
-For why adopting a live session is an unusual thing for an orchestrator to
-do at all, see the README's
-[what's genuinely different](../README.md#whats-genuinely-different).
 
 ### herdr (optional)
 

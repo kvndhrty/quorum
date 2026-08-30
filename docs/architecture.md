@@ -209,9 +209,10 @@ points.
 
 ## The manager
 
+(User-facing how-to: [guide.md](guide.md#the-manager).)
+
 The flagship built-in agent, and it is *itself* harness-driven: supervision
-policy is a prompt (`prompts/manager.md`), not Python. (User-facing how-to:
-[guide.md](guide.md#the-manager).) Each tick:
+policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 
 1. **Wake condition**: any non-terminal task, or a pending message in the
    manager's inbox. Nothing to manage → no harness run. Dead runners keep

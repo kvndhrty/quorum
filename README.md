@@ -1,7 +1,8 @@
 # quorum
 
-**Cross-harness, local-first, policy-owned orchestration for long-running
-coding tasks — supervised by the same harness that does the work.** Point
+**Orchestrate long-running coding tasks with the coding agent you already
+use — cross-harness, local-first, policy-owned, and supervised by the same
+harness that does the work.** Point
 quorum at your repos, queue tasks in plain English, and let your coding
 agent CLI — `claude`, `codex`, `opencode`, anything that takes a prompt —
 do the work in isolated git worktrees. The supervisor is an agent too:
@@ -103,13 +104,11 @@ gets corrected.
 
 - **Your live session becomes a supervised task.** `quorum task adopt`
   inverts the usual ownership: instead of quorum spawning an agent, the
-  interactive session you are already sitting in is recorded as a task, and
-  guidance — yours or the manager's — is delivered *inside* that session at
-  its next stop, through the harness's own hooks. The closest neighbor
-  surveyed (Omnara) relays a session to your phone so *you* can steer it;
-  none of them make the session something a supervisor watches and nudges.
-  → [Adopting a live session](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#adopting-a-live-session),
-  [design notes](https://github.com/kvndhrty/quorum/blob/main/docs/architecture.md#attached-tasks-adopting-a-live-session).
+  interactive session you are already sitting in is recorded as a task the
+  supervisor can watch and guide (mechanics in
+  [Adopt a live session](#adopt-a-live-session) below). The closest
+  neighbor surveyed (Omnara) relays a session to your phone so *you* can
+  steer it; none of the surveyed tools hand the session to a supervisor.
 - **The supervisor is the same harness, reading a file digest.** Among the
   open-source tools surveyed, "supervision" meant keystroke automation —
   daemons pressing enter, blind auto-confirmation. An actual LLM supervisor
@@ -119,20 +118,20 @@ gets corrected.
   decision is a file you can open: the task records and transcripts the
   digest is computed from, the policy that interprets it
   (`~/.quorum/prompts/manager.md`), and the journal of what it did and why
-  (`cat ~/.quorum/state/manager/journal.jsonl`).
+  (`quorum manager journal`).
   → [The manager](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#the-manager),
   [design notes](https://github.com/kvndhrty/quorum/blob/main/docs/architecture.md#the-manager).
 
-Why run an external orchestration layer at all, when every major harness now
-ships native subagents and vendor-cloud background runs? Because the same
-wave made sessions externally addressable — hooks, streaming protocols,
-control-plane APIs — and what an outside layer can still own is being
-**cross-harness** (one queue over claude, codex, opencode, or a script of
-your own), **local-first** (one ordinary process; no daemon, no database, no
-open ports), and **policy-owned** (supervision is `prompts/manager.md`,
-yours to edit). That is quorum's shape. The survey behind these claims, with
-its sources and its ranked implications, is
-[issue #22](https://github.com/kvndhrty/quorum/issues/22).
+Why run an external orchestration layer at all, when (as of that same
+2026-08 survey) every major harness ships native subagents and vendor-cloud
+background runs? Because the same wave made sessions externally
+addressable — hooks, streaming protocols, control-plane APIs — and an
+outside layer can still own what a single vendor's cloud cannot: one queue
+over every harness, on your own disk, under a supervision policy you edit.
+No daemonization framework, no database, and no open ports beyond the
+opt-in localhost-only dashboard. The survey's ranked implications became
+the project roadmap:
+[issue #23](https://github.com/kvndhrty/quorum/issues/23).
 
 ## Adopt a live session
 
