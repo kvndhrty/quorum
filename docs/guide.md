@@ -71,7 +71,18 @@ section sets defaults:
 [tasks]
 worktree = true         # run each task in its own git worktree under QUORUM_HOME
 default_harness = ""    # harness used by `quorum task add` and the manager
+auto_commit = false     # after each run, commit whatever the harness left
+                        # uncommitted in its worktree (safety net; see below)
 ```
+
+`auto_commit` is the belt to the delivery protocol's braces. Harnesses are
+told to commit and push before reporting done, and quorum flags a task whose
+worktree still holds uncommitted or unpushed work — but a harness that
+crashes mid-edit obeys neither. Turn this on and the runner commits anything
+left behind onto the task branch (`quorum: auto-commit uncommitted work
+after run`), so it can be reviewed or reset later instead of vanishing with
+the worktree. It never pushes, and never touches a `--no-worktree` task,
+which runs in your own checkout.
 
 ## Harnesses
 

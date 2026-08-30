@@ -36,6 +36,9 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
     fail            exit 3 without output
 
   FAKE_HARNESS_STATUS / FAKE_HARNESS_PR_URL   report-mode knobs
+  FAKE_HARNESS_WRITE   name of a file to create in the cwd before exiting,
+                       i.e. leave the working tree dirty the way a harness
+                       that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
                              its own task, "tell" sends `manager tell`
 """
@@ -106,6 +109,10 @@ def main() -> int:
     if mode == "inject":
         return inject_main()
     prompt = max(sys.argv[1:], key=len) if len(sys.argv) > 1 else ""
+    scratch = os.environ.get("FAKE_HARNESS_WRITE")
+    if scratch:
+        with open(scratch, "w") as fh:
+            fh.write("work the harness never committed\n")
     print(json.dumps({"argv": sys.argv[1:]}))
     print(json.dumps({"type": "system", "session_id": "sess-fake-123"}))
     for line in prompt.splitlines():

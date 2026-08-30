@@ -13,7 +13,10 @@ A run is the unit of control for a generic harness. The runner:
 5. streams stdout into `transcript.jsonl` line by line, capturing a
    `session_id` (or codex `thread_id`) if the harness emits one (enables
    `resume` templates),
-6. records the run's exit in task.json and releases the lock.
+6. optionally (`[tasks].auto_commit`) commits anything the harness left
+   uncommitted in its worktree — a mechanical safety net, since branches
+   outlive worktrees,
+7. records the run's exit in task.json and releases the lock.
 
 A harness with `inject = "stream-json"` speaks over stdin instead of argv: a
 stream-json CLI reads user turns only from stdin (claude ignores an argv
@@ -296,6 +299,77 @@ def build_harness_argv(harness: HarnessConfig, prompt: str, session: str | None 
     return argv
 
 
+AUTO_COMMIT_MESSAGE = "quorum: auto-commit uncommitted work after run"
+
+
+def auto_commit_workdir(workdir: Path) -> str:
+    """Commit everything a run left uncommitted in `workdir`.
+
+    Returns a one-line note for the transcript, empty when the tree was
+    already clean. Raises `RunnerError` when git refuses at any step (no
+    identity configured, a stale index lock) — the caller turns that into a
+    note too, because a failed safety net must never cost the run its record.
+
+    Staging is `git add -A`, so untracked files count: a harness that crashed
+    mid-edit usually leaves new files, and those are exactly the work worth
+    saving. Committing is the whole net — pushing is deliberately out of
+    scope (it would assume a remote and credentials, and an unpushed branch
+    is already surfaced as stranded work by `tasks.workdir_git_state`).
+    """
+    status = _git(workdir, "status", "--porcelain")
+    if status.returncode != 0:
+        raise RunnerError(f"git status failed: {status.stderr.strip()[:200]}")
+    paths = [line for line in status.stdout.splitlines() if line.strip()]
+    if not paths:
+        return ""
+    add = _git(workdir, "add", "-A")
+    if add.returncode != 0:
+        raise RunnerError(f"git add -A failed: {add.stderr.strip()[:200]}")
+    commit = _git(workdir, "commit", "-m", AUTO_COMMIT_MESSAGE)
+    if commit.returncode != 0:
+        detail = (commit.stderr.strip() or commit.stdout.strip())[:200]
+        raise RunnerError(f"git commit failed: {detail}")
+    head = _git(workdir, "rev-parse", "--short", "HEAD")
+    sha = head.stdout.strip() if head.returncode == 0 else "?"
+    return f"auto-committed {len(paths)} path(s) as {sha}"
+
+
+def _auto_commit_after_run(home: Path, task: Task, workdir: Path) -> None:
+    """Run the safety net and record what happened in the transcript.
+
+    Mechanical, not a judgement: the runner still never sets status, and a
+    tree the harness already committed is left alone. Failures are recorded
+    rather than raised — the tree simply stays dirty, which is the state
+    `workdir_git_state` reports as STRANDED-WORK for the manager to chase.
+    """
+    try:
+        note = auto_commit_workdir(workdir)
+    except (RunnerError, OSError, subprocess.SubprocessError) as e:
+        note = f"auto-commit failed: {e}"
+    if not note:
+        return
+    fsio.append_jsonl(
+        transcript_path(home, task.id),
+        {"at": fsio.iso(fsio.utc_now()), "line": f"quorum: {note}"},
+    )
+
+
+def _should_auto_commit(config: Config, task: Task, home: Path, workdir: Path) -> bool:
+    """Opt-in, and only ever inside a task's own worktree.
+
+    A `--no-worktree` task runs in the user's checkout on whatever branch
+    they had out; committing there would be quorum writing to a tree it does
+    not own. Comparing against `worktree_path` (rather than trusting
+    `use_worktree`) keeps that true even for a task whose recorded workdir
+    predates the flag.
+    """
+    return (
+        config.tasks.auto_commit
+        and task.use_worktree
+        and workdir == worktree_path(home, task.id)
+    )
+
+
 def stream_transcript(
     proc: subprocess.Popen,
     transcript: Path,
@@ -395,6 +469,9 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
 
             stream_transcript(proc, transcript_path(home, task.id), on_event=on_event)
             exit_code = proc.wait()
+
+        if _should_auto_commit(config, task, home, workdir):
+            _auto_commit_after_run(home, task, workdir)
 
         run = TaskRun(
             started_at=fsio.iso(started), ended_at=fsio.iso(fsio.utc_now()), exit_code=exit_code

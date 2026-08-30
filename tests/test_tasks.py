@@ -30,6 +30,10 @@ def make_repo(tmp_path: Path, name: str = "proj") -> Path:
             check=True, capture_output=True,
         )
     git("init", "-q")
+    # Committing inside a worktree (the auto-commit safety net does) has no
+    # -c flags of its own, so the identity has to live in the repo config.
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "T")
     (repo / "README.md").write_text("hello")
     git("add", ".")
     git("commit", "-qm", "init")
@@ -43,10 +47,17 @@ def repo_git(repo: Path, *args: str) -> None:
     )
 
 
-def harness_config(home: Path, extra: str = "") -> None:
+def git_out(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True
+    ).stdout.strip()
+
+
+def harness_config(home: Path, extra: str = "", tasks_extra: str = "") -> None:
     body = (
         "[tasks]\n"
         'default_harness = "fake"\n'
+        f"{tasks_extra}"
         "[harness.fake]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
         f'resume = ["{sys.executable}", "{FAKE}", "--resumed", "{{session}}"]\n'
@@ -262,6 +273,80 @@ def test_no_worktree_runs_in_project_dir(home: Path, project: str, tmp_path: Pat
     task = TaskStore(home).add(project, "x", "fake", use_worktree=False)
     run_task(home, config, task.id)
     assert f"CWD| {(tmp_path / 'proj').resolve()}" in transcript_text(home, task.id)
+
+
+def test_auto_commit_captures_work_the_harness_left_behind(home: Path, project: str, monkeypatch):
+    """The safety net's hard guarantee: with `[tasks].auto_commit` on, work a
+    harness left uncommitted lands on the task branch, which outlives the
+    worktree — no policy, no status change, no push."""
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    workdir = tasks.worktree_path(home, task.id)
+    assert git_out(workdir, "status", "--porcelain") == ""  # nothing stranded
+    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
+    assert "scratch.txt" in git_out(workdir, "show", "--name-only", "--pretty=", "HEAD")
+    assert git_out(workdir, "rev-parse", "--abbrev-ref", "HEAD") == f"quorum/{task.short_id}"
+    assert "auto-committed 1 path(s)" in transcript_text(home, task.id)
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.runs[0].exit_code == 0 and fresh.status == "queued"
+
+
+def test_auto_commit_is_off_by_default(home: Path, project: str, monkeypatch):
+    """Default off: the tree stays dirty and stranded-work detection sees it."""
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    run_task(home, config, task.id)
+
+    workdir = tasks.worktree_path(home, task.id)
+    assert "scratch.txt" in git_out(workdir, "status", "--porcelain")
+    assert git_out(workdir, "log", "-1", "--pretty=%s") == "init"
+    assert tasks.workdir_git_state(TaskStore(home).get(task.id))["dirty"] == 1
+
+
+def test_auto_commit_never_touches_a_no_worktree_checkout(
+    home: Path, project: str, tmp_path: Path, monkeypatch
+):
+    """A `--no-worktree` task runs in the user's own checkout on whatever
+    branch they had out; committing there is not quorum's to do."""
+    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
+    harness_config(home, tasks_extra="auto_commit = true\n")
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake", use_worktree=False)
+
+    run_task(home, config, task.id)
+
+    repo = tmp_path / "proj"
+    assert "scratch.txt" in git_out(repo, "status", "--porcelain")
+    assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
+
+
+def test_auto_commit_is_a_no_op_on_a_clean_tree(tmp_path: Path):
+    """A harness that committed its own work gets no empty extra commit."""
+    repo = make_repo(tmp_path)
+    assert runner.auto_commit_workdir(repo) == ""
+    assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
+
+
+def test_auto_commit_failure_is_recorded_not_raised(home: Path, project: str, tmp_path: Path):
+    """A net that cannot fire leaves a note and the dirty tree behind — never
+    an exception that would cost the run its record."""
+    task = TaskStore(home).add(project, "x", "fake")
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    with pytest.raises(RunnerError, match="git status failed"):
+        runner.auto_commit_workdir(loose)
+
+    runner._auto_commit_after_run(home, task, loose)  # same failure, absorbed
+
+    assert "auto-commit failed" in transcript_text(home, task.id)
 
 
 def test_missing_harness_and_unknown_task_fail_loud(home: Path, project: str):

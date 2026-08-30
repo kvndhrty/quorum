@@ -24,6 +24,8 @@ DEFAULT_CONFIG = """\
 [tasks]
 default_harness = ""      # e.g. "claude"
 worktree = true           # each task runs in its own git worktree
+#auto_commit = true       # safety net: commit whatever a run leaves uncommitted
+                          # in its worktree, so a crashed harness loses nothing
 
 # A harness is any coding-agent CLI; {prompt} and {session} are substituted.
 # Runs are unattended — the flags below let the harness act without asking,

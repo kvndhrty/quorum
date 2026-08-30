@@ -115,7 +115,28 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
    environment; stream stdout line-by-line into `transcript.jsonl`,
    capturing a `session_id` (or codex-style `thread_id`) from any JSON
    event that carries one,
-6. append the run (exit code, timestamps) to `task.json`; release the lock.
+6. optionally auto-commit (below),
+7. append the run (exit code, timestamps) to `task.json`; release the lock.
+
+**Auto-commit (`[tasks].auto_commit`, default off).** The delivery protocol
+in the task preamble and the `STRANDED-WORK` flag in views and the digest
+are advisory and corrective: neither *guarantees* work survives a harness
+that crashes mid-edit or ignores its instructions. This flag is the hard
+guarantee — after the harness exits, if the working tree is dirty, the
+runner does `git add -A` and commits it as "quorum: auto-commit uncommitted
+work after run". Branches outlive worktrees, so the work can then only be
+found, never lost. Deliberately narrow:
+
+- it only ever fires inside a task's *own* worktree — a `--no-worktree` task
+  runs in the user's checkout on whatever branch they had out, which quorum
+  does not own,
+- it never pushes: that would assume a remote and credentials, and an
+  unpushed branch is already reported as stranded work,
+- it is mechanical, not a judgement — the runner still never sets status,
+  and a tree the harness committed itself gets no empty extra commit,
+- a failure (no git identity, a stale index lock) is recorded as a line in
+  the transcript rather than raised: the tree simply stays dirty, which is
+  the state `workdir_git_state` already reports for the manager to chase.
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
