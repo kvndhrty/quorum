@@ -198,12 +198,16 @@ class Supervisor:
             return
         self._failures[name] = 0
         ended = fsio.utc_now()
+        # Heartbeat writes are merges: recovery must clear the failure fields
+        # explicitly, or a long-fixed agent reads as broken in every dashboard.
         self._finish_heartbeat(
             name,
             status="idle",
             last_start=fsio.iso(started),
             last_end=fsio.iso(ended),
             duration_ms=int((ended - started).total_seconds() * 1000),
+            error=None,
+            consecutive_failures=0,
         )
 
     def _finish_heartbeat(self, name: str, **fields) -> None:
