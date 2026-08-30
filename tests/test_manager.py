@@ -16,7 +16,14 @@ import pytest
 
 from quorum import fsio, runner, tasks
 from quorum.agent import AgentContext
-from quorum.agents.manager import Manager, build_digest, journal_path, transcript_path
+from quorum.agents.manager import (
+    LOOP_WINDOW_CALLS,
+    Manager,
+    build_digest,
+    journal_path,
+    loop_signal,
+    transcript_path,
+)
 from quorum.config import load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
@@ -221,3 +228,198 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
     digest = build_digest(home, store.list(), clock(), directives=[])
     assert "STRANDED-WORK" not in digest
     assert "git: branch=" not in digest
+
+
+# --- possible-loop observation ----------------------------------------------
+
+
+def tool_use(name: str, cmd: str, call_id: str = "c1") -> dict:
+    """One claude-shaped transcript entry carrying a tool call."""
+    return {
+        "at": "2026-08-30T00:00:00Z",
+        "event": {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": call_id, "name": name, "input": {"command": cmd}}
+                ]
+            },
+        },
+    }
+
+
+def write_transcript(home: Path, task_id: str, entries: list[dict]) -> None:
+    for e in entries:
+        fsio.append_jsonl(tasks.transcript_path(home, task_id), e)
+
+
+def digest_line(digest: str, short_id: str, prefix: str) -> str | None:
+    return next(
+        (line for line in digest.splitlines() if line.strip().startswith(prefix)), None
+    )
+
+
+def test_loop_signal_flags_a_repeated_call_and_ignores_varied_work():
+    stuck = [tool_use("Bash", "pytest -x", f"c{i}") for i in range(8)]
+    assert loop_signal(stuck) == {"tool": "Bash", "repeats": 8, "window": 8, "distinct": 1}
+
+    varied = [tool_use("Bash", f"step {i}", f"c{i}") for i in range(8)]
+    assert loop_signal(varied) is None
+
+
+def mark_runner_alive(home: Path, task_id: str) -> None:
+    tasks.runner_lock_path(home, task_id).write_text('{"pid": 1}\n')  # alive, never ours
+
+
+def test_digest_flags_a_looping_task_but_not_a_varied_one(home: Path, clock, project: str):
+    store = TaskStore(home)
+    looping = store.add(project, "spinning", "tasktool")
+    healthy = store.add(project, "progressing", "tasktool")
+    store.update(looping.id, status="executing")
+    store.update(healthy.id, status="executing")
+    mark_runner_alive(home, looping.id)
+    mark_runner_alive(home, healthy.id)
+    write_transcript(home, looping.id, [tool_use("Bash", "pytest -x", f"c{i}") for i in range(6)])
+    write_transcript(home, healthy.id, [tool_use("Bash", f"step {i}", f"c{i}") for i in range(6)])
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    flagged = digest.split(f"[executing] {looping.short_id}")[1]
+    assert "possible-loop: tool=Bash repeated=6x in last 6 tool calls (distinct=1)" in flagged
+    assert "possible-loop" not in digest.split(f"[executing] {healthy.short_id}")[1]
+    # the flag line itself carries a name and counts, not the argument payload
+    # (adjacent out| lines may still quote raw events, truncated)
+    assert "pytest -x" not in digest_line(digest, looping.short_id, "possible-loop")  # type: ignore[arg-type]
+
+
+def test_loop_flag_needs_a_live_runner_and_current_run_evidence(
+    home: Path, clock, project: str
+):
+    """The transcript is append-only: without these gates a dead task stays
+    flagged forever, and a relaunched task is indicted by the previous run's
+    spinning."""
+    store = TaskStore(home)
+    dead = store.add(project, "died mid-loop", "tasktool")
+    store.update(dead.id, status="executing")
+    write_transcript(home, dead.id, [tool_use("Bash", "pytest -x", f"c{i}") for i in range(6)])
+    # no runner.lock: runner dead → no flag, however loopy the tail
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "possible-loop" not in digest
+
+    relaunched = store.add(project, "recovering", "tasktool")
+    store.update(relaunched.id, status="executing")
+    mark_runner_alive(home, relaunched.id)
+    old = [tool_use("Bash", "pytest -x", f"c{i}") for i in range(6)]
+    for e in old:
+        e["at"] = "2026-08-30T00:00:00Z"  # the previous run's spinning
+    write_transcript(home, relaunched.id, old)
+    prior = tasks.TaskRun(
+        started_at="2026-08-30T00:00:00Z", ended_at="2026-08-30T01:00:00Z", exit_code=1
+    )
+    store.update(relaunched.id, runs=[prior.model_dump()])
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "possible-loop" not in digest  # stale evidence filtered out
+
+    fresh = [tool_use("Bash", "pytest -x", f"n{i}") for i in range(6)]
+    for e in fresh:
+        e["at"] = "2026-08-30T02:00:00Z"  # the *current* run spinning again
+    write_transcript(home, relaunched.id, fresh)
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "possible-loop" in digest
+
+
+def test_loop_signal_stays_quiet_on_benign_transcripts():
+    # a short tail: fewer calls than the threshold says nothing
+    assert loop_signal([tool_use("Bash", "ls", f"c{i}") for i in range(3)]) is None
+    # polling that interleaves real work: repeated, but not dominant
+    poll = []
+    for i in range(6):
+        poll.append(tool_use("Bash", "git status", f"p{i}"))
+        poll.append(tool_use("Edit", f"file{i}.py", f"e{i}"))
+    assert loop_signal(poll) is None
+    # retries with backoff: same tool, arguments differ each time
+    assert loop_signal([tool_use("Fetch", f"url?attempt={i}", f"r{i}") for i in range(8)]) is None
+    # entries carrying no structured events at all (raw stdout lines)
+    assert loop_signal([{"at": "t", "line": "same log line"} for _ in range(20)]) is None
+    assert loop_signal([]) is None
+
+
+def codex_events(i: int, command: str) -> list[dict]:
+    """One codex call as the CLI actually emits it: item.started AND
+    item.completed, both carrying the full item with the same id."""
+    item = {"id": f"i{i}", "item_type": "command_execution", "command": command}
+    return [
+        {"at": "t", "event": {"type": "item.started", "item": dict(item)}},
+        {"at": "t", "event": {"type": "item.completed", "item": dict(item)}},
+    ]
+
+
+def test_loop_signal_reads_other_harness_shapes():
+    # codex-shaped items: a different schema, the same loose normalization —
+    # and the started/completed pair counts as ONE call, not two
+    codex = [e for i in range(5) for e in codex_events(i, "make test")]
+    signal = loop_signal(codex)
+    assert signal is not None
+    assert signal["tool"] == "command_execution" and signal["repeats"] == 5
+
+    # healthy codex work with one legitimate re-run (a normal edit/test
+    # cycle) must NOT flag — double-counting the event pairs used to
+    # halve the threshold and fire exactly here
+    healthy = [e for i, cmd in enumerate(
+        ["ls", "make test", "vi a.py", "make test", "git diff", "git commit"]
+    ) for e in codex_events(i, cmd)]
+    assert loop_signal(healthy) is None
+
+
+def test_loop_signal_ignores_pseudo_calls_and_nested_payloads():
+    # a null tool_name on non-call events (hook/permission traffic) is not a
+    # call; a constant stream of them must not fingerprint
+    pseudo = [
+        {"at": "t", "event": {"tool_name": None, "type": "status", "phase": "idle"}}
+        for _ in range(20)
+    ]
+    assert loop_signal(pseudo) is None
+    # tool-call-shaped dicts inside another call's arguments are data, not
+    # calls this run made — four varied Writes must not flag
+    nested = [
+        tool_use("Write", f"file{i}.py", f"c{i}") for i in range(4)
+    ]
+    for i, e in enumerate(nested):
+        e["event"]["message"]["content"][0]["input"] = {
+            "path": f"file{i}.py",
+            "content": [{"type": "tool_call", "name": "X", "args": {"n": 1}}] * 2,
+        }
+    assert loop_signal(nested) is None
+
+
+def test_loop_signal_fingerprints_custom_shapes_predictably():
+    # argv-style calls (a common BYO-harness shape): varied work stays quiet,
+    # a genuine repeat fires — per-call counters must not make it unique
+    varied = [
+        {"at": "t", "event": {"type": "tool_call", "argv": ["step", str(i)], "seq": i}}
+        for i in range(8)
+    ]
+    assert loop_signal(varied) is None
+    stuck = [
+        {"at": "t", "event": {"type": "tool_call", "argv": ["make", "test"], "seq": i}}
+        for i in range(8)
+    ]
+    signal = loop_signal(stuck)
+    assert signal is not None and signal["repeats"] == 8
+    # no recognized arg key at all: the name alone is the fingerprint — a
+    # coarser signal, but it fires predictably instead of never
+    unknown = [
+        {"at": "t", "event": {"type": "tool_call", "tool": "poll", "weird_args": {"n": i}}}
+        for i in range(8)
+    ]
+    signal = loop_signal(unknown)
+    assert signal is not None and signal["tool"] == "poll"
+
+
+def test_loop_signal_only_scores_the_most_recent_calls():
+    # an old loop that the harness has since escaped is not flagged: the
+    # window is the *last* LOOP_WINDOW_CALLS calls, not the whole tail
+    escaped = [tool_use("Bash", "pytest -x", f"o{i}") for i in range(20)]
+    escaped += [tool_use("Edit", f"fix{i}.py", f"n{i}") for i in range(LOOP_WINDOW_CALLS)]
+    assert loop_signal(escaped) is None

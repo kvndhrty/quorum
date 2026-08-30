@@ -115,6 +115,7 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
     "manager.md": {
         "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
         "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",
+        "5f2838b51db8ac07f830a668cae0d6c4d9afe181d7598d51a7dbd1afe5b89b15",
     },
 }
 

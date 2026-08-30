@@ -281,8 +281,12 @@ def nudge(home: Path, task: Task, text: str, sender: str = "user"):
     return msg
 
 
-def read_transcript_tail(home: Path, task_id: str, limit: int = 40) -> list[dict]:
-    return fsio.read_jsonl_tail(transcript_path(home, task_id), limit=limit)
+def read_transcript_tail(
+    home: Path, task_id: str, limit: int = 40, max_bytes: int = 256 * 1024
+) -> list[dict]:
+    # max_bytes binds before limit: callers that need depth in entries (the
+    # manager's loop scan) must size the byte budget for their payloads.
+    return fsio.read_jsonl_tail(transcript_path(home, task_id), limit=limit, max_bytes=max_bytes)
 
 
 def read_reports(home: Path, task_id: str, limit: int | None = None) -> list[dict]:

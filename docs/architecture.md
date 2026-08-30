@@ -269,7 +269,9 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they
    ended with such state — work a harness left in its worktree without
    delivering it, which the default manager prompt treats as not done and
-   relaunches with a nudge to commit and push; the manager's own
+   relaunches with a nudge to commit and push; a `possible-loop:` line
+   when a task's transcript tail is dominated by one repeated tool call
+   (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -298,6 +300,45 @@ avoid degenerate loops (its prompt forbids repeating an intervention marked
 UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
 (`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
 without ever second-guessing a choice.
+
+**Loop observation (`possible-loop`).** The action journal remembers what the
+*manager* did; nothing else sees the other loop class — a task harness
+spinning inside a single run, repeating the same failing tool call while
+`runner.lock` stays live and the transcript keeps growing, which to every
+other signal looks like healthy work. `loop_signal` (still pure over files,
+no state file) scans a transcript tail bounded twice — `LOOP_SCAN_LINES`
+(120) entries from at most `LOOP_SCAN_BYTES` (2 MiB), the byte cap being
+the binding one on payload-heavy transcripts — extracts tool calls, and
+scores the last `LOOP_WINDOW_CALLS` (12) of them. The evidence must be
+current: only a live runner is scored (the transcript is append-only; a
+dead task would stay flagged forever) and only entries newer than the last
+*completed* run (a relaunch is not indicted by its predecessor's spinning).
+Extraction is deliberately loose — a recursive walk for any nested dict
+tagged `tool_use` / `tool_call` / `function_call` / `command_execution` /
+`local_shell_call` (or carrying a string `tool_name`), counted once per
+call id, so harnesses that pair started/completed events (codex) don't
+double-count — and each call becomes `name + sha256(arguments)[:12]`.
+It sees only structured JSON events: a harness that prints plain text (the
+shipped opencode template, most custom scripts) is unobservable here, and
+absence of the flag is not evidence of health. The hash keeps argument
+payloads (paths, secrets, file contents) off the *flag line itself* — a
+tool name and counts, never a payload — but it is not a secrecy boundary:
+the digest's adjacent `out|` tail lines still quote raw events, truncated
+to 160 characters.
+
+A flag needs **both** a call repeated `LOOP_REPEAT_THRESHOLD` (4) times *and*
+that repetition dominating the window (`distinct/total <= LOOP_DISTINCT_RATIO`,
+0.5). The double gate sets the tradeoff at *prefer false negatives*: polling
+interleaved with real work, retries whose arguments change, and short tails
+stay quiet, at the cost of missing a loop that only repeats three times. These
+are plain module constants in `agents/manager.py`, not config — a wrong
+threshold costs a noisy digest line, never a killed run.
+
+That last part is the point, and the deliberate divergence from OpenHands'
+stuck detector (which auto-halts): `possible-loop` is an **observation, not a
+rail**. Python makes no decision; the flag is data, the default manager prompt
+tells the manager to read the tail and judge (nudge, relaunch, cancel, or
+ignore), and the per-run action cap remains the only rail.
 
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
