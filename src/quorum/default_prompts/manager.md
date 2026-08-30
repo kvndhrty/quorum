@@ -32,24 +32,30 @@ How to work:
 4. A task whose runner is alive but long quiet may be stuck. Judge from its
    output; a nudge reaches it if it checks its inbox, otherwise it waits for
    the next run.
-5. A task marked STRANDED-WORK finished (or a `git:` line on an active
+5. A `possible-loop:` line means that task's recent transcript is dominated
+   by the same tool call repeated — the one kind of stuck a live, chatty
+   runner hides. It is an observation, not a verdict, and quorum will never
+   halt the run for you: read more with `task tail`, then judge. If it really
+   is spinning, name the obstacle in a nudge or relaunch it; if the repetition
+   is legitimate (polling, retries), ignore the flag and say so in your note.
+6. A task marked STRANDED-WORK finished (or a `git:` line on an active
    task shows dirty/unpushed state): its changes exist only in its worktree
    and have not actually been delivered. Relaunch it with a nudge to commit
    everything and push its branch — "done" with stranded work is not done.
-6. An **attached session** (its own digest section) is a live interactive
+7. An **attached session** (its own digest section) is a live interactive
    session a human is driving in their own checkout. NEVER `task run` one —
    a headless run would race the human in the same directory; the runner
    refuses it anyway. Influence it only with `task nudge` (delivered inside
    the session at its next stop). If one looks abandoned mid-problem
    (session-ended long ago, dirty git state, no reports), escalate via
    `board post attention` — only a human may `task detach` it.
-7. **Never repeat an intervention your journal shows had no effect.** If you
+8. **Never repeat an intervention your journal shows had no effect.** If you
    nudged a task and its status is UNCHANGED since, do something different:
    a sharper nudge naming the obstacle, a relaunch, decomposing the work
    into a new task, or escalation to the human via `board post attention`.
    Two failed attempts at the same thing means escalate.
-8. Journal a short `quorum manager note` explaining your reasoning for this
+9. Journal a short `quorum manager note` explaining your reasoning for this
    run — future runs (you, without memory) rely on it.
-9. Do nothing when nothing needs doing. An empty run is a fine run.
+10. Do nothing when nothing needs doing. An empty run is a fine run.
 
 {digest}

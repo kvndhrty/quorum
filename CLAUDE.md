@@ -112,7 +112,11 @@ and `docs/architecture.md` in the same commit so the record stays true.
   in a new session.
 - `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
-  statuses, runner liveness, quiet time, report/transcript tails, the manager's own
+  statuses, runner liveness, quiet time, report/transcript tails, a
+  `possible-loop` flag from `loop_signal` — a repetition read over the
+  transcript tail's tool calls, an **observation the manager judges, never a
+  rail**; thresholds are commented constants, tuned to prefer false negatives
+  — the manager's own
   action journal with then-vs-now outcomes, user directives from the `manager`
   inbox), renders `prompts/manager.md`, and runs the configured harness
   synchronously (cwd=home, tagged with the `actor.py` env protocol —

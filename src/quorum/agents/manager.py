@@ -22,7 +22,9 @@ condition true precisely so that recovery is automatic.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -32,15 +34,114 @@ from ..agent import Agent
 from ..runner import guidance_note
 from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
 
-__all__ = ["DEFAULT_RUN_TIMEOUT_SECONDS", "Manager", "build_digest", "journal_path", "transcript_path"]
+__all__ = [
+    "DEFAULT_RUN_TIMEOUT_SECONDS",
+    "Manager",
+    "build_digest",
+    "journal_path",
+    "loop_signal",
+    "transcript_path",
+]
 
 TRANSCRIPT_TAIL_LINES = 10
 JOURNAL_TAIL_ENTRIES = 15
 RECENT_TERMINAL_HOURS = 24
 
+# --- possible-loop heuristic -------------------------------------------------
+# The action journal remembers what the *manager* did; nothing else watches a
+# task harness spinning inside a single run (same failing tool call for an
+# hour, transcript mtime fresh, runner.lock live — indistinguishable from
+# healthy work). These constants tune a repetition read over the transcript
+# tail. They are deliberately plain constants, not config: the flag is an
+# observation the manager judges, never a rail, so a wrong threshold costs a
+# noisy digest line rather than a killed run.
+#
+# The tradeoff is set to prefer false negatives. LOOP_SCAN_LINES bounds the
+# read (the digest stays cheap); only the last LOOP_WINDOW_CALLS *tool calls*
+# are scored, and a flag needs BOTH a call repeated LOOP_REPEAT_THRESHOLD
+# times AND that repetition dominating the window (distinct/total ratio at or
+# below LOOP_DISTINCT_RATIO). The ratio gate is what keeps legitimate
+# patterns quiet — polling that interleaves other work, retries with backoff,
+# a handful of repeated reads amid varied calls — at the cost of missing a
+# slow loop that only repeats three times in the window.
+LOOP_SCAN_LINES = 120
+LOOP_WINDOW_CALLS = 12
+LOOP_REPEAT_THRESHOLD = 4
+LOOP_DISTINCT_RATIO = 0.5
+
+# Tool-call extraction is harness-shape-dependent, so it is loose by design:
+# any nested dict tagged with one of these kinds counts as a call, whatever
+# harness emitted it (claude `tool_use`, codex `command_execution`, ...).
+TOOL_CALL_KINDS = frozenset(
+    {"tool_use", "tool_call", "function_call", "command_execution", "local_shell_call"}
+)
+TOOL_NAME_KEYS = ("name", "tool_name", "tool", "item_type", "type")
+TOOL_ARG_KEYS = ("input", "arguments", "args", "parameters", "command", "cmd")
+# Per-call identifiers and timings differ every call; including them would
+# make every call look unique and the detector would never fire.
+VOLATILE_KEYS = frozenset(
+    {"id", "at", "call_id", "tool_use_id", "timestamp", "time", "duration", "duration_ms"}
+)
+LOOP_RECURSION_DEPTH = 8
+
 
 def transcript_path(home: Path) -> Path:
     return actor.transcript_path(home, "manager")
+
+
+def _tool_fingerprints(node: object, depth: int = 0) -> list[str]:
+    """Best-effort tool calls in one transcript entry, as stable fingerprints.
+
+    Walks the event structure rather than pattern-matching one harness's
+    schema, and fingerprints `name + hash(arguments)`. The hash matters twice:
+    it makes "the same call" comparable across harnesses, and it keeps raw
+    argument text (paths, secrets, whole file contents) out of the digest —
+    the rendered flag carries a count and a tool name, never a payload.
+    """
+    if depth > LOOP_RECURSION_DEPTH:
+        return []
+    if isinstance(node, list):
+        return [fp for item in node for fp in _tool_fingerprints(item, depth + 1)]
+    if not isinstance(node, dict):
+        return []
+    out: list[str] = []
+    kinds = {str(node.get(k)) for k in ("type", "item_type") if node.get(k) is not None}
+    if kinds & TOOL_CALL_KINDS or "tool_name" in node:
+        name = next(
+            (str(node[k]) for k in TOOL_NAME_KEYS if isinstance(node.get(k), str)), "tool"
+        )
+        args = next((node[k] for k in TOOL_ARG_KEYS if k in node), None)
+        if args is None:
+            args = {k: v for k, v in node.items() if k not in VOLATILE_KEYS}
+        payload = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
+        out.append(f"{name}:{hashlib.sha256(payload.encode()).hexdigest()[:12]}")
+    for value in node.values():
+        out.extend(_tool_fingerprints(value, depth + 1))
+    return out
+
+
+def loop_signal(entries: list[dict]) -> dict | None:
+    """Repetition read over a transcript tail: `None`, or what was observed.
+
+    An *observation*, not a verdict and never a rail — quorum does not halt a
+    looping run the way OpenHands' stuck detector does. The manager reads the
+    flag and decides. Returns the window it judged so the annotation is
+    auditable when these thresholds move.
+    """
+    calls = [fp for e in entries for fp in _tool_fingerprints(e.get("event"))]
+    window = calls[-LOOP_WINDOW_CALLS:]
+    if len(window) < LOOP_REPEAT_THRESHOLD:
+        return None  # too little to say anything: a short tail is not a loop
+    fingerprint, repeats = Counter(window).most_common(1)[0]
+    distinct = len(set(window))
+    if repeats < LOOP_REPEAT_THRESHOLD or distinct / len(window) > LOOP_DISTINCT_RATIO:
+        return None
+    return {
+        "tool": fingerprint.split(":", 1)[0],
+        "repeats": repeats,
+        "window": len(window),
+        "distinct": distinct,
+    }
 
 
 def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directives: list[str]) -> str:
@@ -74,7 +175,15 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
             )
         for r in tasks.read_reports(home, t.id, limit=3):
             lines.append(f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}")
-        for e in tasks.read_transcript_tail(home, t.id, limit=TRANSCRIPT_TAIL_LINES):
+        scan = tasks.read_transcript_tail(home, t.id, limit=LOOP_SCAN_LINES)
+        loop = loop_signal(scan)
+        if loop:
+            lines.append(
+                f"  possible-loop: tool={loop['tool']} repeated={loop['repeats']}x "
+                f"in last {loop['window']} tool calls (distinct={loop['distinct']}) "
+                f"— an observation, not a verdict"
+            )
+        for e in scan[-TRANSCRIPT_TAIL_LINES:]:
             text = e.get("line") if "line" in e else json.dumps(e.get("event"), ensure_ascii=False)
             lines.append(f"  out| {str(text)[:160]}")
     lines.append("")

@@ -216,6 +216,10 @@ when there is something to manage), the manager compiles a **digest**:
 
 - every active task — status, whether its runner process is alive, how long
   it has been quiet, its recent reports and the tail of its output;
+- a `possible-loop` note on any task whose recent output is dominated by the
+  same tool call repeated — the kind of stuck that looks busy from outside.
+  Quorum never halts the run over it: it's an observation the manager reads
+  and judges, and the default prompt tells it to check the tail first;
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;

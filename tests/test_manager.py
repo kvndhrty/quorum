@@ -16,7 +16,14 @@ import pytest
 
 from quorum import fsio, runner, tasks
 from quorum.agent import AgentContext
-from quorum.agents.manager import Manager, build_digest, journal_path, transcript_path
+from quorum.agents.manager import (
+    LOOP_WINDOW_CALLS,
+    Manager,
+    build_digest,
+    journal_path,
+    loop_signal,
+    transcript_path,
+)
 from quorum.config import load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
@@ -221,3 +228,99 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
     digest = build_digest(home, store.list(), clock(), directives=[])
     assert "STRANDED-WORK" not in digest
     assert "git: branch=" not in digest
+
+
+# --- possible-loop observation ----------------------------------------------
+
+
+def tool_use(name: str, cmd: str, call_id: str = "c1") -> dict:
+    """One claude-shaped transcript entry carrying a tool call."""
+    return {
+        "at": "2026-08-30T00:00:00Z",
+        "event": {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": call_id, "name": name, "input": {"command": cmd}}
+                ]
+            },
+        },
+    }
+
+
+def write_transcript(home: Path, task_id: str, entries: list[dict]) -> None:
+    for e in entries:
+        fsio.append_jsonl(tasks.transcript_path(home, task_id), e)
+
+
+def digest_line(digest: str, short_id: str, prefix: str) -> str | None:
+    return next(
+        (line for line in digest.splitlines() if line.strip().startswith(prefix)), None
+    )
+
+
+def test_loop_signal_flags_a_repeated_call_and_ignores_varied_work():
+    stuck = [tool_use("Bash", "pytest -x", f"c{i}") for i in range(8)]
+    assert loop_signal(stuck) == {"tool": "Bash", "repeats": 8, "window": 8, "distinct": 1}
+
+    varied = [tool_use("Bash", f"step {i}", f"c{i}") for i in range(8)]
+    assert loop_signal(varied) is None
+
+
+def test_digest_flags_a_looping_task_but_not_a_varied_one(home: Path, clock, project: str):
+    store = TaskStore(home)
+    looping = store.add(project, "spinning", "tasktool")
+    healthy = store.add(project, "progressing", "tasktool")
+    store.update(looping.id, status="executing")
+    store.update(healthy.id, status="executing")
+    write_transcript(home, looping.id, [tool_use("Bash", "pytest -x", f"c{i}") for i in range(6)])
+    write_transcript(home, healthy.id, [tool_use("Bash", f"step {i}", f"c{i}") for i in range(6)])
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    flagged = digest.split(f"[executing] {looping.short_id}")[1]
+    assert "possible-loop: tool=Bash repeated=6x in last 6 tool calls (distinct=1)" in flagged
+    assert "possible-loop" not in digest.split(f"[executing] {healthy.short_id}")[1]
+    # the payload never reaches the digest — only a name and a count
+    assert "pytest -x" not in digest_line(digest, looping.short_id, "possible-loop")  # type: ignore[arg-type]
+
+
+def test_loop_signal_stays_quiet_on_benign_transcripts():
+    # a short tail: fewer calls than the threshold says nothing
+    assert loop_signal([tool_use("Bash", "ls", f"c{i}") for i in range(3)]) is None
+    # polling that interleaves real work: repeated, but not dominant
+    poll = []
+    for i in range(6):
+        poll.append(tool_use("Bash", "git status", f"p{i}"))
+        poll.append(tool_use("Edit", f"file{i}.py", f"e{i}"))
+    assert loop_signal(poll) is None
+    # retries with backoff: same tool, arguments differ each time
+    assert loop_signal([tool_use("Fetch", f"url?attempt={i}", f"r{i}") for i in range(8)]) is None
+    # entries carrying no structured events at all (raw stdout lines)
+    assert loop_signal([{"at": "t", "line": "same log line"} for _ in range(20)]) is None
+    assert loop_signal([]) is None
+
+
+def test_loop_signal_reads_other_harness_shapes():
+    # codex-shaped items: a different schema, the same loose normalization
+    codex = [
+        {
+            "at": "t",
+            "event": {
+                "type": "item.completed",
+                "item": {"id": f"i{i}", "item_type": "command_execution", "command": "make test"},
+            },
+        }
+        for i in range(5)
+    ]
+    signal = loop_signal(codex)
+    assert signal is not None
+    assert signal["tool"] == "command_execution" and signal["repeats"] == 5
+
+
+def test_loop_signal_only_scores_the_most_recent_calls():
+    # an old loop that the harness has since escaped is not flagged: the
+    # window is the *last* LOOP_WINDOW_CALLS calls, not the whole tail
+    escaped = [tool_use("Bash", "pytest -x", f"o{i}") for i in range(20)]
+    escaped += [tool_use("Edit", f"fix{i}.py", f"n{i}") for i in range(LOOP_WINDOW_CALLS)]
+    assert loop_signal(escaped) is None
