@@ -1,15 +1,17 @@
 # quorum
 
-**Orchestrate long-running coding tasks with the harness you already use —
-supervised by that same harness.** Point quorum at your repos, queue tasks
-in plain English, and let your coding agent CLI — `claude`, `codex`,
-`opencode`, anything that takes a prompt — do the work in isolated git
-worktrees. The supervisor is an agent too: quorum's **manager** periodically
-hands your harness a digest of everything happening (every task's status,
-output, and liveness, plus its own past actions and their outcomes) and lets
-it decide — launch, nudge, relaunch, spin up follow-up work, or escalate to
-you. Supervision policy is a prompt you can edit, not code. One process, no
-root, no cron, no database; everything is a plain file you can `cat`.
+**Orchestrate long-running coding tasks with the coding agent you already
+use — cross-harness, local-first, policy-owned, and supervised by the same
+harness that does the work.** Point
+quorum at your repos, queue tasks in plain English, and let your coding
+agent CLI — `claude`, `codex`, `opencode`, anything that takes a prompt —
+do the work in isolated git worktrees. The supervisor is an agent too:
+quorum's **manager** periodically hands your harness a digest of everything
+happening (every task's status, output, and liveness, plus its own past
+actions and their outcomes) and lets it decide — launch, nudge, relaunch,
+spin up follow-up work, or escalate to you. Supervision policy is a prompt
+you can edit, not code. One process, no root, no cron, no database;
+everything is a plain file you can `cat`.
 
 ```
 quorum task add my-api "add rate limiting to the public endpoints, then open a PR"
@@ -89,6 +91,47 @@ quorum web                   # http://127.0.0.1:8787
 </picture>
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
+
+## What's genuinely different
+
+Plenty of tools run coding agents in parallel. Two things here had no
+equivalent in a 2026-08 survey of ~30 orchestration projects (agent
+frameworks, coding-agent orchestrators, harness-native orchestration, and
+the research literature). That's a snapshot of a landscape that moves
+monthly, not a permanent claim — if you know of prior art,
+[open an issue](https://github.com/kvndhrty/quorum/issues) and this section
+gets corrected.
+
+- **Your live session becomes a supervised task.** `quorum task adopt`
+  inverts the usual ownership: instead of quorum spawning an agent, the
+  interactive session you are already sitting in is recorded as a task the
+  supervisor can watch and guide (mechanics in
+  [Adopt a live session](#adopt-a-live-session) below). The closest
+  neighbor surveyed (Omnara) relays a session to your phone so *you* can
+  steer it; none of the surveyed tools hand the session to a supervisor.
+- **The supervisor is the same harness, reading a file digest.** Among the
+  open-source tools surveyed, "supervision" meant keystroke automation —
+  daemons pressing enter, blind auto-confirmation. An actual LLM supervisor
+  showed up only in hosted commercial products (Factory's Mission Control,
+  Devin's coordinator), where the inputs and the decisions stay in someone
+  else's cloud. Quorum runs that pattern on your disk, and every input and
+  decision is a file you can open: the task records and transcripts the
+  digest is computed from, the policy that interprets it
+  (`~/.quorum/prompts/manager.md`), and the journal of what it did and why
+  (`quorum manager journal`).
+  → [The manager](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#the-manager),
+  [design notes](https://github.com/kvndhrty/quorum/blob/main/docs/architecture.md#the-manager).
+
+Why run an external orchestration layer at all, when (as of that same
+2026-08 survey) every major harness ships native subagents and vendor-cloud
+background runs? Because the same wave made sessions externally
+addressable — hooks, streaming protocols, control-plane APIs — and an
+outside layer can still own what a single vendor's cloud cannot: one queue
+over every harness, on your own disk, under a supervision policy you edit.
+No daemonization framework, no database, and no open ports beyond the
+opt-in localhost-only dashboard. The survey's ranked implications became
+the project roadmap:
+[issue #23](https://github.com/kvndhrty/quorum/issues/23).
 
 ## Adopt a live session
 

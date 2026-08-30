@@ -157,6 +157,8 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 
 ### Attached tasks: adopting a live session
 
+(User-facing how-to: [guide.md](guide.md#adopting-a-live-session).)
+
 `quorum task adopt` inverts the ownership: instead of quorum spawning runs,
 an *existing interactive session* (Claude Code, or anything with hooks) is
 recorded as a task with `attached = true`, `workdir` = the session's own
@@ -206,6 +208,8 @@ carries the payload, so delivery stays exactly-once across all delivery
 points.
 
 ## The manager
+
+(User-facing how-to: [guide.md](guide.md#the-manager).)
 
 The flagship built-in agent, and it is *itself* harness-driven: supervision
 policy is a prompt (`prompts/manager.md`), not Python. Each tick:
