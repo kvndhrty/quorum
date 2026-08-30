@@ -247,6 +247,12 @@ Two things bound a bad run, neither of which second-guesses a decision: a
 per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
 the journal.
 
+The mechanics behind all of this — the digest's exact contents, the actor
+env tag, the journal format — are in
+[architecture.md](architecture.md#the-manager); why a harness-driven
+supervisor on plain files is unusual is in the README's
+[what's genuinely different](../README.md#whats-genuinely-different).
+
 **When the LLM service is down, supervision halts loudly — and heals
 itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (visible in `quorum status` and on the board), but its schedule keeps firing
@@ -309,6 +315,13 @@ project yet, adoption registers it. When the interactive phase is over,
 `quorum task detach <id>` turns it back into an ordinary task the manager
 may run headless (a captured session id lets a `resume` harness template
 continue the same conversation).
+
+How attached tasks are represented, how hooks match a session to a task,
+and why the runner refuses to run one: see
+[architecture.md](architecture.md#attached-tasks-adopting-a-live-session).
+For why adopting a live session is an unusual thing for an orchestrator to
+do at all, see the README's
+[what's genuinely different](../README.md#whats-genuinely-different).
 
 ### herdr (optional)
 
