@@ -1,0 +1,336 @@
+<title>Axes of Agentic Engineering</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#F5F6F8; --surface:#FFFFFF; --ink:#1B2130; --muted:#5A6272;
+  --accent:#3A5BA0; --accent-soft:#E3E9F5; --rule:#D9DDE4; --rule-soft:#E8EBF0;
+  --adopt:#2F7D5C; --adopt-bg:#E2F0E9; --watch:#A87B24; --watch-bg:#F5EBD6;
+  --hold:#4A5568; --hold-bg:#E7EAEF; --code-bg:#EDEFF3;
+}
+:root:not([data-theme="light"]){}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#14171E; --surface:#1B1F28; --ink:#E7EAF1; --muted:#9AA2B2;
+    --accent:#82A0DC; --accent-soft:#232C40; --rule:#2B313D; --rule-soft:#232833;
+    --adopt:#6CC49C; --adopt-bg:#1B3229; --watch:#D7A94F; --watch-bg:#382E18;
+    --hold:#A8B2C4; --hold-bg:#262C38; --code-bg:#232833;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14171E; --surface:#1B1F28; --ink:#E7EAF1; --muted:#9AA2B2;
+  --accent:#82A0DC; --accent-soft:#232C40; --rule:#2B313D; --rule-soft:#232833;
+  --adopt:#6CC49C; --adopt-bg:#1B3229; --watch:#D7A94F; --watch-bg:#382E18;
+  --hold:#A8B2C4; --hold-bg:#262C38; --code-bg:#232833;
+}
+body{background:var(--ground); color:var(--ink); font-family:"Source Sans 3",-apple-system,"Segoe UI",sans-serif;
+  font-size:17px; line-height:1.62; margin:0; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:760px; margin:0 auto; padding:0 24px 96px;}
+.wide{max-width:1080px; margin:0 auto; padding:0 24px;}
+a{color:var(--accent); text-decoration:none; border-bottom:1px solid transparent;}
+a:hover{border-bottom-color:var(--accent);}
+a:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:2px;}
+h1,h2,h3{font-family:"Spectral",Georgia,serif; text-wrap:balance; line-height:1.2;}
+h1{font-size:44px; font-weight:700; margin:0 0 12px; letter-spacing:-0.5px;}
+h2{font-size:28px; font-weight:600; margin:64px 0 16px;}
+h3{font-size:20px; font-weight:600; margin:32px 0 8px;}
+p{margin:0 0 16px;}
+.mono, code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;}
+code{font-size:0.86em; background:var(--code-bg); padding:1px 5px; border-radius:4px;}
+.eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:0.14em;
+  text-transform:uppercase; color:var(--accent); margin:0 0 10px; font-weight:600;}
+header.masthead{padding:72px 0 24px; border-bottom:1px solid var(--rule); margin-bottom:40px;}
+.dek{font-size:20px; color:var(--muted); max-width:640px; margin:0 0 20px;}
+.meta{font-family:"IBM Plex Mono",monospace; font-size:12.5px; color:var(--muted); line-height:1.9;}
+.meta b{color:var(--ink); font-weight:600;}
+
+.findings{display:grid; gap:0; border:1px solid var(--rule); border-radius:10px;
+  background:var(--surface); overflow:hidden; margin:28px 0 8px;}
+.finding{display:grid; grid-template-columns:44px 1fr; gap:14px; padding:18px 20px;
+  border-bottom:1px solid var(--rule-soft); align-items:baseline;}
+.finding:last-child{border-bottom:0;}
+.finding .n{font-family:"IBM Plex Mono",monospace; font-size:13px; color:var(--accent); font-weight:600;}
+.finding p{margin:0; font-size:15.5px;}
+.finding b{font-weight:700;}
+
+.axis{border-top:1px solid var(--rule); padding-top:28px; margin-top:44px;}
+.axis-head{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:4px;}
+.axis-num{font-family:"IBM Plex Mono",monospace; font-size:13px; color:var(--muted); font-weight:500;}
+.axis h2{margin:0; flex:1; min-width:200px;}
+.chip{font-family:"IBM Plex Mono",monospace; font-size:11.5px; font-weight:600; letter-spacing:0.08em;
+  padding:4px 10px; border-radius:99px; white-space:nowrap; align-self:center;}
+.chip.hold{color:var(--hold); background:var(--hold-bg);}
+.chip.adopt{color:var(--adopt); background:var(--adopt-bg);}
+.chip.watch{color:var(--watch); background:var(--watch-bg);}
+.quorum-pos{border-left:3px solid var(--accent); background:var(--accent-soft);
+  padding:12px 16px; border-radius:0 8px 8px 0; margin:18px 0; font-size:15.5px;}
+.quorum-pos .lbl{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--accent); display:block; margin-bottom:4px; font-weight:600;}
+.verdict{font-size:15.5px; color:var(--muted); margin:14px 0 0;}
+.verdict b{color:var(--ink);}
+
+.tablebox{overflow-x:auto; border:1px solid var(--rule); border-radius:10px; background:var(--surface); margin:24px 0;}
+table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:960px;}
+th{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:0.08em; text-transform:uppercase;
+  color:var(--muted); text-align:left; padding:12px 14px; border-bottom:1px solid var(--rule);
+  position:sticky; top:0; background:var(--surface); font-weight:600;}
+td{padding:9px 14px; border-bottom:1px solid var(--rule-soft); vertical-align:top; line-height:1.45;}
+tr:last-child td{border-bottom:0;}
+td.pname{font-family:"IBM Plex Mono",monospace; font-size:12.5px; font-weight:500; white-space:nowrap;}
+td.fam{color:var(--muted); font-size:12.5px; white-space:nowrap;}
+.dead{color:var(--muted);}
+.dead .pname, .dead td{color:var(--muted);}
+.legend{font-size:13px; color:var(--muted); margin:8px 0 0;}
+
+.impl{border:1px solid var(--rule); border-radius:10px; background:var(--surface);
+  padding:20px 22px; margin:0 0 14px;}
+.impl-head{display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;}
+.impl-head .rank{font-family:"IBM Plex Mono",monospace; font-size:13px; color:var(--accent); font-weight:600;}
+.impl-head h3{margin:0; flex:1; min-width:200px;}
+.impl p{margin:10px 0 0; font-size:15.5px;}
+.impl .why{color:var(--muted); font-size:14.5px;}
+
+.srcs{columns:2; gap:32px; font-size:14px;}
+.srcs div{break-inside:avoid; margin-bottom:18px;}
+.srcs .grp{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:0.1em;
+  text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:6px;}
+.srcs a{display:block; padding:2px 0; overflow-wrap:break-word;}
+@media(max-width:640px){ .srcs{columns:1;} h1{font-size:34px;} }
+.note{font-size:14px; color:var(--muted); border-top:1px solid var(--rule); margin-top:56px; padding-top:16px;}
+</style>
+
+<div class="wrap">
+<header class="masthead">
+  <p class="eyebrow">Literature review · design input for quorum</p>
+  <h1>Axes of Agentic Engineering</h1>
+  <p class="dek">Thirty projects and fifteen papers across four families, placed on eleven axes of orchestration design — and where quorum sits on each.</p>
+  <p class="meta"><b>Method</b> — four parallel research agents, primary sources fetched <b>2026-08-29</b> (official docs, repos, changelogs, arXiv). Families: general-purpose agent frameworks · coding-agent orchestrators · harness-native orchestration · research literature. Quorum's own placements are checked against <span class="mono">docs/architecture.md</span>, not paraphrased from memory.</p>
+</header>
+
+<h2 style="margin-top:0">Headline findings</h2>
+<div class="findings">
+  <div class="finding"><span class="n">F1</span><p><b>All three of quorum's invariants survive contact with the landscape — strengthened, not weakened.</b> No recorded stance needs revision. The roadmap this survey produces is additive: enrichments within the current design, not reversals of it.</p></div>
+  <div class="finding"><span class="n">F2</span><p><b>Orchestration is moving into the harnesses, and that helps rather than hurts.</b> Every major harness shipped native subagents in a twelve-month window, and five of six ship vendor-cloud detached execution. But the same wave made every session an addressable, steerable, forkable object (hooks, stream protocols, control-plane APIs) — exactly the interface an external supervisor needs. The external layer's defensible value is now precisely quorum's positioning: <b>cross-harness, local-first, policy-owned</b>.</p></div>
+  <div class="finding"><span class="n">F3</span><p><b>On supervision, quorum sits with the frontier commercial products, not its OSS peers.</b> Open-source orchestrators "supervise" with keystroke automation (Claude Squad's TapEnter daemon, uzi's blind auto-confirm). Only Factory's Mission Control and Devin's coordinator (spawns, messages, budget-caps, and kills child Devins) crossed into LLM supervision — the pattern quorum's manager already implements locally.</p></div>
+  <div class="finding"><span class="n">F4</span><p><b>Worktrees won the local isolation war; kernel sandboxes went mainstream.</b> Every surviving local orchestrator isolates with a worktree per task; Sculptor conspicuously <i>reverted</i> from container-per-agent to worktrees in 2026. Seatbelt/bubblewrap+seccomp sandboxing now ships inside Codex, Claude Code, and Factory. Quorum's worktrees + fail-closed nono are squarely on trend.</p></div>
+  <div class="finding"><span class="n">F5</span><p><b>The literature converged: coding is the canonical bad case for fine-grained multi-agent decomposition.</b> Anthropic and Cognition — publishing opposite manifestos in the same week of June 2025 — agree on this. Coarse-grained parallelism (independent tasks in isolated worktrees) sidesteps the objection entirely, which is the parallelism quorum sells.</p></div>
+  <div class="finding"><span class="n">F6</span><p><b>Agents do not self-detect failure, so verification must be external and executable.</b> A 20,574-session field study (2026): 91.5% of agent–user misalignments needed explicit human correction, and self-reporting accuracy is <i>worsening</i>. Quorum's stranded-work probe (git state over reported status) is the right instinct; the survey says extend it, especially toward CI.</p></div>
+</div>
+
+<!-- ================= AXES ================= -->
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 01</span><h2>Agent-loop ownership</h2><span class="chip hold">HOLD</span></div>
+  <p>Who owns the think–act loop. Every general-purpose framework surveyed (LangGraph, Microsoft Agent Framework, CrewAI, OpenAI Agents SDK, smolagents, Mastra, Pydantic AI) builds and ships its own loop; none wraps a third-party harness CLI. The vocabulary shifted in quorum's direction, though: OpenAI, Microsoft, and Pydantic all independently adopted the word <b>"harness"</b> as a named architectural layer in 2026, and the Claude Agent SDK is the limiting case — the product <i>is</i> a harness exposed as a library. Among orchestrators, wrapping is the norm and has two idioms: argv-template wrapping of pinned CLIs (Vibe Kanban's per-agent Rust executors, Claude Squad's tmux <code>program</code> strings, Conductor's four harnesses) and, newer, <b>protocol wrapping</b> — OpenHands' <code>ACPAgent</code> speaks the Agent Client Protocol (JSON-RPC over stdio, 40+ implementing agents, Zed-stewarded) so competitors' harnesses run inside its UI on the user's own subscriptions.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>Bring-your-own-harness by argv template, with per-harness adapters only at the hook/injection edges. The harness is a black box; quorum owns nothing of the loop.</div>
+  <p class="verdict"><b>Verdict: hold, and watch ACP.</b> BYOH is validated — the industry named the layer quorum treats as pluggable. An ACP adapter would be one integration that covers dozens of agents at once; it is the strongest candidate for the next harness integration (see implication #5).</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 02</span><h2>Control-flow authority</h2><span class="chip hold">HOLD</span></div>
+  <p>Who decides what runs next, and where policy lives. The framework family splits cleanly: typed graphs and code-resident policy (LangGraph's StateGraph, Mastra's schema-typed steps, CrewAI Flows) versus LLM-decides idioms (OpenAI handoffs, smolagents, CrewAI's hierarchical crews). The research record adjudicates: nobody serious still advocates free-form LLM group chat (AutoGen's speaker-selection idiom); the live debate is typed workflow (MetaGPT lineage — coherent but rigid) versus <b>LLM supervisor with hard rails</b> (Anthropic's research system: policy in the prompt, budgets and scaling rules as rails). A 2026 line of work makes coordination a separately configurable layer, swappable without touching agents or tools — which is literally what a policy file like <span class="mono">prompts/manager.md</span> is. Among products, human control dominates the OSS tier (kanban, TUI); only Factory and Devin ship a conversational LLM orchestrator.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>The manager makes no decisions in Python. Policy is a prompt; the substrate carries rails (the action cap) but never judgment. Status is free-form; only terminal statuses mean anything.</div>
+  <p class="verdict"><b>Verdict: hold — this is quorum's best-supported stance.</b> The survey found the design implemented elsewhere only at the frontier (Factory, Devin) and endorsed in principle by the 2026 coordination-layer literature. MAST's failure data (~42% of multi-agent failures are specification defects) says the highest-leverage investment is the quality of the prompt and digest, not more orchestration machinery.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 03</span><h2>State substrate</h2><span class="chip hold">HOLD</span></div>
+  <p>Where durable truth lives. Frameworks checkpoint into DBs (LangGraph's Postgres/SQLite savers, CrewAI's SQLite <code>@persist</code>); GUI orchestrators independently landed on SQLite (Vibe Kanban, Crystal, Sculptor — the last as an immutable event log with materialized views); cloud products keep opaque service state. But plain files keep recurring at the substrate level, and in strong company: OpenHands V1 persists an <b>event-sourced log of individual JSON files</b> and recovers by replay; container-use uses git itself as the database (branches as environments, git notes as container state); Claude Squad is pure JSON; and most strikingly, Claude Code's experimental <b>agent teams coordinate full sessions through plain local JSON mailboxes and a file-locked shared task list</b> — the same file-substrate design quorum uses, shipped inside the flagship harness in Feb 2026.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>Everything is a file under <span class="mono">QUORUM_HOME</span>: atomic-rename writes, JSONL journals and transcripts, maildir inboxes. <span class="mono">ls</span> and <span class="mono">cat</span> are debuggers; copying the directory migrates the system.</div>
+  <p class="verdict"><b>Verdict: hold, strengthened.</b> The pattern quorum bet on now has an existence proof inside Claude Code itself. The one idea worth borrowing without changing substrate: OpenHands' event-log framing (immutable events, one mutable state object) is a useful lens on <span class="mono">task.json</span> + append-only JSONL — quorum is already most of the way there.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 04</span><h2>Process model &amp; scheduling</h2><span class="chip hold">HOLD</span></div>
+  <p>How work outlives a process. The 2025–26 framework consensus is <b>durable execution by delegation</b>: checkpoint/replay through an external engine (OpenAI documents Temporal/Dapr/Restate/DBOS; Pydantic AI co-maintains Temporal/DBOS/Prefect backends; Mastra ships <code>durable: true</code>). Products deliver survive-laptop-shutdown as vendor cloud: Cursor's Firecracker microVM per agent, Amp's orbs, Codex cloud, Claude Code's <code>--teleport</code>, Copilot's 59-minute Actions runners, Jules' VMs. Locally, most orchestrators kill agent processes with the app (Vibe Kanban reaps orphans at startup); Claude Squad's detached tmux sessions and Sculptor's crash-surviving turns are the exceptions.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>One ordinary scheduler process; runs are detached children that survive supervisor restarts. No engine, no checkpoints — recovery is the next tick re-reading files. No analogue exists in the framework family.</div>
+  <p class="verdict"><b>Verdict: hold.</b> Checkpoint/replay engines solve a problem quorum defined away: a harness run is already a resumable unit (session ids), and the world-state is already durable (files, git). The unanswered story is remote: every vendor now has a laptop-closed answer and quorum doesn't — but the seam is clean (a runner host is just a machine with <span class="mono">QUORUM_HOME</span> synced), and Factory's BYOM (register your own box behind a relay) is the shape to study if demand appears. Not urgent; recorded as a watch item.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 05</span><h2>Isolation &amp; execution surface</h2><span class="chip hold">HOLD</span></div>
+  <p>Where the agent is allowed to act. The clearest convergence in the survey: <b>worktrees won locally, containers retreated to the cloud tier</b>. Every surviving local orchestrator (Vibe Kanban, Claude Squad, Crystal, uzi, Conductor, Sculptor) isolates with a git worktree + branch per task; Sculptor flipped from container-per-agent (2025) to worktrees-in-your-repo (2026 default). Container-grade isolation reappears as cloud microVMs (Cursor, Conductor Cloud, Devin, Ona — whose environment layer OpenAI bought outright in June 2026). Meanwhile kernel sandboxing became a first-party harness feature: Claude Code (Seatbelt/bubblewrap + network proxy), Codex (bubblewrap + seccomp, Landlock demoted to legacy fallback), Factory ("denied by the kernel rather than relying on Droid to police itself"). Frameworks outsource isolation to a shared sandbox-vendor pool (E2B, Modal, Daytona).</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>Worktree + branch per task (shared object store), plus optional fail-closed kernel sandboxing via nono (Landlock/Seatbelt) at supervisor, task, and LLM-call granularity.</div>
+  <p class="verdict"><b>Verdict: hold, strengthened.</b> Quorum independently landed on both winning layers (worktrees for collision-avoidance, kernel enforcement for authority limits). One footnote: Codex's move off Landlock to bubblewrap+seccomp is worth tracking for nono's Linux story.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 06</span><h2>Safety rails &amp; authority limits</h2><span class="chip adopt">ADOPT +</span></div>
+  <p>This is quorum's most contrarian axis. The field runs on <b>typed gates</b>: the Claude Agent SDK evaluates every tool call through a six-step pipeline (hooks → deny → ask → mode → allow → callback, including an LLM classifier mode); Factory classifies per-tool risk against four autonomy levels and ships two fine-tuned models solely to gate git pushes (Droid Shield); OpenHands rates every action LOW→HIGH via a security analyzer; opencode even models runaway loops as a permissioned action (<code>doom_loop: deny</code>). Nothing surveyed uses an action-cap-as-only-rail design. The nearest relatives are <b>budget-class caps</b>: Devin's per-child ACU limits, Anthropic's effort budgets, Codex's concurrency caps — rate limits that bound blast radius without vetoing choices. Two currents favor quorum's stance: rails migrated <i>downward</i> (into kernels and harness permission systems, below the orchestrator), and the 2026 literature's "rails in the substrate, judgment in the prompt" framing is quorum's exact split.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>The per-run action cap is the only rail — a rate limit, never a veto. Vetoes exist only as substrate rails (runner.lock, the attached-task refusal), never as supervision policy.</div>
+  <p class="verdict"><b>Verdict: hold the philosophy, widen the rail family.</b> The cap-not-veto stance survives because the veto layer now lives where it belongs — inside harness permission systems and kernel sandboxes quorum already composes with. But the survey legitimizes more rails of the <i>same class</i>: a token/cost budget per run or task (Devin's ACU caps prove the pattern) alongside the action cap. See implication #4.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 07</span><h2>Communication topology</h2><span class="chip hold">HOLD</span></div>
+  <p>How agents talk. Frameworks offer typed handoffs (OpenAI), typed conversation channels (AG2's auto-closing "consulting" channel), and MCP everywhere. Products, strikingly, have <b>no peer message bus at all</b> — coordination is hierarchical (Factory/Devin orchestrator→worker), indirect (shared filesystem), or absent; convergence happens at the human merge gate. The research record explains the winning shape: MetaGPT's shared pub-sub message pool with subscription filtering beat ChatDev's conversational relay decisively — structured artifacts over dialogue, a blackboard over chat. And the strongest recent data point is again Claude Code agent teams: peer coordination through JSON file mailboxes and a file-locked task list. On the protocol layer, A2A and ACP are rising (Gemini CLI mounts remote agents by agent-card URL as first-class subagents), while rich session control-planes fragment per vendor.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>One message schema, two channels: an append-only board (cursor-based readers, no consumption marks) and maildir inboxes (atomic rename claims, delivery-is-acknowledgment). No new transports; herdr is a doorbell, never a second transport.</div>
+  <p class="verdict"><b>Verdict: hold.</b> The board is MetaGPT's message pool built from files; the maildir claim protocol is more careful than anything surveyed (Claude Code's team mailboxes use file locks, not atomic claims). The outbox-and-router seam already recorded in the architecture doc remains the right dormant answer to cross-sandbox delivery.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 08</span><h2>Human steering &amp; session adoption</h2><span class="chip adopt">ADOPT</span></div>
+  <p>Mid-run steering of a live session became a <b>wire primitive everywhere</b> in 2026: Claude Code stream-json stdin turns and <code>--cloud</code> nudges; Codex <code>turn/steer</code> and <code>turn/interrupt</code> as JSON-RPC calls on its app-server; Amp's <code>steer: true</code> queued messages; opencode's <code>prompt_async</code>/<code>abort</code> HTTP endpoints; Copilot's live steering prompts; Jules' send-message endpoint. Frameworks converged on the durable-pause idiom (LangGraph <code>interrupt()</code>/resume, serialized RunState approvals). Takeover is richest at Cursor (VM desktop control, pull-to-IDE). One capability appears nowhere else in the survey: <b>adopting a pre-existing interactive session</b> — recording the human's own live harness session as a supervised task via hooks. Omnara relays sessions to a phone; nothing else inverts ownership the way <code>task adopt</code> does.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>GuidancePump injects inbox messages as stream-json user turns mid-run; <span class="mono">task nudge</span> reaches attached sessions at their next stop via harness hooks; <span class="mono">task adopt</span> makes the human's live session a first-class supervised task.</div>
+  <p class="verdict"><b>Verdict: adopt the new steering planes; adoption is a moat.</b> Quorum's injection currently rides one protocol (Claude-style stream-json — which Amp deliberately cloned). Codex's app-server and opencode's HTTP API now offer equivalent or better steering hooks; thin per-harness steering adapters would extend mid-run guidance to the whole roster (implication #1). Session adoption is genuinely differentiated — worth naming loudly in positioning.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 09</span><h2>Failure semantics &amp; recovery</h2><span class="chip adopt">ADOPT +</span></div>
+  <p>Two recovery philosophies: <b>checkpoint/replay</b> (the framework consensus; OpenHands' deterministic event-log replay is the purest) versus <b>re-read the world</b> (stateless recovery from durable ground truth). Watchdogs are the interesting sub-pattern: OpenHands ships a stuck detector (sliding-window hash comparison on repeated actions, auto-halt); opencode declares doom-loops a permissioned action; Sculptor's CI Babysitter polls for red checks and spawns capped fix-it agents; Jules' CI Fixer auto-remediates its own PRs. On degraded modes, the field mostly degrades silently; quorum's fail-loud, no-fallback supervision has no peer — and needs none, since its auto-pause exemption makes recovery automatic.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>Fail loudly, recover automatically: the manager's tick raises visibly without a working harness, and the schedule keeps firing so the first good tick re-reads files and reinvokes what's needed. No degraded supervision by design.</div>
+  <p class="verdict"><b>Verdict: hold the philosophy; adopt cheap loop observation.</b> The anti-loop memory (journal with then-vs-now outcomes) covers the <i>manager's</i> loops. Nothing yet observes a <i>task harness</i> spinning — OpenHands-style repetition detection over transcript tails is a cheap, pure-file enrichment to the digest (an observation for the manager to act on, never a veto), and fits the passive-observation stance exactly. See implication #3.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 10</span><h2>Verification &amp; trust</h2><span class="chip adopt">ADOPT</span></div>
+  <p>The line through the literature is monotone: dialogic review under-verifies (ChatDev), executable feedback works (MetaGPT), verification is the terminal failure category (MAST), and agents don't self-report honestly — the 2026 field study found <b>inaccurate self-reporting rising</b> while 91.5% of misalignment fixes required explicit human correction. Products responded by productizing review: Factory's rubric-based review droids, Devin Review with auto-fix, Copilot's first-line agent review, Amp's Oracle (a standing second-opinion agent on a <i>different frontier model</i>), Imbue's Vet (checks agent actions against conversation history), and CI-reactive janitors (Sculptor's Babysitter, Jules' CI Fixer, Cursor's auto-fix of failing Actions). Best-of-N generate-then-select (Codex <code>--attempts</code>, Jules <code>--parallel</code>, Crystal's A/B sessions) is the other productized verification shape.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>Ground-truth probes over self-report: <span class="mono">workdir_git_state</span> flags stranded work (dirty/unpushed), and the default manager prompt treats it as not-done and relaunches. Transcripts and locks give passive observation of uncooperative harnesses.</div>
+  <p class="verdict"><b>Verdict: adopt — this is the highest-leverage axis.</b> The stranded-work probe is exactly what the literature prescribes, and it should grow teeth toward CI: a PR/checks probe in the digest (via <span class="mono">gh</span>, fail-soft like herdr) plus a shipped babysitter-style prompt agent would close the loop from "pushed" to "green" (implication #2). A reviewer prompt agent is nearly free — the substrate already supports it; policy is just another prompt file.</p>
+</section>
+
+<section class="axis">
+  <div class="axis-head"><span class="axis-num">AXIS 11</span><h2>Memory &amp; context engineering</h2><span class="chip hold">HOLD</span></div>
+  <p>The 2025–26 literature made context a first-class engineering surface: finite attention budgets and context rot (Anthropic), full traces over summaries (Cognition), and — most relevantly — two 2026 results on long-horizon memory: <b>ACE</b> (contexts as evolving playbooks maintained by incremental delta updates; iterative full rewrites cause "context collapse") and <b>MemAct</b> (memory curation as explicit actions). Both validate append-only, outcome-annotated, incrementally-updated journals and condemn summarize-and-rewrite compaction. Just-in-time retrieval — fetch identifiers at runtime rather than preloading — is the emerging idiom for keeping working context small.</p>
+  <div class="quorum-pos"><span class="lbl">Quorum</span>The digest is assembled fresh each tick from ground truth (statuses, liveness, transcript tails, git state) plus the manager's append-only action journal with then-vs-now outcomes — an ACE-style playbook by construction, with zero accumulated context to rot.</div>
+  <p class="verdict"><b>Verdict: hold.</b> The digest design anticipates the 2026 consensus almost exactly. The one tension: Cognition's full-traces-beat-summaries argues transcript <i>tails</i> can under-inform — but quorum's manager runs with <span class="mono">cwd=QUORUM_HOME</span> and can read any full transcript on demand, which is just-in-time retrieval. Worth one line in the manager prompt encouraging it when a tail looks ambiguous; no mechanism change.</p>
+</section>
+</div>
+
+<!-- ================= MATRIX ================= -->
+<div class="wide">
+<h2>The landscape in one table</h2>
+<p style="max-width:760px">Thirty projects, compressed to the axes that separate them. Greyed rows are dead or dormant as of 2026-08 — the indie orchestrator layer consolidated brutally (Bloop dead, Crystal deprecated, Terragon shut down, Ona acquired by OpenAI).</p>
+<div class="tablebox"><table>
+<thead><tr><th>Project</th><th>Family</th><th>Loop</th><th>State</th><th>Isolation</th><th>Supervision</th><th>Distinctive trait</th></tr></thead>
+<tbody>
+<tr><td class="pname">quorum</td><td class="fam">orchestrator</td><td>BYOH (argv templates)</td><td>plain files</td><td>worktrees + kernel (nono)</td><td>LLM manager, policy-in-prompt</td><td>session adoption; cap-not-veto rail</td></tr>
+<tr><td class="pname">LangGraph</td><td class="fam">framework</td><td>owns loop</td><td>checkpointed graph (PG/SQLite)</td><td>none</td><td>graph structure</td><td>time-travel over checkpoints</td></tr>
+<tr><td class="pname">MS Agent Framework</td><td class="fam">framework</td><td>owns loop</td><td>sessions + checkpoints</td><td>none</td><td>workflow graphs</td><td>"Harness Agent" tier; AutoGen+SK merger</td></tr>
+<tr><td class="pname">AG2</td><td class="fam">framework</td><td>owns loop</td><td>KnowledgeStore</td><td>none</td><td>typed channels</td><td>conversation-protocol typing</td></tr>
+<tr><td class="pname">CrewAI</td><td class="fam">framework</td><td>owns loop</td><td>SQLite @persist</td><td>none</td><td>LLM manager (crews) / code (flows)</td><td>resume-vs-fork state lineage</td></tr>
+<tr><td class="pname">OpenAI Agents SDK</td><td class="fam">framework</td><td>owns loop</td><td>sessions; durable engines</td><td>9 sandbox vendors</td><td>handoffs + guardrails</td><td>harness/compute plane split</td></tr>
+<tr><td class="pname">Claude Agent SDK</td><td class="fam">framework</td><td>IS a harness</td><td>harness sessions</td><td>sandbox settings</td><td>6-step permission pipeline</td><td>LLM classifier as permission mode</td></tr>
+<tr><td class="pname">smolagents</td><td class="fam">framework</td><td>owns loop (code-as-action)</td><td>in-memory</td><td>executor choice (E2B/Docker)</td><td>none</td><td>Hub-shareable agents</td></tr>
+<tr><td class="pname">Mastra</td><td class="fam">framework</td><td>owns loop</td><td>serialized workflow runs</td><td>none</td><td>typed steps + tripwires</td><td>orchestration-as-data (durable:true)</td></tr>
+<tr><td class="pname">Pydantic AI</td><td class="fam">framework</td><td>owns loop</td><td>durable engines (Temporal…)</td><td>none</td><td>deferred-tool approvals</td><td>Advisor: in-loop second opinion</td></tr>
+<tr class="dead"><td class="pname">Vibe Kanban</td><td class="fam">orchestrator</td><td>wraps ~10 CLIs</td><td>SQLite</td><td>worktrees (vk/)</td><td>human kanban (+MCP orchestrator mode)</td><td>board as 40-tool MCP server · company dead 04/26</td></tr>
+<tr><td class="pname">Claude Squad</td><td class="fam">orchestrator</td><td>wraps any CLI</td><td>plain JSON</td><td>worktrees + tmux</td><td>keystroke daemon (TapEnter)</td><td>suspendable sessions (checkout/resume)</td></tr>
+<tr class="dead"><td class="pname">Crystal</td><td class="fam">orchestrator</td><td>wraps claude/codex</td><td>SQLite</td><td>worktrees</td><td>human</td><td>A/B candidate comparison · deprecated 02/26</td></tr>
+<tr class="dead"><td class="pname">uzi</td><td class="fam">orchestrator</td><td>wraps CLIs</td><td>one JSON file</td><td>worktrees + port leases</td><td>blind auto-confirm</td><td>live preview URL per agent · dormant 06/25</td></tr>
+<tr><td class="pname">container-use</td><td class="fam">orchestrator</td><td>none (env provider)</td><td>git as database</td><td>branch→container</td><td>human</td><td>container state in git notes</td></tr>
+<tr><td class="pname">Sculptor</td><td class="fam">orchestrator</td><td>deep harness adapters</td><td>SQLite event log</td><td>worktrees (reverted from containers)</td><td>human + CI Babysitter</td><td>agents extend the orchestrator itself</td></tr>
+<tr><td class="pname">Conductor</td><td class="fam">orchestrator</td><td>wraps 4 harnesses</td><td>files + git</td><td>worktrees / cloud microVMs</td><td>human</td><td>zero inference billing (BYO subscription)</td></tr>
+<tr><td class="pname">OpenHands</td><td class="fam">orchestrator</td><td>own SDK + ACP wrapping</td><td>event-sourced JSON files</td><td>opt-in Docker/remote</td><td>cron/webhooks + in-run analyzers</td><td>neutral control plane over rivals' harnesses</td></tr>
+<tr><td class="pname">Cursor cloud agents</td><td class="fam">orchestrator</td><td>own harness + model</td><td>opaque cloud</td><td>Firecracker microVM each</td><td>goal-holding + BugBot respawn</td><td>owns git substrate (Origin); filmed proof in PRs</td></tr>
+<tr><td class="pname">Factory (Droid)</td><td class="fam">orchestrator</td><td>own agent + router</td><td>cloud sessions API</td><td>VMs + kernel sandbox</td><td>LLM Mission Control + kernel rails</td><td>fine-tuned models as guardrails (Droid Shield)</td></tr>
+<tr><td class="pname">Devin</td><td class="fam">orchestrator</td><td>own agent</td><td>cloud</td><td>VM per session</td><td>coordinator Devin w/ ACU caps</td><td>recursive: Devins orchestrating Devins</td></tr>
+<tr><td class="pname">Ona (ex-Gitpod)</td><td class="fam">orchestrator</td><td>own + Codex</td><td>cloud</td><td>VPC sandboxes, kernel policy</td><td>event-triggered fleets</td><td>acquired by OpenAI 06/26 — substrate as asset</td></tr>
+<tr><td class="pname">Omnara</td><td class="fam">orchestrator</td><td>relays local harnesses</td><td>Postgres</td><td>user's machine</td><td>human via push notification</td><td>phone/watch as the control surface</td></tr>
+<tr><td class="pname">Claude-Flow</td><td class="fam">orchestrator</td><td>wraps Claude Code only</td><td>own DB + vectors</td><td>in-harness</td><td>"queen-led" swarm</td><td>69.7k stars; claims unverifiable</td></tr>
+<tr><td class="pname">Claude Code</td><td class="fam">harness</td><td>native</td><td>JSONL sessions; team JSON mailboxes</td><td>Seatbelt/bwrap + worktree subagents</td><td>model orchestrates; caps as rails</td><td>hooks as an orchestration language</td></tr>
+<tr><td class="pname">Codex</td><td class="fam">harness</td><td>native</td><td>JSONL rollouts</td><td>bwrap+seccomp; cloud containers</td><td>model + approval policies</td><td>4-altitude protocol stack; MCP deprecated for app-server</td></tr>
+<tr><td class="pname">opencode</td><td class="fam">harness</td><td>native</td><td>snapshot object DB</td><td>permissions, no OS sandbox</td><td>permission-shaped topology</td><td>doom_loop as a permission key</td></tr>
+<tr><td class="pname">Amp</td><td class="fam">harness</td><td>native</td><td>server-synced threads</td><td>orbs (cloud machines)</td><td>Puck meta-agent; Oracle critic</td><td>threads as addressable webhook-driven services</td></tr>
+<tr><td class="pname">Copilot cloud agent</td><td class="fam">harness</td><td>native (+3rd-party via Agent HQ)</td><td>GitHub</td><td>Actions runner, egress firewall</td><td>structural git limits</td><td>&amp;-prefix cross-machine dispatch; tasks REST API</td></tr>
+<tr><td class="pname">Jules / Gemini CLI</td><td class="fam">harness</td><td>native</td><td>cloud VMs / local chats</td><td>VM per session / gVisor et al.</td><td>Planning Critic; CI Fixer</td><td>A2A remote agents inside the local roster</td></tr>
+</tbody></table></div>
+<p class="legend">Loop = who owns the agent loop · Supervision = what watches the agents. Compiled from the four research reports; per-project sources below.</p>
+</div>
+
+<div class="wrap">
+<!-- ================= IMPLICATIONS ================= -->
+<h2>Implications for quorum, ranked by leverage</h2>
+<p>No finding argues for revising a recorded stance — the big three invariants and the smaller per-layer stances all came back strengthened. Everything below is additive, ordered by expected payoff over effort.</p>
+
+<div class="impl"><div class="impl-head"><span class="rank">#1</span><h3>Steering adapters for the new control planes</h3><span class="chip adopt">ADOPT</span></div>
+<p>Mid-run injection currently requires <code>inject = "stream-json"</code> — one protocol. Codex's app-server (<code>turn/steer</code>, <code>turn/interrupt</code> over JSON-RPC), opencode's HTTP API (<code>prompt_async</code>, <code>abort</code>), and Amp's Claude-compatible <code>steer: true</code> now offer equivalent injection points. Thin per-harness steering adapters — same GuidancePump contract, different wire — would extend mid-run guidance from one harness to the whole roster.</p>
+<p class="why">Why now: every vendor made sessions addressable in 2026; the adapter surface is thin and has stabilized by imitation of Claude Code.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#2</span><h3>Extend ground-truth probes to CI, and ship a babysitter</h3><span class="chip adopt">ADOPT</span></div>
+<p>The stranded-work probe stops at "pushed." A fail-soft PR/checks probe (via <code>gh</code>, herdr-style: absent tooling degrades to nothing) would put red CI into the digest; a shipped example <i>prompt agent</i> in the Sculptor-Babysitter shape (watch checks on quorum-branch PRs, nudge or relaunch the task with the failure) closes the loop from "pushed" to "green". Policy stays in a prompt file — no new Python decisions.</p>
+<p class="why">Why now: the strongest empirical finding in the survey — agents don't self-detect failure (91.5% of fixes were human-initiated), and every serious product grew a CI-reactive loop in 2026.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#3</span><h3>Loop observation in the digest</h3><span class="chip adopt">ADOPT</span></div>
+<p>An OpenHands-style repetition heuristic (sliding-window hashing over transcript-tail tool calls) surfacing a <code>possible-loop</code> flag per task in the digest. Strictly an observation for the manager to act on — never an automatic halt — preserving the cap-is-the-only-rail stance.</p>
+<p class="why">Why now: cheap, pure-file, and covers the one loop class the action journal can't see: a task harness spinning inside a single run.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#4</span><h3>Budget-class rails beside the action cap</h3><span class="chip adopt">ADOPT</span></div>
+<p>A per-run token/cost budget (harnesses now report usage in their result events — <code>total_cost_usd</code> in Claude's, token counts in Codex's) as a second rate-limit-class rail. Same philosophy as the action cap: bounds blast radius, never second-guesses a choice.</p>
+<p class="why">Why now: Devin's per-child ACU caps and Anthropic's effort budgets legitimized the pattern; token usage explains 80% of multi-agent performance variance, so cost is the honest thing to meter.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#5</span><h3>An ACP adapter as the universal harness integration</h3><span class="chip watch">WATCH → ADOPT</span></div>
+<p>The Agent Client Protocol (JSON-RPC over stdio, 40+ agents, Linux Foundation-adjacent stewardship, public registry) is how OpenHands wraps competitors' harnesses. One ACP adapter in <span class="mono">integrations/</span> could subsume many per-CLI templates — worth prototyping once a second orchestrator-relevant harness ships ACP support natively.</p>
+<p class="why">Why watch: convergence is real but young; the argv-template path still covers the harnesses that matter today.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#6</span><h3>Best-of-N tasks</h3><span class="chip watch">WATCH</span></div>
+<p>Fan one task to N worktrees, let the manager (or human) pick the winner — Codex <code>--attempts</code>, Jules <code>--parallel</code>, and Crystal's A/B flow all productized this. Quorum's substrate nearly supports it already (N tasks, one prompt); the missing piece is a comparison affordance, not orchestration.</p>
+<p class="why">Why only watch: it multiplies token cost by N for wins the literature attributes mostly to the extra compute; let user demand pull it.</p></div>
+
+<div class="impl"><div class="impl-head"><span class="rank">#7</span><h3>Positioning: say the differentiated things out loud</h3><span class="chip adopt">ADOPT</span></div>
+<p>Two capabilities appear nowhere else in a 30-project survey: <b>session adoption</b> (the human's live session as a supervised task) and <b>harness-driven supervision on a plain-file substrate</b> (the frontier products' pattern, local-first and inspectable). The README should claim both explicitly, framed by the survey's own conclusion: as harnesses absorb orchestration mechanics, the external layer's value concentrates in being cross-harness, local-first, and policy-owned.</p>
+<p class="why">Why now: the framing writes itself from primary sources, and the crowded middle of this market just died — differentiation is the survival trait.</p></div>
+
+<!-- ================= SOURCES ================= -->
+<h2>Sources</h2>
+<p style="font-size:14.5px; color:var(--muted)">Primary sources fetched by the research agents on 2026-08-29. Selected; per-claim citations live in the four underlying research reports.</p>
+<div class="srcs">
+  <div><div class="grp">Research literature</div>
+    <a href="https://arxiv.org/abs/2405.15793">SWE-agent (ACI)</a>
+    <a href="https://arxiv.org/abs/2308.00352">MetaGPT</a>
+    <a href="https://arxiv.org/abs/2307.07924">ChatDev</a>
+    <a href="https://arxiv.org/abs/2308.08155">AutoGen</a>
+    <a href="https://www.anthropic.com/engineering/built-multi-agent-research-system">Anthropic: multi-agent research system</a>
+    <a href="https://cognition.com/blog/dont-build-multi-agents">Cognition: Don't Build Multi-Agents</a>
+    <a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">Anthropic: context engineering</a>
+    <a href="https://arxiv.org/abs/2503.13657">MAST failure taxonomy</a>
+    <a href="https://arxiv.org/abs/2605.29442">How Coding Agents Fail Their Users</a>
+    <a href="https://arxiv.org/abs/2605.03310">Coordination as an architectural layer</a>
+    <a href="https://arxiv.org/abs/2510.04618">ACE: Agentic Context Engineering</a>
+    <a href="https://arxiv.org/abs/2510.12635">Memory-as-Action</a>
+    <a href="https://arxiv.org/abs/2501.06322">Tran et al.: collaboration mechanisms survey</a>
+    <a href="https://arxiv.org/abs/2509.16941">SWE-bench Pro</a>
+    <a href="https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/">OpenAI on retiring SWE-bench Verified</a>
+  </div>
+  <div><div class="grp">Frameworks</div>
+    <a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph</a>
+    <a href="https://github.com/microsoft/agent-framework">Microsoft Agent Framework</a>
+    <a href="https://github.com/ag2ai/ag2">AG2</a>
+    <a href="https://docs.crewai.com/en/introduction">CrewAI</a>
+    <a href="https://openai.github.io/openai-agents-python/">OpenAI Agents SDK</a>
+    <a href="https://developers.openai.com/api/docs/guides/agents/sandboxes">OpenAI sandboxes (harness/compute)</a>
+    <a href="https://code.claude.com/docs/en/agent-sdk/overview">Claude Agent SDK</a>
+    <a href="https://github.com/huggingface/smolagents">smolagents</a>
+    <a href="https://mastra.ai/docs">Mastra</a>
+    <a href="https://pydantic.dev/docs/ai/overview/">Pydantic AI</a>
+  </div>
+  <div><div class="grp">Orchestrators</div>
+    <a href="https://github.com/BloopAI/vibe-kanban">Vibe Kanban</a>
+    <a href="https://github.com/smtg-ai/claude-squad">Claude Squad</a>
+    <a href="https://github.com/stravu/crystal">Crystal</a>
+    <a href="https://github.com/devflowinc/uzi">uzi</a>
+    <a href="https://github.com/dagger/container-use">container-use</a>
+    <a href="https://github.com/imbue-ai/sculptor">Sculptor</a>
+    <a href="https://conductor.build">Conductor</a>
+    <a href="https://github.com/OpenHands/OpenHands">OpenHands</a>
+    <a href="https://arxiv.org/abs/2511.03690">OpenHands Software Agent SDK</a>
+    <a href="https://cursor.com/docs/cloud-agent">Cursor cloud agents</a>
+    <a href="https://docs.factory.ai">Factory</a>
+    <a href="https://docs.devin.ai">Devin</a>
+    <a href="https://github.com/omnara-ai/omnara">Omnara</a>
+  </div>
+  <div><div class="grp">Harness-native</div>
+    <a href="https://code.claude.com/docs/en/sub-agents">Claude Code subagents</a>
+    <a href="https://code.claude.com/docs/en/agent-teams">Claude Code agent teams</a>
+    <a href="https://github.com/openai/codex">Codex</a>
+    <a href="https://opencode.ai/docs/">opencode</a>
+    <a href="https://ampcode.com/docs/orbs">Amp orbs</a>
+    <a href="https://docs.github.com/copilot/concepts/agents/coding-agent/about-coding-agent">Copilot cloud agent</a>
+    <a href="https://developers.google.com/jules/api">Jules API</a>
+    <a href="https://github.com/google-gemini/gemini-cli/tree/main/docs">Gemini CLI</a>
+    <a href="https://agentclientprotocol.com/get-started/agents">Agent Client Protocol</a>
+    <a href="https://agents.md/">AGENTS.md</a>
+  </div>
+</div>
+
+<p class="note">Compiled 2026-08-29 by four parallel research agents plus in-context synthesis against <span class="mono">docs/architecture.md</span>. Claims the research agents could not verify from primary sources are flagged in the underlying reports (e.g. Claude-Flow's self-claims, Conductor's crash recovery, Ona's acquisition price). This space moves monthly; placements are a snapshot, not gospel — the same standard quorum's CLAUDE.md applies to its own invariants.</p>
+</div>
