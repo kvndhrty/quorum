@@ -249,6 +249,26 @@ def test_a_digest_spends_a_bounded_number_of_probes(
     assert digest.count("  ci: ") == CI_MAX_PROBES
 
 
+def test_queued_tasks_do_not_spend_the_probe_budget(
+    home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """A workdir-less task costs no subprocess, so it must not cost budget:
+    a queue deeper than the budget must not starve the one probeable task."""
+    from quorum.agents.manager import CI_MAX_PROBES
+
+    log = tmp_path / "gh.log"
+    install_gh(path_without_gh, monkeypatch, log=log)
+    store = TaskStore(home)
+    for _ in range(CI_MAX_PROBES + 3):
+        store.add(project="p", prompt="queued, nowhere to probe", harness="t")
+    task = make_task(home, make_repo(tmp_path))
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert len(log.read_text().splitlines()) == 1
+    assert f"- [executing] {task.short_id}" in digest
+    assert digest.count("  ci: ") == 1
+
+
 def test_no_probe_runs_at_all_without_a_working_gh(
     home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):

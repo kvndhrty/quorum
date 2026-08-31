@@ -200,12 +200,15 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
     attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
     # Resolved once: without gh (or with [ci].enabled = false) no task is
-    # probed at all, rather than paying a config load and a which() each.
+    # probed at all.
     ci_budget = CI_MAX_PROBES if ci.available(home) else 0
 
     def ci_state(task: tasks.Task) -> dict | None:
         nonlocal ci_budget
-        if ci_budget <= 0:
+        if ci_budget <= 0 or ci.probeable(task) is None:
+            # A workdir-less (queued) task costs no subprocess, so it must
+            # not spend budget either — the budget exists so live and
+            # finished work always gets probed.
             return None
         ci_budget -= 1
         return ci.pr_state(home, task)

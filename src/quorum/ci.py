@@ -101,7 +101,10 @@ def _gh(home: Path, workdir: Path, *args: str) -> object | None:
             env={**os.environ, **GH_ENV},
             stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.SubprocessError):
+    except Exception:
+        # Fail-soft like herdr.py's bare except: timeouts and exec errors are
+        # the usual suspects, but text=True can also raise UnicodeDecodeError
+        # on non-UTF-8 output, and none of them may break a digest.
         return None
     if proc.returncode != 0:
         return None
@@ -169,14 +172,11 @@ def _summarize(pr: object) -> dict | None:
     }
 
 
-def pr_state(home: Path, task) -> dict | None:
-    """The pull request for the task's current branch, or None.
+def probeable(task) -> Path | None:
+    """The task's workdir as an existing directory, or None.
 
-    `gh pr view` resolves the repository from the workdir's remote and the
-    PR from its checked-out branch, which is exactly what a task worktree
-    (branch `quorum/<short-id>`) or an adopted checkout provides. None means
-    "nothing to say" for every reason — probe disabled, no gh, no auth, no
-    remote, no PR yet, timeout, garbage output.
+    A queued task has no workdir yet and a cleaned-up one may have lost it;
+    neither is worth a subprocess (or a slot of the digest's probe budget).
     """
     workdir = getattr(task, "workdir", "") or ""
     if not workdir:
@@ -186,6 +186,21 @@ def pr_state(home: Path, task) -> dict | None:
         if not directory.is_dir():
             return None
     except OSError:
+        return None
+    return directory
+
+
+def pr_state(home: Path, task) -> dict | None:
+    """The pull request for the task's current branch, or None.
+
+    `gh pr view` resolves the repository from the workdir's remote and the
+    PR from its checked-out branch, which is exactly what a task worktree
+    (branch `quorum/<short-id>`) or an adopted checkout provides. None means
+    "nothing to say" for every reason — probe disabled, no gh, no auth, no
+    remote, no PR yet, timeout, garbage output.
+    """
+    directory = probeable(task)
+    if directory is None:
         return None
     if not available(home):
         return None
