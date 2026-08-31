@@ -80,6 +80,21 @@ class TasksConfig(BaseModel):
     # ever applied to a task's own worktree, never the user's checkout; a
     # nono-sandboxed run skips it with a note (the sandbox blocks git).
     auto_commit: bool = False
+    # Per-run token/cost budget (usage.py). 0 = off, which is the default and
+    # what any harness that reports no usage always effectively gets. These
+    # are *observation* thresholds today: a run over budget is flagged in the
+    # digest and in views, and nothing is killed or vetoed — enforcement
+    # (gating the next run) is a separate, later decision, and would stay in
+    # the rate-limit family the action cap belongs to.
+    max_cost_per_run: float = 0.0
+    max_tokens_per_run: int = 0
+
+    @field_validator("max_cost_per_run", "max_tokens_per_run")
+    @classmethod
+    def _nonnegative(cls, v, info):
+        if v < 0:
+            raise ValueError(f"{info.field_name} must be >= 0 (0 disables the budget)")
+        return v
 
 
 class HerdrConfig(BaseModel):

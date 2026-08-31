@@ -75,7 +75,7 @@ class QuorumTUI(App):
 
     def on_mount(self) -> None:
         tasks = self.query_one("#tasks", DataTable)
-        tasks.add_columns("task", "project", "status", "harness", "last report", "pr")
+        tasks.add_columns("task", "project", "status", "harness", "spent", "last report", "pr")
         tasks.cursor_type = "row"
         agents = self.query_one("#agents", DataTable)
         agents.add_columns("agent", "status", "schedule", "last run", "next run")
@@ -171,6 +171,12 @@ class QuorumTUI(App):
                     t["project"],
                     Text(status, style=style),
                     t["harness"],
+                    # "" whenever the harness reported no usage; a task over
+                    # its configured budget is marked, never blocked.
+                    Text(
+                        t.get("usage_text", "") + (" $!" if t.get("budget_overages") else ""),
+                        style="yellow" if t.get("budget_overages") else "",
+                    ),
                     (t["last_report"] or t["prompt"])[:60],
                     t["pr_url"] or "—",
                     key=t["id"],

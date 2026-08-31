@@ -69,6 +69,8 @@ agents/<name>.toml                file-defined agents (the one config location
 supervisor.lock                   pid + start time; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
+                                  (each run: times, exit code, auto-commit
+                                   note, reported token/cost usage)
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -114,9 +116,11 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
 5. spawn the harness with `cwd=<workdir>` and `QUORUM_HOME` in its
    environment; stream stdout line-by-line into `transcript.jsonl`,
    capturing a `session_id` (or codex-style `thread_id`) from any JSON
-   event that carries one,
+   event that carries one, and whatever token/cost usage its result events
+   report (below),
 6. optionally auto-commit (below),
-7. append the run (exit code, timestamps) to `task.json`; release the lock.
+7. append the run (exit code, timestamps, usage) to `task.json`; release
+   the lock.
 
 **Auto-commit (`[tasks].auto_commit`, default off).** The delivery protocol
 in the task preamble and the `STRANDED-WORK` flag in views and the digest
@@ -158,6 +162,53 @@ found, never lost. Deliberately narrow:
 - a failure (no git identity, a stale index lock) is recorded the same two
   ways rather than raised: the tree simply stays dirty, which is the state
   `workdir_git_state` already reports for the manager to chase.
+
+**Token/cost usage (`usage.py`).** Harnesses already say what a run spent —
+claude's terminal `result` event carries `total_cost_usd` and a `usage`
+block, codex's `turn.completed` and `token_count` carry token counts — and
+the runner is already parsing every stdout event on its way to the
+transcript. So capture is one more look at each parsed event
+(`UsageCollector` on the runner's `on_event` hook) and the result lands as
+`usage` on the run's entry in `task.json`. No new file, no new store.
+
+- **Extraction is loose, storage is canonical.** Any event typed `result` /
+  `turn.completed` / `token_count` / ... (or carrying a top-level cost key,
+  so an unknown harness still gets its cost recorded) is a spend report;
+  the key spellings the field actually uses (`input_tokens` /
+  `inputTokens` / `prompt_tokens`, `cache_read_input_tokens` /
+  `cached_input_tokens`, ...) normalize to one small set of keys, so no
+  reader branches on which harness ran. `total_tokens` is the harness's own
+  figure when it reports one, else input + output + cache-read +
+  cache-creation: everything the model processed.
+- **Silence is unknown, never zero.** A harness that reports nothing (the
+  shipped opencode template, most custom scripts, anything printing plain
+  text) records `usage = null`, and every reader omits the field rather
+  than showing `$0.00`. Nothing in the module raises on a malformed event.
+- **Within a run the reduction is elementwise max, across runs it is a
+  sum.** The harnesses that report usage report *run-cumulative* totals
+  (verified against real claude transcripts), and a pumped multi-turn run
+  emits one such event per turn, so summing them would multiply the spend.
+  Max equals "the last event that reported anything" for a cumulative
+  reporter and merely under-counts a hypothetical per-turn one — the same
+  prefer-false-negatives tradeoff as `possible-loop`, and the honest
+  direction for a number a budget may be judged against. Separate runs are
+  separate spends, so a task total sums them.
+- **Surfacing** is pure file reading: `views.task_rows` carries `usage`
+  (task total), `usage_text` (rendered once, so the CLI, TUI and browser
+  agree) and `budget_overages`; `quorum status` / `task list` append
+  `$0.42 · 11.0k tok` to the row, `task show` breaks it out, and the
+  manager digest gets a `usage:` line per task.
+- **The budget is an observation, not (yet) a rail.** `[tasks]
+  max_cost_per_run` / `max_tokens_per_run` (validated non-negative, 0 =
+  off) turn an over-budget run into a `BUDGET-EXCEEDED` digest line and a
+  `$!` mark in the views. Quorum kills nothing and refuses nothing for
+  cost; the manager reads the flag and decides, exactly as it does with
+  `possible-loop`. Enforcement — gating the *next* run of a task that blew
+  its budget — is a deliberate follow-up (issue #19 step 3): it would join
+  the **rate-limit family** the per-run action cap belongs to (bound a
+  bad run's blast radius, never veto a particular choice), and mid-run
+  enforcement is only even expressible for pumped runs, where stdin can be
+  closed at a turn boundary.
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
@@ -273,7 +324,10 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    pull request behind the branch, `CI-FAILING` on a finished task whose
    checks are red (see below); a `possible-loop:` line
    when a task's transcript tail is dominated by one repeated tool call
-   (see below); the manager's own
+   (see below); a `usage:` line with what the task has spent when its
+   harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
+   configured `[tasks]` budget (both observations — see *Token/cost usage*
+   above); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked

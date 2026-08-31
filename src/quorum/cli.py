@@ -13,7 +13,7 @@ from pathlib import Path
 
 import typer
 
-from . import fsio
+from . import fsio, usage
 from . import home as home_mod
 from .actor import (
     ACTOR_CAP_ENV,
@@ -95,6 +95,17 @@ def _load_config(home: Path):
         return load_config(home)
     except ConfigError as e:
         raise _fail(str(e)) from None
+
+
+def _try_config(home: Path):
+    """Config for a read-only view: an absent or broken config.toml degrades
+    to defaults instead of failing the display (views never demand config)."""
+    from .config import Config, ConfigError, load_config
+
+    try:
+        return load_config(home)
+    except ConfigError:
+        return Config()
 
 
 def _actor_guard(
@@ -368,6 +379,8 @@ def doctor(home: Path | None = _HOME_OPT) -> None:
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ⚠ uncommitted/unpushed work in the task's workdir
+          $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
+          cost/tokens are shown when the harness reported them, summed over runs
   agents: ● idle   ◐ running   ✗ error   ‖ paused   ○ never ran"""
 
 
@@ -454,6 +467,10 @@ def _echo_task_row(t: dict) -> None:
         if git["unpushed"]:
             risks.append(f"{git['unpushed']} unpushed")
         line += "  ⚠ " + ", ".join(risks)
+    if t.get("usage_text"):
+        line += f"  {t['usage_text']}"
+    if t.get("budget_overages"):
+        line += "  $!"
     typer.echo(line)
 
 
@@ -775,6 +792,14 @@ def task_show(
             f"  runs:     {len(task.runs)} (last: {last.started_at} → "
             f"{last.ended_at or 'running'}, exit {last.exit_code if last.exit_code is not None else '—'})"
         )
+        spent = usage.describe(usage.total(r.usage for r in task.runs))
+        if spent:
+            typer.echo(f"  usage:    {spent} (as reported by the harness)")
+        config = _try_config(target)
+        for note in usage.run_overages(
+            task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
+        ):
+            typer.secho(f"  budget:   {note}", fg="yellow")
     typer.echo(f"  updated:  {task.updated_at}")
     reports = read_reports(target, task.id, limit=10)
     if reports:

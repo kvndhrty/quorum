@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from quorum.cli import app
@@ -556,6 +557,66 @@ def test_list_commands_emit_json(home: Path, tmp_path: Path):
     assert any(a["name"] == "manager" for a in agents)
     overview = json.loads(runner.invoke(app, ["status", "--json", "--home", str(home)]).output)
     assert overview["attention"]["count"] == 0
+
+
+def test_status_and_task_show_surface_what_a_run_spent(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """Surfacing end to end: a usage-reporting run shows up in `quorum status`,
+    `task list --json` and `task show`, and a configured budget marks the row
+    without stopping anything."""
+    slug = setup_task_env(home, tmp_path)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+
+    r = runner.invoke(app, ["status", "--home", str(home)])
+    assert "$0.42 · 11.0k tok" in r.output
+    assert "$!" in r.output  # over the configured budget — marked, not blocked
+
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["usage"]["cost_usd"] == 0.42 and row["usage"]["runs"] == 1
+    assert row["budget_overages"] == ["run 1: cost $0.42 > max_cost_per_run $0.10"]
+
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "usage:    $0.42 · 11.0k tok" in r.output
+    assert "budget:   run 1: cost $0.42 > max_cost_per_run $0.10" in r.output
+
+
+def test_status_stays_clean_when_no_harness_reports_usage(home: Path, tmp_path: Path):
+    """The fail-soft half: no usage reported, nothing shown, no zeros."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "quiet work", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    runner.invoke(app, ["task", "run", short, "--home", str(home)])
+
+    r = runner.invoke(app, ["status", "--home", str(home)])
+    assert "tok" not in r.output and "$" not in r.output
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["usage"] is None and row["usage_text"] == "" and row["budget_overages"] == []
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "usage:" not in r.output
+
+
+def test_budget_config_is_validated(home: Path):
+    from quorum.config import ConfigError, load_config
+
+    cfg = home / "config.toml"
+    original = cfg.read_text()
+    cfg.write_text(original.replace("worktree = true", "worktree = true\nmax_cost_per_run = -1"))
+    with pytest.raises(ConfigError, match="max_cost_per_run must be >= 0"):
+        load_config(home)
+
+    cfg.write_text(original.replace("worktree = true", "worktree = true\nmax_tokens_per_run = -5"))
+    with pytest.raises(ConfigError, match="max_tokens_per_run must be >= 0"):
+        load_config(home)
+
+    cfg.write_text(original.replace("worktree = true", "worktree = true\nmax_cost_per_run = 2.5"))
+    assert load_config(home).tasks.max_cost_per_run == 2.5
+    assert load_config(home).tasks.max_tokens_per_run == 0  # off by default
 
 
 def test_status_legend_names_the_glyphs(home: Path):

@@ -28,9 +28,10 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from .. import actor, ci, fsio, herdr, tasks
+from .. import actor, ci, fsio, herdr, tasks, usage
 from ..actor import journal_path
 from ..agent import Agent
+from ..config import Config, ConfigError, TasksConfig, load_config
 from ..runner import guidance_note
 from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
 
@@ -184,7 +185,45 @@ def loop_signal(entries: list[dict]) -> dict | None:
     }
 
 
-def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directives: list[str]) -> str:
+def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
+    """What a task has spent, and whether any run went over budget.
+
+    Absent entirely when the harness reported nothing — silence is unknown
+    spend, never zero. The BUDGET-EXCEEDED line is an *observation* of the
+    same class as `possible-loop`: quorum did not stop the run and will not,
+    the manager decides what an expensive task deserves.
+    """
+    lines = []
+    spent = usage.total(r.usage for r in task.runs)
+    if spent:
+        lines.append(
+            f"  usage: {usage.describe(spent)} over {int(spent['runs'])} reporting run(s)"
+        )
+    for note in usage.run_overages(
+        task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+    ):
+        lines.append(f"  BUDGET-EXCEEDED: {note} — an observation, not a rail")
+    return lines
+
+
+def _budget(home: Path, tasks_config: TasksConfig | None) -> TasksConfig:
+    """The task budget the digest judges spend against; defaults (no budget)
+    when the caller has no config and none can be read."""
+    if tasks_config is not None:
+        return tasks_config
+    try:
+        return load_config(home).tasks
+    except ConfigError:
+        return Config().tasks
+
+
+def build_digest(
+    home: Path,
+    all_tasks: list[tasks.Task],
+    now: datetime,
+    directives: list[str],
+    tasks_config: TasksConfig | None = None,
+) -> str:
     """The manager's whole world, compiled from files. Greppable: task lines
     look like `- [status] shortid ...` so both models and tests can parse
     them.
@@ -195,6 +234,7 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
     always builds.
     """
     home = Path(home)
+    budget = _budget(home, tasks_config)
     live = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
@@ -235,6 +275,7 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
         pr = ci_state(t)
         if pr:
             lines.append(f"  ci: {ci.describe(pr)}")
+        lines.extend(_usage_lines(t, budget))
         for r in tasks.read_reports(home, t.id, limit=3):
             lines.append(f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}")
         scan = tasks.read_transcript_tail(
@@ -321,6 +362,7 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
             if pr:
                 bad = "CI-FAILING " if (pr["summary"] == "failing" or pr["conflict"]) else ""
                 lines.append(f"  ci: {bad}{ci.describe(pr)}")
+            lines.extend(_usage_lines(t, budget))
         lines.append("")
 
     lines.append("## Your recent actions (journal)")
@@ -368,7 +410,13 @@ class Manager(Agent):
 
         directives = [guidance_note(c.message) for c in claimed]
         try:
-            digest = build_digest(home, all_tasks, self.ctx.now(), directives)
+            digest = build_digest(
+                home,
+                all_tasks,
+                self.ctx.now(),
+                directives,
+                self.ctx.config.tasks if self.ctx.config else None,
+            )
             prompt = self.ctx.prompt("manager", digest=digest)
             run_agent_harness(self.ctx, prompt)
         except BaseException:

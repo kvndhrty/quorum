@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from quorum import fsio, runner, tasks
+from quorum import fsio, runner, tasks, usage
 from quorum.config import HarnessConfig, load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
@@ -236,6 +236,64 @@ def test_inject_pump_closes_an_idle_run(home: Path, project: str, monkeypatch):
     assert run_task(home, config, task.id) == 0
     fresh = TaskStore(home).get(task.id)
     assert fresh.runs[0].exit_code == 0
+
+
+def test_run_records_the_usage_the_harness_reported(home: Path, project: str, monkeypatch):
+    """Capture: a result event carrying cost and tokens lands on the run's
+    entry in task.json, canonicalized, and adds up across runs."""
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    spent = TaskStore(home).get(task.id).runs[0].usage
+    assert spent["cost_usd"] == 0.42
+    assert spent["total_tokens"] == 11000  # input + output + cache read + cache creation
+    assert spent["events"] == 1
+
+    assert run_task(home, config, task.id) == 0
+    fresh = TaskStore(home).get(task.id)
+    total = usage.total(r.usage for r in fresh.runs)
+    assert total["cost_usd"] == pytest.approx(0.84) and total["runs"] == 2
+
+
+def test_a_harness_that_reports_no_usage_is_still_fully_supported(
+    home: Path, project: str
+):
+    """Fail-soft: silence means unknown, recorded as None — never zero, and
+    never an error."""
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.runs[0].usage is None
+    assert usage.total(r.usage for r in fresh.runs) is None
+
+
+def test_multi_turn_usage_is_reduced_by_max_not_summed(
+    home: Path, project: str, monkeypatch
+):
+    """A pumped run emits one result event per turn, each reporting the
+    session's cumulative totals; summing them would multiply the spend."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject")
+    monkeypatch.setenv("FAKE_HARNESS_INJECT_POST", "nudge")
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    spent = TaskStore(home).get(task.id).runs[0].usage
+    assert spent["events"] >= 2  # more than one result event was seen…
+    assert spent["cost_usd"] == 0.42  # …and the run still cost what it cost
+    assert spent["total_tokens"] == 11000
 
 
 def test_harness_reports_back_through_the_cli(home: Path, project: str, monkeypatch):

@@ -48,6 +48,10 @@ class TaskRun(BaseModel):
     # as <sha>" / "auto-commit failed: ..."), None when the net didn't fire —
     # the durable record that quorum, not the harness, committed that work.
     auto_commit: str | None = None
+    # What the harness said this run spent (usage.py): canonical token
+    # counts and cost, or None when it reported nothing — most harnesses
+    # say nothing, and every reader treats absence as "unknown", never zero.
+    usage: dict[str, Any] | None = None
 
 
 class Task(BaseModel):

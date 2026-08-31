@@ -27,6 +27,10 @@ worktree = true           # each task runs in its own git worktree
 #auto_commit = true       # safety net: commit whatever a run leaves uncommitted
                           # in its worktree, so a crashed harness loses nothing
                           # (skipped under [sandbox].use_nono — git is blocked there)
+#max_cost_per_run = 5.0   # budget observation (0 = off): a run that reports
+#max_tokens_per_run = 0   # more spend than this is flagged in the digest and
+                          # in `quorum status`. Nothing is killed or refused
+                          # for cost — the manager judges what to do.
 
 # A harness is any coding-agent CLI; {prompt} and {session} are substituted.
 # Runs are unattended — the flags below let the harness act without asking,
@@ -122,6 +126,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",
         "5f2838b51db8ac07f830a668cae0d6c4d9afe181d7598d51a7dbd1afe5b89b15",
         "02e3715e80b0bdb167b1c35bc354ba756efc00774772e1f6e0e9193c93a974f2",
+        # the #19 (usage/budget) revision, replaced by the merge with the
+        # ci-probe revision
+        "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
     },
 }
 

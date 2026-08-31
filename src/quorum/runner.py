@@ -16,7 +16,8 @@ A run is the unit of control for a generic harness. The runner:
 6. optionally (`[tasks].auto_commit`) commits anything the harness left
    uncommitted in its worktree — a mechanical safety net, since branches
    outlive worktrees,
-7. records the run's exit in task.json and releases the lock.
+7. records the run's exit (and reported usage) in task.json and releases
+   the lock.
 
 A harness with `inject = "stream-json"` speaks over stdin instead of argv: a
 stream-json CLI reads user turns only from stdin (claude ignores an argv
@@ -45,7 +46,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import fsio, prompts
+from . import fsio, prompts, usage
 from .actor import strip_actor_env
 from .config import Config, HarnessConfig
 from .messages import Message, MessageBus
@@ -513,6 +514,7 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
             env=env,
         )
         session = task.session
+        spend = usage.UsageCollector()
 
         with guidance_pump(home, inbox_name(task.id), harness, proc, prompt) as pump:
 
@@ -523,6 +525,7 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
                     if found:
                         session = found
                         store.update(task.id, session=found)
+                spend.add(event)
                 if pump is not None:
                     pump.on_event(event)
 
@@ -536,6 +539,7 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
             ended_at=fsio.iso(fsio.utc_now()),
             exit_code=exit_code,
             auto_commit=auto_commit_note,
+            usage=spend.result(),
         )
         fresh = store.get(task.id)  # status may have moved via `task report` mid-run
         prior = [r.model_dump() for r in (fresh.runs if fresh else task.runs)]
