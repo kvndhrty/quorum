@@ -133,7 +133,8 @@ and `docs/architecture.md` in the same commit so the record stays true.
   statuses, runner liveness, quiet time, report/transcript tails, a
   `possible-loop` flag from `loop_signal` — a repetition read over the current
   run's tool calls (live runners only, deduped by call id, JSON-event
-  harnesses only), an **observation the manager judges, never a rail**;
+  harnesses only), plus a `ci:` line from `ci.pr_state` — both
+  **observations the manager judges, never rails**;
   thresholds are commented constants, tuned to prefer false negatives
   — the manager's own
   action journal with then-vs-now outcomes, user directives from the `manager`
@@ -151,7 +152,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   generic sibling: renders `prompts/<name>.md` (no digest, no wake condition;
   conditional behavior belongs in the prompt) and runs the harness with the
   same journal/cap rails under `state/agents/<name>/`. Prompt agents are
-  usually file-defined and created by `quorum agent create` or the web form.
+  usually file-defined and created by `quorum agent create` or the web form
+  (`agent create` accepts no prompt text when the template already resolves,
+  and `--prompt <name>` reuses one — how the shipped `babysitter` example, a
+  whole CI-reactive policy written as prompt text, is put to work).
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single
   seam through which agents touch the world: `ctx.bus`, `ctx.projects`, `ctx.llm`,
   `ctx.prompt()`, `ctx.load_state()/save_state()`, `ctx.log_action()`, `ctx.now()`.
@@ -201,6 +205,20 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `task nudge` pokes the pane that guidance is waiting — the payload stays in
   the maildir inbox; herdr is a doorbell, never a second transport). Optional
   `[herdr]` table (`socket` override, `enabled`).
+- `ci.py` — the *only* module that shells out to `gh`, and the second fail-soft
+  probe (herdr's mold, not sandbox.py's): `pr_state(home, task)` runs one
+  `gh pr view --json ...` *inside* the task's workdir (gh resolves repo from the
+  remote, PR from the checked-out branch) and returns state / check counts /
+  failing check names / merge conflict — or `None` for every disappointment
+  (disabled, no gh, no auth, no remote, no PR, timeout, garbage), so a digest
+  always builds and a missing `ci:` line means nothing. Only `build_digest`
+  calls it (a `ci:` line per task, `CI-FAILING` on a finished task over red
+  checks, bounded by `manager.CI_MAX_PROBES` since digest build blocks the
+  tick), which is what keeps `views.py` a pure file reader — do not
+  materialize probe results to disk to feed a view without revisiting that.
+  What to *do* about red CI lives in `prompts/manager.md` and the shipped
+  `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
+  `timeout_seconds`).
 - `config.py` — `config.toml` is user-owned and **quorum never writes it back**; machine
   state goes to JSON. The one config location quorum may write is `agents/<name>.toml`
   (file-defined agents, atomic whole-file writes via `write_agent_file`/`create_agent`;
@@ -214,7 +232,7 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `ProjectRegistry` and must only ever *read* project dirs — task writes happen in
   worktrees.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
-  `default_prompts/` (`task-preamble`, `manager`); deleting a file restores the
+  `default_prompts/` (`task-preamble`, `manager`, `babysitter`); deleting a file restores the
   default. `format_map` with a missing-key-preserving dict. Re-running `quorum
   init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
   change a file in `default_prompts/`, append the replaced version's sha256 to

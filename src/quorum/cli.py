@@ -1387,6 +1387,18 @@ def agent_run_now(name: str, home: Path | None = _HOME_OPT) -> None:
     _agent_command(home, name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
 
 
+def _prompt_exists(home: Path, name: str) -> bool:
+    """True when `name` resolves to a prompt template — one the user wrote in
+    prompts/, or one quorum packages (the shipped `babysitter` example)."""
+    from . import prompts
+
+    try:
+        prompts.load(home, name)
+    except KeyError:
+        return False
+    return True
+
+
 @agent_app.command("create")
 def agent_create(
     name: str,
@@ -1395,6 +1407,7 @@ def agent_create(
     harness: str = typer.Option("", "--harness", help="Harness table for a prompt agent (default: \\[tasks].default_harness)."),
     prompt_file: Path | None = typer.Option(None, "--prompt-file", help="File whose contents seed prompts/<name>.md."),
     prompt_text: str = typer.Option("", "--prompt-text", help="Inline prompt body for prompts/<name>.md."),
+    prompt_template: str = typer.Option("", "--prompt", help="Use an existing template instead of writing one (e.g. the shipped 'babysitter')."),
     timeout: int = typer.Option(0, "--timeout", help="run_timeout_seconds for the agent's harness runs."),
     max_actions: int = typer.Option(0, "--max-actions", help="Per-run action cap for the agent's harness runs."),
     home: Path | None = _HOME_OPT,
@@ -1415,9 +1428,18 @@ def agent_create(
             raise _fail(f"cannot read {prompt_file}: {e}") from None
     elif prompt_text:
         text = prompt_text
-    if type_ == "prompt" and text is None:
-        raise _fail("a prompt agent needs --prompt-text or --prompt-file (it becomes prompts/<name>.md)")
+    template = prompt_template or name
+    if prompt_template and text is not None:
+        raise _fail("--prompt names an existing template; drop --prompt-text/--prompt-file")
+    if type_ == "prompt" and text is None and not _prompt_exists(target, template):
+        raise _fail(
+            f"a prompt agent needs a prompt: --prompt-text or --prompt-file (they become "
+            f"prompts/{name}.md), or --prompt <name> naming a template that already exists "
+            f"(no prompts/{template}.md, and no packaged default by that name)"
+        )
     settings: dict = {}
+    if prompt_template:
+        settings["prompt"] = prompt_template
     if harness:
         settings["harness"] = harness
     if timeout:

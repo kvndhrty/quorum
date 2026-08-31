@@ -75,6 +75,11 @@ retention_days = 30       # board messages older than this are archived
 
 [sandbox]
 use_nono = false          # sandbox task runs via nono-py (docs/guide.md#sandboxing)
+
+[ci]
+enabled = true            # let the manager digest observe PR/check state via `gh`
+                          # (silently does nothing without gh; one network call
+                          # per digested task per tick)
 """
 
 SUBDIRS = [
@@ -121,6 +126,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",
         "5f2838b51db8ac07f830a668cae0d6c4d9afe181d7598d51a7dbd1afe5b89b15",
         "02e3715e80b0bdb167b1c35bc354ba756efc00774772e1f6e0e9193c93a974f2",
+        # the #19 (usage/budget) revision, replaced by the merge with the
+        # ci-probe revision
+        "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
     },
 }
 

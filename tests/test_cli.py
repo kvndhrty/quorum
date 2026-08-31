@@ -360,6 +360,83 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     assert "keeping your edits" in result.output
 
 
+def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
+    """The babysitter example ships as a packaged prompt; creating an agent
+    over it must not require pasting the prompt back in."""
+    r = runner.invoke(app, [
+        "agent", "create", "babysitter", "--schedule", "every 10m", "--home", str(home),
+    ])
+    assert r.exit_code == 0, r.output
+    assert (home / "agents" / "babysitter.toml").exists()
+    assert "CI babysitter" in (home / "prompts" / "babysitter.md").read_text()  # untouched
+
+    # ...under any name, via --prompt
+    r = runner.invoke(app, [
+        "agent", "create", "ci-cop", "--prompt", "babysitter", "--home", str(home),
+    ])
+    assert r.exit_code == 0, r.output
+    assert 'prompt = "babysitter"' in (home / "agents" / "ci-cop.toml").read_text()
+    assert not (home / "prompts" / "ci-cop.md").exists()
+
+    r = runner.invoke(app, ["agent", "create", "nope", "--prompt", "ghost", "--home", str(home)])
+    assert r.exit_code == 1 and "prompts/ghost.md" in r.output
+    r = runner.invoke(app, [
+        "agent", "create", "nope", "--prompt", "babysitter", "--prompt-text", "x",
+        "--home", str(home),
+    ])
+    assert r.exit_code == 1 and "drop --prompt-text" in r.output
+
+
+def _quorum_invocations(text: str) -> list[str]:
+    """Every `quorum ...` command a prompt tells an agent to run: inline code
+    spans, list-item tool lines, and indented example blocks."""
+    import re
+
+    found = [span for span in re.findall(r"`([^`\n]+)`", text) if span.startswith("quorum ")]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            stripped = stripped[2:]
+        if stripped.startswith("quorum "):
+            found.append(stripped)
+    return found
+
+
+def test_shipped_prompts_only_name_real_cli_commands():
+    """The packaged prompts ARE the product's policy layer; a command that
+    was renamed out from under one fails silently at 3am, in a transcript
+    nobody reads."""
+    import re
+    from importlib import resources
+
+    def cmd_name(info) -> str:
+        # An unnamed @app.command() takes its name from the callback.
+        return info.name or info.callback.__name__.rstrip("_").replace("_", "-")
+
+    known = {cmd_name(c) for c in app.registered_commands}
+    for group in app.registered_groups:
+        known |= {
+            f"{group.name} {cmd_name(c)}" for c in group.typer_instance.registered_commands
+        }
+
+    checked = 0
+    for entry in (resources.files("quorum") / "default_prompts").iterdir():
+        if not entry.name.endswith(".md"):
+            continue
+        for invocation in _quorum_invocations(entry.read_text(encoding="utf-8")):
+            words: list[str] = []
+            for token in invocation.split()[1:]:
+                if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
+                    break
+                words.append(token)
+            assert words, f"{entry.name}: bare `quorum` in {invocation!r}"
+            assert " ".join(words) in known or words[0] in known, (
+                f"{entry.name} names a command that does not exist: {invocation!r}"
+            )
+            checked += 1
+    assert checked > 10  # the extractor still finds things
+
+
 def test_superseded_hashes_never_contain_the_current_defaults():
     """A current default hashed into SUPERSEDED_PROMPT_HASHES would make
     `quorum init` treat up-to-date files as stale forever; the set must only

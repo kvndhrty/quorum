@@ -107,6 +107,17 @@ class HerdrConfig(BaseModel):
     enabled: bool = True
 
 
+class CIConfig(BaseModel):
+    """Optional [ci] table for the fail-soft `gh` PR/checks probe (ci.py).
+
+    Absent config is fine: the probe auto-detects `gh` and silently does
+    nothing without it. Set `enabled = false` to stop the manager's digest
+    from making one network call per digested task per tick."""
+
+    enabled: bool = True
+    timeout_seconds: float = 10.0
+
+
 class QuorumSection(BaseModel):
     timezone: str = "local"
     retention_days: int = 30
@@ -163,6 +174,7 @@ class Config(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     herdr: HerdrConfig | None = None
+    ci: CIConfig = Field(default_factory=CIConfig)
     harness: dict[str, HarnessConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
