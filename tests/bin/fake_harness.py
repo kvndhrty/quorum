@@ -35,6 +35,12 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
     hang            sleep far past any test timeout (exercises run timeouts)
     fail            exit 3 without output
 
+  FAKE_HARNESS_USAGE   cost in USD (e.g. "0.42"); makes the harness report
+                       token/cost usage the way a real one does — a `result`
+                       event carrying total_cost_usd and a usage block
+                       (11,000 tokens' worth). Unset (the default) is the
+                       harness that reports nothing at all, which quorum
+                       must keep supporting.
   FAKE_HARNESS_STATUS / FAKE_HARNESS_PR_URL   report-mode knobs
   FAKE_HARNESS_WRITE   name of a file to create in the cwd before exiting,
                        i.e. leave the working tree dirty the way a harness
@@ -50,6 +56,24 @@ import subprocess
 import sys
 import threading
 import time
+
+# The token split of a usage-reporting run: 11,000 tokens all told, so a
+# test can set a budget on either side of it.
+USAGE_TOKENS = {
+    "input_tokens": 1000,
+    "output_tokens": 500,
+    "cache_read_input_tokens": 9000,
+    "cache_creation_input_tokens": 500,
+}
+
+
+def usage_block() -> dict | None:
+    """The usage fields of a `result` event, or None when the harness is
+    playing a harness that reports nothing."""
+    cost = os.environ.get("FAKE_HARNESS_USAGE")
+    if not cost:
+        return None
+    return {"total_cost_usd": float(cost), "usage": dict(USAGE_TOKENS)}
 
 
 def quorum(*args) -> subprocess.CompletedProcess:
@@ -89,13 +113,14 @@ def inject_main() -> int:
         quorum("task", "nudge", task_id, "switch to the fallback plan")
     elif post == "tell":
         quorum("manager", "tell", "pause new launches until tests pass")
-    print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
+    result = {"type": "result", "subtype": "success", **(usage_block() or {})}
+    print(json.dumps(result), flush=True)
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         print(json.dumps({"type": "stdin", "received": json.loads(line)}), flush=True)
-        print(json.dumps({"type": "result", "subtype": "success"}), flush=True)
+        print(json.dumps(result), flush=True)
     return 0
 
 
@@ -118,6 +143,9 @@ def main() -> int:
     for line in prompt.splitlines():
         print(f"PROMPT| {line}")
     print(f"CWD| {os.getcwd()}")
+    reported_usage = usage_block()
+    if reported_usage:
+        print(json.dumps({"type": "result", "subtype": "success", **reported_usage}))
 
     if mode == "report":
         task_id = task_id_from(prompt)

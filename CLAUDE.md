@@ -117,6 +117,17 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
   the user's live checkout. `launch_detached` spawns `python -m quorum task run`
   in a new session.
+- `usage.py` — token/cost usage read back out of harness result events
+  (claude `result`, codex `turn.completed`/`token_count`): loose extraction,
+  canonical keys, **fail-soft** (a harness that reports nothing records
+  `usage = null`, and readers omit rather than show `$0.00`). Reduction is
+  elementwise **max** within a run (harnesses report run-cumulative totals
+  and a pumped run emits one result per turn — summing would multiply the
+  spend; max prefers under-counting) and a **sum** across runs. The runner
+  records it on the `TaskRun`; views/`quorum status`/the digest surface it.
+  `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
+  over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
+  class as `possible-loop`; enforcement is deliberately not implemented.
 - `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, a

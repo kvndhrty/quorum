@@ -184,12 +184,18 @@ async function refresh() {
     const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""));
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
+    // Cost/tokens only when the harness reported them; "$!" flags a run over
+    // the configured budget — a mark, never a block.
+    const over = (t.budget_overages || []);
+    const spent = t.usage_text
+      ? `<br><span title="${esc(over.join("; ") || "reported by the harness")}">${esc(t.usage_text)}${over.length ? " $!" : ""}</span>`
+      : "";
     const sel = t.id === selectedTask ? " selected" : "";
     return `<tr class="task-row${sel}" data-id="${esc(t.id)}">
       <td class="muted">${esc(t.id_short)}</td>
       <td><b>${esc(t.project)}</b><br><span class="muted">${esc((t.last_report || t.prompt).slice(0, 90))}</span></td>
       <td class="${cls}">${status}</td>
-      <td class="muted">${esc(t.harness)}</td>
+      <td class="muted">${esc(t.harness)}${spent}</td>
       <td>${pr}</td></tr>`;
   }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`);
 

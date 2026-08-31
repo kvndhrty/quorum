@@ -11,7 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import fsio
+from . import fsio, usage
 from .config import Config, ConfigError, load_config, parse_schedule
 from .messages import MessageBus
 from .projects import ProjectRegistry
@@ -166,7 +166,13 @@ def project_rows(home: Path) -> list[dict[str, Any]]:
     ]
 
 
-def task_rows(home: Path) -> list[dict[str, Any]]:
+def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
+    if config is None:
+        try:
+            config = load_config(home)
+        except ConfigError:
+            config = Config()
+    budget = config.tasks
     rows = []
     now = fsio.utc_now()
     for t in TaskStore(home).list():
@@ -177,6 +183,7 @@ def task_rows(home: Path) -> list[dict[str, Any]]:
             < GIT_PROBE_TERMINAL_HOURS * 3600
         ):
             git_state = workdir_git_state(t)
+        spent = usage.total(r.usage for r in t.runs)
         rows.append(
             {
                 "id": t.id,
@@ -189,6 +196,15 @@ def task_rows(home: Path) -> list[dict[str, Any]]:
                 "attached": t.attached,
                 "attached_state": attached_state(home, t.id) if t.attached else None,
                 "runs": len(t.runs),
+                # Absent (None) whenever no run reported usage — the common
+                # case for harnesses that say nothing, and never read as 0.
+                "usage": spent,
+                # The same thing rendered once, here, so the CLI, TUI and the
+                # browser all show a spend the same way.
+                "usage_text": usage.describe(spent),
+                "budget_overages": usage.run_overages(
+                    t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+                ),
                 "pr_url": t.pr_url,
                 "git": git_state,
                 "created_at": t.created_at,
@@ -254,7 +270,7 @@ def overview(home: Path) -> dict[str, Any]:
         "home": str(home),
         "supervisor": supervisor_status(home),
         "agents": agent_rows(home, config),
-        "tasks": task_rows(home),
+        "tasks": task_rows(home, config),
         "projects": project_rows(home),
         "board": board_tail(home),
         "attention": attention_summary(home),
