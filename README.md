@@ -205,6 +205,12 @@ See [docs/guide.md](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#s
   `config.toml` — quorum never rewrites that file.
 - **Retune** the task preamble and the manager's policy by editing
   `~/.quorum/prompts/*.md`; delete a file to restore the default.
+- **Add** a prompt-driven agent — a prompt, a schedule, your harness, no
+  Python. `quorum agent create babysitter --schedule "every 10m"` starts the
+  shipped CI babysitter: it watches your tasks' pull requests with `gh` and
+  relaunches the ones whose checks went red, giving up to you after two
+  tries. That whole policy is `~/.quorum/prompts/babysitter.md` — yours to
+  edit.
 - **Extend** with your own agents: drop a ~20-line Python file into
   `~/.quorum/plugins/` — [examples/steward.py](https://github.com/kvndhrty/quorum/blob/main/examples/steward.py) is a
   complete worked example (a rule-based file organizer with undo).

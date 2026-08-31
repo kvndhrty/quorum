@@ -242,6 +242,16 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
+- a `ci:` line for any task whose branch has a pull request — check counts,
+  the names of the failing checks, and `MERGE-CONFLICT` when the branch no
+  longer merges. A task that reported `done` over red checks is marked
+  `CI-FAILING`, the same way work left uncommitted is marked
+  `STRANDED-WORK`: pushed is not the same as working. This needs `gh` on
+  PATH and authenticated; without it (or without a PR yet) the line is
+  simply absent, and nothing else changes. Turn the probe off with
+  `enabled = false` under `[ci]` in config.toml — it costs one `gh` call per
+  task per tick (capped at 12 tasks and 10s each, so it can never stall
+  supervision);
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
@@ -469,6 +479,32 @@ supervisor; `quorum agent remove standup` unschedules it (the prompt and
 state files stay). There is no wake condition: a scheduled prompt agent
 spends a harness run every tick, so give an expensive agent a sparse
 schedule and put any "do nothing unless…" logic in the prompt itself.
+
+### The shipped example: a CI babysitter
+
+`quorum init` seeds one worked example, `prompts/babysitter.md`. It does
+nothing until you create an agent over it:
+
+```bash
+quorum agent create babysitter --schedule "every 10m" --harness claude
+```
+
+(No `--prompt-text` needed: the template already exists. `quorum agent
+create ci-cop --prompt babysitter` runs the same prompt under a different
+agent name.)
+
+Each tick it lists your tasks, asks `gh` about the pull request behind each
+one, and — for a red PR whose task is **idle** — reads the failing job's
+log, nudges the task with the specific failure, and relaunches it. After two
+failed relaunches on the same PR it stops and posts to `#attention` for you,
+because unrescuable work belongs to a person. It needs `gh` authenticated
+and a harness that can run it.
+
+All of that is prompt text in `prompts/babysitter.md`, so it is yours to
+retune: change the two-strike rule, have it comment on the PR instead of
+relaunching, restrict it to one project, or make it open follow-up tasks
+with `quorum task add`. It runs under the ordinary prompt-agent rails — every
+action journaled to `state/agents/babysitter/journal.jsonl`, capped per run.
 
 ## Sandboxing
 

@@ -28,7 +28,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from .. import actor, fsio, herdr, tasks
+from .. import actor, ci, fsio, herdr, tasks
 from ..actor import journal_path
 from ..agent import Agent
 from ..runner import guidance_note
@@ -46,6 +46,13 @@ __all__ = [
 TRANSCRIPT_TAIL_LINES = 10
 JOURNAL_TAIL_ENTRIES = 15
 RECENT_TERMINAL_HOURS = 24
+# Every other input to the digest is a file read; the CI probe is a network
+# call per task (see ci.py), and digest build blocks the tick. Cap how many
+# one digest may spend, worst case CI_MAX_PROBES * [ci].timeout_seconds. The
+# budget is spent in digest order — active tasks, then attached, then
+# recently finished — so a home with more tasks than budget still sees its
+# live work.
+CI_MAX_PROBES = 12
 
 # --- possible-loop heuristic -------------------------------------------------
 # The action journal remembers what the *manager* did; nothing else watches a
@@ -178,14 +185,30 @@ def loop_signal(entries: list[dict]) -> dict | None:
 
 
 def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directives: list[str]) -> str:
-    """The manager's whole world, compiled from files. Pure and greppable:
-    task lines look like `- [status] shortid ...` so both models and tests
-    can parse them."""
+    """The manager's whole world, compiled from files. Greppable: task lines
+    look like `- [status] shortid ...` so both models and tests can parse
+    them.
+
+    Almost pure — two fail-soft probes reach outside the files: `herdr` for
+    an attached pane's agent state, and `ci` for the pull request behind a
+    task's branch. Both degrade to nothing rather than raise, so a digest
+    always builds.
+    """
     home = Path(home)
     live = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
+    # Resolved once: without gh (or with [ci].enabled = false) no task is
+    # probed at all, rather than paying a config load and a which() each.
+    ci_budget = CI_MAX_PROBES if ci.available(home) else 0
+
+    def ci_state(task: tasks.Task) -> dict | None:
+        nonlocal ci_budget
+        if ci_budget <= 0:
+            return None
+        ci_budget -= 1
+        return ci.pr_state(home, task)
 
     lines.append("## Active tasks")
     if not active:
@@ -206,6 +229,9 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
             lines.append(
                 f"  git: branch={git['branch']} dirty={git['dirty']} unpushed={unpushed}"
             )
+        pr = ci_state(t)
+        if pr:
+            lines.append(f"  ci: {ci.describe(pr)}")
         for r in tasks.read_reports(home, t.id, limit=3):
             lines.append(f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}")
         scan = tasks.read_transcript_tail(
@@ -260,6 +286,9 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
                 lines.append(
                     f"  git: branch={git['branch']} dirty={git['dirty']} unpushed={unpushed}"
                 )
+            pr = ci_state(t)
+            if pr:
+                lines.append(f"  ci: {ci.describe(pr)}")
             for r in tasks.read_reports(home, t.id, limit=3):
                 lines.append(
                     f"  report [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')[:160]}"
@@ -282,6 +311,13 @@ def build_digest(home: Path, all_tasks: list[tasks.Task], now: datetime, directi
                 unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
                 line += f" STRANDED-WORK dirty={git['dirty']} unpushed={unpushed}"
             lines.append(line)
+            # A task that finished over red checks is the STRANDED-WORK story
+            # one step later: delivered, but not actually working. Mark it
+            # loudly, and leave the judgement to the prompt.
+            pr = ci_state(t)
+            if pr:
+                bad = "CI-FAILING " if (pr["summary"] == "failing" or pr["conflict"]) else ""
+                lines.append(f"  ci: {bad}{ci.describe(pr)}")
         lines.append("")
 
     lines.append("## Your recent actions (journal)")

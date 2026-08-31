@@ -141,3 +141,26 @@ def test_actions_journal_per_agent_and_cap_applies(home: Path, clock):
         e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "standup"))
     )
     assert "standup action cap (1) reached" in text
+
+
+# -- the shipped babysitter example -----------------------------------------
+
+
+def test_shipped_babysitter_prompt_runs_as_an_ordinary_prompt_agent(home: Path, clock):
+    """The CI babysitter ships as a packaged prompt, not as Python: creating
+    an agent over it needs no prompt text, and the whole policy reaches the
+    harness with its placeholders filled in."""
+    write_config(home)
+    assert "CI babysitter" in (home / "prompts" / "babysitter.md").read_text()  # seeded by init
+    create_agent(home, "babysitter", schedule="every 10m", settings={"harness": "agenttool"})
+
+    make_agent(home, clock, name="babysitter").tick()
+
+    text = "\n".join(
+        e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "babysitter"))
+    )
+    assert "You are the CI babysitter" in text
+    assert "quorum task nudge" in text and "gh pr view" in text
+    assert "Two strikes" in text  # the give-up rule, the part that is policy
+    assert "{now}" not in text and "{directives}" not in text
+    assert fsio.iso(clock()) in text

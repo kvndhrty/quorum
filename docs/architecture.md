@@ -269,7 +269,9 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they
    ended with such state — work a harness left in its worktree without
    delivering it, which the default manager prompt treats as not done and
-   relaunches with a nudge to commit and push; a `possible-loop:` line
+   relaunches with a nudge to commit and push; a `ci:` line carrying the
+   pull request behind the branch, `CI-FAILING` on a finished task whose
+   checks are red (see below); a `possible-loop:` line
    when a task's transcript tail is dominated by one repeated tool call
    (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
@@ -340,6 +342,41 @@ rail**. Python makes no decision; the flag is data, the default manager prompt
 tells the manager to read the tail and judge (nudge, relaunch, cancel, or
 ignore), and the per-run action cap remains the only rail.
 
+**CI observation (`ci:`).** `workdir_git_state` follows work as far as
+"pushed" and stops; `ci.py` — the only module that shells out to `gh` —
+carries it one step further, to whether what was pushed actually works. For
+each digested task with a workdir it runs one `gh pr view --json
+number,url,state,isDraft,mergeable,statusCheckRollup` *inside that
+directory*, so gh resolves the repository from the remote and the PR from
+the checked-out branch (`quorum/<short-id>` for a worktree task, whatever
+the human is on for an adopted one). The rollup mixes CheckRun (Actions:
+`status` + `conclusion`) and StatusContext (classic: `state`) shapes;
+`_verdict` classifies each as pass/fail/pending and treats anything it does
+not recognize as pending, because an unknown shape must never read as a
+pass. The line is `key=value` like the rest of the digest — check counts,
+up to five failing check *names*, `MERGE-CONFLICT` when `mergeable` is
+`CONFLICTING`, and the PR url.
+
+It **fails soft**, the herdr contract rather than the sandbox one: no `gh`,
+no auth, no remote, no PR for the branch, a timeout, or unparseable output
+all degrade to `None`, and the digest is byte-identical to one built with
+the probe off (a test asserts exactly that). A missing `ci:` line therefore
+carries no information at all — including under a self-sandboxed supervisor,
+where the blocked network simply makes every probe return `None` rather than
+earning `gh` a capability grant. Cost is bounded twice, because digest build
+blocks the tick: `[ci].timeout_seconds` (10) per call, and `CI_MAX_PROBES`
+(12) probes per digest, spent in digest order so a home with more tasks than
+budget still covers its live work. `[ci].enabled = false` skips the probe
+entirely. Those are the only knobs, and none of them changes what anything
+*does* about the result.
+
+Which is the point: like `possible-loop`, this is an observation, not a
+rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
+says how to read the line, and the shipped `prompts/babysitter.md` (below)
+is a whole reactive policy written as prompt text. Views stay pure file
+readers — the probe runs during digest build only, and nothing materializes
+its result to disk, so `views.py` never acquires a network call.
+
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
 `auto_pause = false` config keeps the schedule firing so recovery needs no
@@ -358,6 +395,18 @@ every scheduled tick, and anything conditional belongs in its prompt. Prompt
 agents are usually file-defined (`agents/<name>.toml`, created by
 `quorum agent create` or the web dashboard, hot-added via `agent.reload`)
 but a `[agents.<name>]` table in config.toml works identically.
+
+Quorum packages one worked example, `default_prompts/babysitter.md` — the
+CI babysitter, seeded into `prompts/` by `quorum init` and inert until an
+agent is created over it (`quorum agent create babysitter --schedule
+"every 10m"`, or `--prompt babysitter` to run it under another name). It
+polls quorum-created PRs with `gh`, waits for a task's runner to go idle,
+nudges + relaunches with the *specific* failing check, and gives up to the
+human after two failed relaunches. Every bit of that is prompt text under
+the ordinary prompt-agent rails (journal + per-run action cap): the shape
+Sculptor and Jules grew in Python, quorum ships as a file you can edit.
+`agent create` therefore accepts a prompt agent with no `--prompt-text`
+when the template already resolves (user file or packaged default).
 
 ## Messaging protocol
 
@@ -482,8 +531,12 @@ the grants you added explicitly.
 ## Testing strategy
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME`), `clock`
-(injectable `FakeClock`), and `fake_llm`. Two purpose-built fake CLIs live in
-`tests/bin/`: `fake_llm.py` (canned completions) and `fake_harness.py`, which
+(injectable `FakeClock`), and `fake_llm`. Three purpose-built fake CLIs live
+in `tests/bin/`: `fake_llm.py` (canned completions), `fake_gh.py` (a GitHub
+CLI installed onto a PATH stripped down to real git, so the CI probe's
+no-gh / no-auth / no-PR / garbage / hung branches are all reachable — and
+so a developer's real `gh` can never reach the network from a test), and
+`fake_harness.py`, which
 behaves like a real harness — echoes its argv and prompt to stdout, emits a
 `session_id`, and in `report` mode calls `python -m quorum task report`
 against `$QUORUM_HOME`, exercising the full cooperative loop, and manager
