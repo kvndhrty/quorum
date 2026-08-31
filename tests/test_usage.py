@@ -55,7 +55,9 @@ def test_codex_shapes_are_normalized_too():
         "input_tokens": 1200,
         "output_tokens": 300,
         "cache_read_tokens": 800,
-        "total_tokens": 2300,
+        # codex's cached_input_tokens is a subset of input_tokens (its own
+        # token_count totals exclude it), so the fallback sum must too
+        "total_tokens": 1500,
     }
     # a harness-reported total wins over quorum's sum
     assert usage.usage_from_event(CODEX_TOKEN_COUNT)["total_tokens"] == 13
@@ -103,6 +105,23 @@ def test_collector_reports_none_when_the_harness_said_nothing():
     for event in ({"type": "system"}, {"type": "assistant"}, "plain text"):
         collector.add(event)
     assert collector.result() is None
+
+
+def test_readers_degrade_on_malformed_usage_from_disk():
+    """task.json is plain files a human can hand-edit; a garbage value must
+    read as "says nothing", never raise out of a view."""
+    mangled = {"cost_usd": "lots", "total_tokens": [1, 2], "input_tokens": 5}
+    assert usage.describe(mangled) == ""
+    assert usage.overages(mangled, max_cost=0.01, max_tokens=1) == []
+    assert usage.total([mangled, {"cost_usd": 1.0}, "not-a-dict"]) == {
+        "cost_usd": 1.0,
+        "input_tokens": 5,
+        "runs": 2,
+    }
+
+
+def test_an_explicit_zero_cost_is_omitted_not_rendered():
+    assert usage.describe({"cost_usd": 0.0, "total_tokens": 500}) == "500 tok"
 
 
 def test_task_total_sums_runs_and_drops_event_multiplicity():

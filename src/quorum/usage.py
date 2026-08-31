@@ -109,28 +109,48 @@ def usage_from_event(event: object) -> dict[str, float] | None:
     if cost is not None:
         out["cost_usd"] = cost
     source = _token_source(event)
+    matched: dict[str, str] = {}
     for canonical, keys in TOKEN_FIELDS.items():
-        value = next((n for k in keys if (n := _number(source.get(k))) is not None), None)
-        if value is not None:
-            out[canonical] = value
+        for key in keys:
+            value = _number(source.get(key))
+            if value is not None:
+                out[canonical] = value
+                matched[canonical] = key
+                break
     reported_total = next(
         (n for k in TOTAL_TOKEN_KEYS if (n := _number(source.get(k))) is not None), None
     )
-    tokens = [out[k] for k in TOKEN_FIELDS if k in out]
     if reported_total is not None:
         out["total_tokens"] = reported_total
-    elif tokens:
+    else:
         # Everything the model processed, cache reads included: that is the
         # work done, and the only total a harness-agnostic budget can mean.
-        out["total_tokens"] = sum(tokens)
+        # Except codex's `cached_input_tokens`, which is a *subset* of its
+        # `input_tokens` (claude's cache fields are disjoint from input, this
+        # one is not — its own `token_count` totals exclude it): summing it
+        # in would over-count, and this number prefers under.
+        tokens = [
+            out[k]
+            for k in TOKEN_FIELDS
+            if k in out
+            and not (k == "cache_read_tokens" and matched[k] == "cached_input_tokens")
+        ]
+        if tokens:
+            out["total_tokens"] = sum(tokens)
     return out or None
 
 
 def _reduce(a: dict[str, float], b: dict[str, float], op) -> dict[str, float]:
+    # Values are re-checked through _number: `total` reduces usage dicts read
+    # back from task.json, and a hand-edited or corrupted file must degrade
+    # to "that value says nothing", never raise out of a view.
     out = dict(a)
     for key in NUMERIC_FIELDS:
-        if key in b:
-            out[key] = op(out[key], b[key]) if key in out else b[key]
+        vb = _number(b.get(key))
+        if vb is None:
+            continue
+        va = _number(out.get(key))
+        out[key] = op(va, vb) if va is not None else vb
     return out
 
 
@@ -164,7 +184,7 @@ def total(usages: Iterable[dict[str, float] | None]) -> dict[str, float] | None:
     out: dict[str, float] = {}
     runs = 0
     for usage in usages:
-        if not usage:
+        if not usage or not isinstance(usage, dict):
             continue
         runs += 1
         out = _reduce(out, usage, lambda x, y: x + y)
@@ -187,14 +207,20 @@ def format_cost(cost: float) -> str:
 
 
 def describe(usage: dict[str, float] | None) -> str:
-    """One compact line for a status row or digest, "" when nothing to say."""
-    if not usage:
+    """One compact line for a status row or digest, "" when nothing to say.
+
+    Values come back off disk here, so each is re-checked through _number —
+    and a zero is omitted rather than shown as $0.00: it says nothing.
+    """
+    if not usage or not isinstance(usage, dict):
         return ""
     parts = []
-    if usage.get("cost_usd") is not None:
-        parts.append(format_cost(usage["cost_usd"]))
-    if usage.get("total_tokens"):
-        parts.append(f"{format_tokens(usage['total_tokens'])} tok")
+    cost = _number(usage.get("cost_usd"))
+    if cost:
+        parts.append(format_cost(cost))
+    tokens = _number(usage.get("total_tokens"))
+    if tokens:
+        parts.append(f"{format_tokens(tokens)} tok")
     return " · ".join(parts)
 
 
@@ -207,13 +233,13 @@ def overages(
     limits are off at 0, and a run that reported nothing can never be over
     budget — silence is not evidence of spend.
     """
-    if not usage:
+    if not usage or not isinstance(usage, dict):
         return []
     out = []
-    cost = usage.get("cost_usd")
+    cost = _number(usage.get("cost_usd"))
     if max_cost > 0 and cost is not None and cost > max_cost:
         out.append(f"cost {format_cost(cost)} > max_cost_per_run {format_cost(max_cost)}")
-    tokens = usage.get("total_tokens")
+    tokens = _number(usage.get("total_tokens"))
     if max_tokens > 0 and tokens is not None and tokens > max_tokens:
         out.append(
             f"tokens {format_tokens(tokens)} > max_tokens_per_run {format_tokens(max_tokens)}"
