@@ -73,6 +73,8 @@ worktree = true         # run each task in its own git worktree under QUORUM_HOM
 default_harness = ""    # harness used by `quorum task add` and the manager
 auto_commit = false     # after each run, commit whatever the harness left
                         # uncommitted in its worktree (safety net; see below)
+max_cost_per_run = 0    # 0 = off. Flag a run that reported spending more
+max_tokens_per_run = 0  # than this — an observation, never a kill switch
 ```
 
 `auto_commit` is the belt to the delivery protocol's braces. Harnesses are
@@ -91,6 +93,22 @@ Each rescue (or failure) is noted in the transcript and on the run's entry
 in `task.json`. One interaction to know: with `[sandbox] use_nono = true`
 the sandboxed runner cannot run git after the harness exits, so the net
 skips with a transcript note — rely on the stranded-work flag there.
+
+**What runs cost.** Most coding harnesses report their token and cost usage
+when they finish a turn (claude's `result` event, codex's `turn.completed`),
+and quorum records whatever it sees on the run's entry in `task.json`. It
+then shows up wherever tasks do — `$0.42 · 11.0k tok` on a `quorum status`
+row, broken out by `quorum task show`, summed per task in the manager's
+digest. A harness that reports nothing is fully supported: you simply see
+nothing, never a misleading `$0.00`.
+
+Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
+than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
+That is all it does today — quorum will not kill, pause, or refuse a run
+over its budget. The mark reaches the manager, whose prompt tells it to ask
+whether the spend is buying progress and to nudge, decompose, or escalate if
+it is not. If you want a hard stop, that is your judgement to make from the
+flag.
 
 ## Harnesses
 
@@ -204,7 +222,7 @@ attention.
 **Watching.**
 
 ```bash
-quorum task list                  # every task, one line each
+quorum task list                  # every task, one line each (cost too, when reported)
 quorum task show a3f2k9           # what/where/how it stands (--json: raw record)
 quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
 quorum status                     # tasks alongside agents and projects
@@ -242,6 +260,9 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
+- what each task has spent, when its harness reports usage, and a
+  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
+  observation, never a stop;
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;

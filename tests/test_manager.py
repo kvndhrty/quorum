@@ -24,7 +24,7 @@ from quorum.agents.manager import (
     loop_signal,
     transcript_path,
 )
-from quorum.config import load_config
+from quorum.config import TasksConfig, load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore
@@ -228,6 +228,52 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
     digest = build_digest(home, store.list(), clock(), directives=[])
     assert "STRANDED-WORK" not in digest
     assert "git: branch=" not in digest
+
+
+def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, project: str):
+    """Surfacing: cost/tokens show up per task when the harness reported
+    them, and a configured budget turns an expensive run into a digest
+    observation — quorum still never stops anything."""
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "expensive work", "tasktool")
+    store.update(
+        task.id,
+        status="executing",
+        runs=[
+            {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+             "usage": {"cost_usd": 0.5, "total_tokens": 5000, "events": 1}},
+            {"started_at": "t2", "ended_at": "t3", "exit_code": 0,
+             "usage": {"cost_usd": 2.0, "total_tokens": 40000, "events": 1}},
+        ],
+    )
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "usage: $2.50 · 45.0k tok over 2 reporting run(s)" in digest
+    assert "BUDGET-EXCEEDED" not in digest  # no budget configured: nothing to exceed
+
+    digest = build_digest(
+        home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
+    )
+    assert "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00" in digest
+    assert "an observation, not a rail" in digest
+    assert "run 1:" not in digest  # the cheap run is not indicted
+
+
+def test_digest_says_nothing_about_spend_a_harness_never_reported(
+    home: Path, clock, project: str
+):
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "quiet harness", "tasktool")
+    store.update(task.id, status="executing",
+                 runs=[{"started_at": "t0", "ended_at": "t1", "exit_code": 0}])
+
+    digest = build_digest(
+        home, store.list(), clock(), directives=[],
+        tasks_config=TasksConfig(max_cost_per_run=0.01, max_tokens_per_run=1),
+    )
+    assert "usage:" not in digest and "BUDGET-EXCEEDED" not in digest
 
 
 # --- possible-loop observation ----------------------------------------------
