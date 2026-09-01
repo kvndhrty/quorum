@@ -42,6 +42,9 @@ prompt_app = typer.Typer(
 integration_app = typer.Typer(
     help="Install harness adapters (session-adoption hooks and plugins).", no_args_is_help=True
 )
+notify_app = typer.Typer(
+    help="The [notify] hook: how attention posts reach you.", no_args_is_help=True
+)
 app.add_typer(board_app, name="board")
 app.add_typer(project_app, name="project")
 app.add_typer(agent_app, name="agent")
@@ -49,6 +52,7 @@ app.add_typer(task_app, name="task")
 app.add_typer(manager_app, name="manager")
 app.add_typer(prompt_app, name="prompt")
 app.add_typer(integration_app, name="integration")
+app.add_typer(notify_app, name="notify")
 
 
 def _version_callback(value: bool) -> None:
@@ -1666,6 +1670,44 @@ def agent_reload(name: str, home: Path | None = _HOME_OPT) -> None:
     """Ask the running supervisor to re-read an agent's config (after editing
     agents/<name>.toml or its prompt's settings)."""
     _agent_command(home, name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
+
+
+# -- notify ----------------------------------------------------------------
+
+
+@notify_app.command("test")
+def notify_test(text: str, home: Path | None = _HOME_OPT) -> None:
+    """Send one message through the [notify] template, right now.
+
+    Proves the wiring without waiting for an escalation. It goes straight
+    to the template — nothing is posted to the board and the hook's cursor
+    is untouched — and unlike the supervisor's fail-soft delivery it is
+    loud: a template that could not be run exits 1 and says why.
+    """
+    from . import notify as notify_mod
+    from .messages import Message
+
+    target = get_home(home)
+    config = _load_config(target)
+    if config.notify is None:
+        raise _fail(
+            "no [notify] table in config.toml — add one (docs/guide.md#getting-notified) "
+            "to be told when the manager needs you"
+        )
+    message = Message.model_validate(
+        {
+            "from": "user",
+            "topic": config.notify.topics[0],
+            "type": "notify.test",
+            "payload": {"text": text},
+        }
+    )
+    argv = notify_mod.build_argv(config.notify.command, message)
+    typer.echo("running: " + " ".join(json.dumps(element) for element in argv))
+    failure = notify_mod.deliver(config.notify.command, message, config.notify.timeout_seconds)
+    if failure is not None:
+        raise _fail(f"not delivered: {failure}")
+    typer.secho("delivered", fg="green")
 
 
 # -- manager ---------------------------------------------------------------

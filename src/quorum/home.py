@@ -80,6 +80,15 @@ use_nono = false          # sandbox task runs via nono-py (docs/guide.md#sandbox
 enabled = true            # let the manager digest observe PR/check state via `gh`
                           # (silently does nothing without gh; one network call
                           # per digested task per tick)
+
+# Reach a person: an argv template run once per new message on the listed
+# board topics ({text}, {from}, {topic}, {type}, {id} substituted per element,
+# no shell). Fails soft — a missing binary or a bad exit is one line in
+# logs/supervisor.log. Try it with `quorum notify test "hello"`.
+#[notify]
+#command = ["terminal-notifier", "-title", "quorum", "-message", "{text}"]
+#topics = ["attention"]   # the manager's ask-a-human channel
+#timeout_seconds = 10
 """
 
 SUBDIRS = [

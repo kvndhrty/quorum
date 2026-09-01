@@ -9,6 +9,19 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+- Notification hook: a `[notify]` table holds an argv template
+  (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
+  no shell) that the supervisor runs once for every new message on the
+  listed board topics — `attention` by default, so a manager escalation or
+  an `agent.failing` reaches you without your looking. A private cursor in
+  `state/notify.json` makes it exactly-once across restarts (posts while
+  the supervisor is down go out on the next start, oldest first; enabling
+  it starts from now). Delivery fails soft: a missing binary, nonzero exit
+  or timeout is one `supervisor.log` line and the cursor still advances.
+  `quorum notify test "…"` proves the wiring loudly; `quorum doctor` gains
+  a `notify` line. (#55)
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

@@ -9,7 +9,10 @@ streak once to the `attention` board so it still reaches a human. That
 escalation is the only failure path that posts to `attention`; everything
 else the supervisor says (load errors, tick errors, auto-pause, recovery)
 goes to `system`. An internal janitor handles message archival and
-stale-claim recovery even when every agent is disabled.
+stale-claim recovery even when every agent is disabled, and a `_notify` job
+on the control cadence drains new messages on the `[notify]` topics through
+the user's notification template (notify.py) — the one path by which the
+board reaches a person who is not looking at it.
 
 BackgroundScheduler (threads) rather than AsyncIO: agent work is file scans
 and subprocess calls — blocking and thread-friendly — and synchronous tick()
@@ -29,6 +32,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import fsio, installed_version
+from . import notify as notify_mod
 from .agent import (
     Agent,
     AgentContext,
@@ -112,6 +116,14 @@ class Supervisor:
                 seconds=CONTROL_POLL_SECONDS,
                 coalesce=True,
             )
+            self.scheduler.add_job(
+                self._notify,
+                id="_notify",
+                trigger="interval",
+                seconds=CONTROL_POLL_SECONDS,
+                coalesce=True,
+                max_instances=1,
+            )
             self.scheduler.start()
             for name, err in self.errors.items():
                 self.bus.post(
@@ -121,6 +133,7 @@ class Supervisor:
             signal.signal(signal.SIGINT, self._handle_signal)
             signal.signal(signal.SIGTERM, self._handle_signal)
             self._janitor()
+            self._notify()  # what arrived while we were down goes out now, not in 15s
             self._stop.wait()
         finally:
             self._shutdown_scheduler()
@@ -423,6 +436,23 @@ class Supervisor:
         self._schedule_agent(name, self.agents[name])
         self._write_heartbeat(name)
         log.info("agent %s (re)loaded: %s @ %s", name, acfg.type, acfg.schedule)
+
+    # -- notification hook -----------------------------------------------------
+
+    def _notify(self) -> None:
+        """Drain new messages on the `[notify]` topics through the template.
+
+        A no-op without the table. `notify.drain` never raises (a failed
+        delivery is a log line and an advanced cursor), but the job is
+        wrapped anyway: nothing scheduled here may take the process down.
+        """
+        cfg = self.config.notify
+        if cfg is None:
+            return
+        try:
+            notify_mod.drain(self.home, cfg, self.bus)
+        except Exception:
+            log.error("notify job failed:\n%s", traceback.format_exc())
 
     # -- janitor -------------------------------------------------------------
 

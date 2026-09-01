@@ -256,6 +256,24 @@ so the record stays true.
   `task nudge` pokes the pane that guidance is waiting — the payload stays in
   the maildir inbox; herdr is a doorbell, never a second transport). Optional
   `[herdr]` table (`socket` override, `enabled`).
+- `notify.py` — the `[notify]` hook: the one board *consumer* quorum ships
+  for a person. `drain(home, cfg, bus)` reads each listed topic past a
+  private per-topic cursor in `state/notify.json` (the on-disk filename,
+  via `MessageBus.entries_after_cursor` — never `Message.filename()`,
+  which is only what `post()` happened to write) and runs the argv
+  template once per message via `deliver` (`build_argv` substitutes
+  `{text}/{from}/{topic}/{type}/{id}` per element, appending the text
+  when the template has no `{text}` — the harness `{prompt}` convention).
+  Supervisor job `_notify` on the `_control` cadence plus once at
+  startup. **Fail-soft in herdr's mold**: missing binary / nonzero exit /
+  hang past `timeout_seconds` → one `supervisor.log` line, cursor still
+  advances, `drain` never raises (an unwritable cursor is logged; an
+  unreadable one re-initialized). First drain arms the cursor at the
+  tail *without* delivering (enabling must not replay history);
+  `MAX_PER_TICK` bounds one tick. Fires on topic membership, never on
+  content — no policy here. `quorum notify test` is the loud path (exit
+  1 with the reason, touches neither board nor cursor); doctor's
+  `check_notify` is static (`–` absent, `✗` argv[0] not on PATH).
 - `ci.py` — the *only* module that shells out to `gh`, and the second fail-soft
   probe (herdr's mold, not sandbox.py's; both read config through
   `try_load_config`, so an unreadable config.toml disables them):
