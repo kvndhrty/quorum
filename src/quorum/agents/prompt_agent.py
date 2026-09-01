@@ -10,7 +10,7 @@ conditional behavior belongs in the prompt (or in a sparser schedule).
 
 from __future__ import annotations
 
-from .. import fsio
+from .. import fsio, notes
 from ..agent import Agent
 from ..runner import guidance_note
 from .harness_run import run_agent_harness
@@ -31,6 +31,12 @@ class PromptAgent(Agent):
                 template,
                 now=fsio.iso(self.ctx.now()),
                 directives=rendered_directives,
+                # a template that never writes `{notes}` simply never sees
+                # its own notebook — but one that does gets the same
+                # rendering, under the same caps, as the manager's digest
+                notes="\n".join(
+                    notes.digest_section(self.ctx.home, self.ctx.name, now=self.ctx.now())
+                ),
             )
             run_agent_harness(self.ctx, prompt)
         except BaseException:

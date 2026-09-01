@@ -58,6 +58,7 @@ class QuorumTUI(App):
         super().__init__()
         self.home = Path(home)
         self.selected_task: str | None = None
+        self.selected_agent: str | None = None
         self._log_lines: list[str] | None = None  # last rendered log content
 
     def compose(self) -> ComposeResult:
@@ -94,6 +95,7 @@ class QuorumTUI(App):
 
     def action_show_board(self) -> None:
         self.selected_task = None
+        self.selected_agent = None
         self.query_one("#nudge", Input).display = False
         self.refresh_data()
 
@@ -124,8 +126,15 @@ class QuorumTUI(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # selection is deliberate (enter/click) — merely arrowing through the
         # table must never swap the board pane away
-        if event.data_table.id == "tasks" and event.row_key is not None:
-            self.selected_task = event.row_key.value
+        if event.row_key is None:
+            return
+        if event.data_table.id == "tasks":
+            # tasks and agents share the one log pane, so selecting either
+            # replaces whatever it was showing
+            self.selected_task, self.selected_agent = event.row_key.value, None
+            self.refresh_data()
+        elif event.data_table.id == "agents":
+            self.selected_agent, self.selected_task = event.row_key.value, None
             self.refresh_data()
 
     # -- rendering ---------------------------------------------------------
@@ -141,6 +150,23 @@ class QuorumTUI(App):
         if table.row_count:
             table.move_cursor(row=min(cursor, table.row_count - 1))
         table.scroll_y = scroll
+
+    def _agent_log_lines(self, name: str) -> list[str]:
+        """An agent's notebook and action journal — the standing notes its
+        next run will read, then what it has been doing."""
+        detail = views.agent_detail(self.home, name)
+        if detail is None:
+            return [f"no agent {name}"]
+        lines = detail["notes_text"].splitlines()
+        journal = detail.get("journal") or []
+        if journal:
+            lines.append("— action journal —")
+            for e in journal:
+                at = str(e.get("at", "")).replace("T", " ").rstrip("Z")
+                target = f" -> {e['target']}" if e.get("target") else ""
+                args = f"  {e['args']}" if e.get("args") else ""
+                lines.append(f"[{at}] {e.get('action', '')}{target}{args}")
+        return lines
 
     def refresh_data(self) -> None:
         try:
@@ -188,8 +214,12 @@ class QuorumTUI(App):
         if self.selected_task and self.selected_task not in {t["id"] for t in task_rows}:
             self.selected_task = None
 
+        agent_rows = views.agent_rows(self.home)
+        if self.selected_agent and self.selected_agent not in {r["name"] for r in agent_rows}:
+            self.selected_agent = None  # removed (or its config broke) since selection
+
         def fill_agents(table: DataTable) -> None:
-            for r in views.agent_rows(self.home):
+            for r in agent_rows:
                 style = STATUS_STYLE.get(r["status"], "")
                 status = Text(r["status"], style=style)
                 if r["error"]:
@@ -205,6 +235,7 @@ class QuorumTUI(App):
                     r.get("usage_text", ""),
                     (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
                     next_run.replace("T", " ").rstrip("Z"),
+                    key=r["name"],
                 )
 
         self._refill(self.query_one("#agents", DataTable), fill_agents)
@@ -230,8 +261,14 @@ class QuorumTUI(App):
             short = self.selected_task[-6:].lower()
             mode.update(f"task {short} — transcript tail   (esc: board · n: nudge)")
             lines = self._task_log_lines(self.selected_task)
+        elif self.selected_agent:
+            mode.update(f"agent {self.selected_agent} — notebook & journal   (esc: board)")
+            lines = self._agent_log_lines(self.selected_agent)
         else:
-            mode.update("board — recent messages   (enter on a task: transcript · ⚭ attached · ▶ running)")
+            mode.update(
+                "board — recent messages   (enter on a task or agent: its detail "
+                "· ⚭ attached · ▶ running)"
+            )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
                 for m in views.board_tail(self.home, limit=30)

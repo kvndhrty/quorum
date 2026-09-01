@@ -1667,6 +1667,99 @@ def manager_note(text: str, home: Path | None = _HOME_OPT) -> None:
     typer.echo("noted")
 
 
+_AGENT_OPT = typer.Option(
+    "manager", "--agent",
+    help="Whose notebook (default: the manager's). An agent may only write its own.",
+)
+
+
+@manager_app.command("remember")
+def manager_remember(
+    text: str,
+    ttl: int = typer.Option(0, "--ttl", help="Days until the note expires (0: never)."),
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Write a standing note every future run of that agent will read.
+
+    The notebook (`state/manager/notes.jsonl`) is not the journal: `note`
+    records why *this* run did what it did, `remember` records a fact the
+    next run needs. Tasks and other agents are refused — they reach the
+    manager with `task report` and `board post`.
+    """
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    actor = current_actor()
+    if not notes_mod.may_write(actor, agent):
+        # journal the refusal too: an agent reaching for someone else's
+        # notebook is exactly the kind of thing the next digest should show
+        _actor_guard(target, "remember.refused", target=agent, args=text, always_journal=True)
+        raise _fail(
+            f"action refused: {actor} may not write to {agent}'s notebook — "
+            "report to it with `quorum task report`, or reach it on the board "
+            "with `quorum board post attention`"
+        )
+    _actor_guard(target, "remember", args=text, always_journal=True)
+    try:
+        entry = notes_mod.remember(
+            target, text, owner=agent, sender=actor,
+            run_id=os.environ.get(ACTOR_RUN_ENV, ""), ttl_days=ttl or None,
+        )
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.secho(
+        f"remembered ({notes_mod.short_id(entry['id'])}) — every future {agent} run reads it"
+        + (f", for {ttl}d" if ttl else ""),
+        fg="green",
+    )
+
+
+@manager_app.command("forget")
+def manager_forget(
+    note_id: str,
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Retire a standing note that stopped being true (append-only: the file
+    keeps it, readers hide it)."""
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    actor = current_actor()
+    if not notes_mod.may_write(actor, agent):
+        _actor_guard(target, "forget.refused", target=agent, args=note_id, always_journal=True)
+        raise _fail(f"action refused: {actor} may not write to {agent}'s notebook")
+    _actor_guard(target, "forget", target=note_id, always_journal=True)
+    try:
+        note = notes_mod.forget(
+            target, note_id, owner=agent, sender=actor,
+            run_id=os.environ.get(ACTOR_RUN_ENV, ""),
+        )
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.echo(f"forgot ({notes_mod.short_id(note['id'])}) {note.get('text', '')[:60]}")
+
+
+@manager_app.command("notes")
+def manager_notes(
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Print the notebook exactly as the digest renders it for that agent."""
+    from . import notes as notes_mod
+
+    # reading is validated like writing: `--agent` is a path component under
+    # state/agents/, so `../../whatever` must not read outside QUORUM_HOME
+    try:
+        notes_mod.check_owner(agent)
+        section = notes_mod.digest_section(get_home(home), owner=agent)
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    for line in section:
+        typer.echo(line)
+
+
 @manager_app.command("journal")
 def manager_journal(
     lines: int = typer.Option(20, "-n", "--lines", help="Entries to show."),

@@ -87,10 +87,13 @@ messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
-                                  (+ journal.jsonl, transcript.jsonl and
-                                  usage.jsonl for harness-driven agents other
-                                  than the manager)
+                                  (+ journal.jsonl, notes.jsonl,
+                                  transcript.jsonl and usage.jsonl for
+                                  harness-driven agents other than the
+                                  manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
+state/manager/notes.jsonl         the notebook: standing notes a future run
+                                  reads, plus retirement tombstones
 state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent ({at, run, usage|null})
@@ -452,7 +455,7 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
    configured `[tasks]` budget (both observations — see *Token/cost usage*
    above); a header line with what the manager's *own* recent runs have
-   cost, read from its usage ledger; the manager's own
+   cost, read from its usage ledger; its **notebook** (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -481,6 +484,48 @@ avoid degenerate loops (its prompt forbids repeating an intervention marked
 UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
 (`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
 without ever second-guessing a choice.
+
+**The notebook (`notes.py`).** The journal is what the manager *did* this
+run, read back as a bounded tail; a note meant for next week is pushed out
+of that window by the next busy tick. The notebook is the other memory:
+`state/manager/notes.jsonl` (per-agent `state/agents/<name>/notes.jsonl`,
+via `actor.notes_path`), append-only, one entry per line —
+`{id, ts, run_id, sender, text, ttl_days?}` for a note and
+`{id, ts, run_id, sender, retired: true}` for the tombstone `quorum manager
+forget` appends. Written with `quorum manager remember "…" [--ttl N]`,
+which goes through `_actor_guard` like every other mutating command, so a
+note is journaled, attributed via `current_actor()` and counted against the
+run's action cap.
+
+It is a **separate buffer** on both sides, and that is the whole design:
+
+- *Write side.* Not a board topic, so no reporting task or chatty agent
+  posts into it in the ordinary course of things. Only the notebook's own
+  agent and an untagged human may write (`notes.may_write`); a call tagged
+  as a task or another agent is refused with a pointer to `task report` and
+  `board post attention`. Be honest about what that fence is: `may_write`
+  reads `QUORUM_ACTOR` from the environment, and any process that can run
+  the quorum CLI can set it. The runner stripping the actor tag from task
+  runs, and this check, are **conventions that keep honest callers out of
+  each other's memory** — they stop accidental crowding, not a harness that
+  decides to impersonate the manager. The real boundary around a notebook
+  is the filesystem the run is given (`sandbox.py`), not this check.
+- *Read side.* `notes.digest_section` renders the notebook **before** the
+  task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
+  else in the digest spends. Ten live tasks with long report tails cannot
+  shrink it. Over the cap the newest notes are kept and the digest says how
+  many older ones it dropped; when the file itself has outgrown
+  `NOTES_SCAN_BYTES` the section also says how many bytes went unscanned, so
+  a truncated memory is visible rather than silent; a single very long note
+  is truncated
+  (`NOTE_MAX_CHARS`) rather than allowed to evict the rest.
+
+Nothing is compacted or summarized in Python: expiry is the only automatic
+retirement (`ttl_days`), and consolidation — one superseding note, then
+`forget` the ones it replaced — is policy in `prompts/manager.md`. Readers
+are pure file readers (`quorum manager notes`, `views.agent_detail` →
+the TUI's agent pane and the web agent detail), and a prompt agent's
+template gets the same rendering wherever it writes `{notes}`.
 
 **Loop observation (`possible-loop`).** The action journal remembers what the
 *manager* did; nothing else sees the other loop class — a task harness

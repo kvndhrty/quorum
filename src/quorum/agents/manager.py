@@ -28,7 +28,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from .. import actor, ci, fsio, herdr, tasks, usage
+from .. import actor, ci, fsio, herdr, notes, tasks, usage
 from ..actor import journal_path
 from ..agent import Agent
 from ..config import TasksConfig, load_config_or_default
@@ -242,6 +242,11 @@ def build_digest(
     self_spend = usage.describe_agent(usage.agent_usage(home, "manager"))
     if self_spend:
         lines += [f"Your own runs have cost: {self_spend}", ""]
+    # The notebook comes first, and under its own caps (notes.py): it is the
+    # only part of the digest a *previous* you wrote deliberately for this
+    # run, and it must not compete for room with per-task output that grows
+    # with the number of live tasks.
+    lines += notes.digest_section(home, "manager", now=now) + [""]
     # Resolved once: without gh (or with [ci].enabled = false) no task is
     # probed at all.
     ci_budget = CI_MAX_PROBES if ci.available(home) else 0
