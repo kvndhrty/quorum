@@ -193,10 +193,14 @@ and the per-harness adapters under
 
 `~/.quorum/prompts/manager.md` is the manager's constitution: how patient it
 is, when it escalates, how it words its pokes, when creating follow-up work
-is warranted. Edit it to retune your manager; delete it to restore the
-default. (An optional `[llm]` section separately gives *plugin* agents a
-small-completion client — the manager and tasks run your full harness
-directly.)
+is warranted. House rules go in `manager.local.md` next to it — an overlay
+merged into the template at its `{local}` slot, so your policy rides along
+while `quorum init` keeps upgrading the default underneath it. Edit
+`manager.md` itself only when you mean to fork the whole thing (an edited
+template is never upgraded again; `quorum prompt diff manager` shows what
+you are missing), and delete it to restore the default. (An optional `[llm]`
+section separately gives *plugin* agents a small-completion client — the
+manager and tasks run your full harness directly.)
 
 ## Optional sandbox
 
@@ -211,8 +215,11 @@ See [docs/guide.md](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md#s
 
 - **Configure** harnesses, schedules, and the manager's action budget in
   `config.toml` — quorum never rewrites that file.
-- **Retune** the task preamble and the manager's policy by editing
-  `~/.quorum/prompts/*.md`; delete a file to restore the default.
+- **Retune** the task preamble and the manager's policy with an overlay,
+  `~/.quorum/prompts/<name>.local.md` — never seeded, never upgraded, merged
+  into the template's `{local}` slot. Editing `<name>.md` itself still works
+  but freezes that file at your version; delete it to restore the default.
+  `quorum prompt list` shows which is which.
 - **Add** a prompt-driven agent — a prompt, a schedule, your harness, no
   Python. `quorum agent create babysitter --schedule "every 10m"` starts the
   shipped CI babysitter: it watches your tasks' pull requests with `gh` and
