@@ -10,6 +10,7 @@ writing your own agents. (Internals and design rationale live in
 - [Harnesses](#harnesses)
 - [Tasks](#tasks)
 - [The manager](#the-manager)
+- [Prompt customization](#prompt-customization)
 - [Guiding tasks](#guiding-tasks)
 - [Dashboards](#dashboards)
 - [Controlling agents at runtime](#controlling-agents-at-runtime)
@@ -328,6 +329,82 @@ You end it, with `quorum task cancel <id>`. Two things to expect:
   manager run per tick for as long as the task lives. `quorum status` shows
   what those runs cost on the manager's row.
 
+### Chaining tasks with `--after`
+
+Some work only makes sense once other work has landed. `--after` says so:
+
+```bash
+quorum task add my-api "add rate limiting, open a PR" --harness claude
+# → queued task a3f2k9 on my-api
+
+quorum task add my-api "review the rate-limiting PR and fix what you find" \
+    --after a3f2k9
+# → queued task b7c1x4 on my-api
+#   waits on: a3f2k9 — `task run` refuses until they finish (--force overrides)
+```
+
+`--after` is repeatable (`--after a3f2k9 --after d4e5f6` waits for both) and
+takes the same short handles as everything else; the ids are global, so a
+task in one project may wait on a task in another. An unknown handle fails
+the command — nothing is queued — and so does `--after` a
+[perpetual task](#perpetual-tasks): it never finishes, so anything waiting
+on it would wait forever.
+
+What this *does*: while a dependency has not reached a terminal status, the
+dependent shows `waiting-on a3f2k9` in `quorum status`, `task list`,
+`task show`, the TUI and the dashboard; the manager's digest marks the same
+thing and its prompt tells it not to launch such a task; and `quorum task
+run` refuses it outright (`--force` if you disagree). Once every dependency
+is `done`, the task is an ordinary queued task and the manager picks it up
+on its next tick.
+
+What this is **not**: a workflow engine. Nothing schedules on dependencies,
+nothing runs automatically the instant an upstream finishes, and quorum
+never cancels or reorders anything for you.
+
+**Only a dependency that still might finish holds a task back.** If one ends
+`blocked` or `cancelled`, or its task record is deleted outright, it can
+never be satisfied — so quorum stops calling the dependent "waiting" and
+flags `DEP-FAILED` / `DEP-MISSING` instead, in the digest and in every view.
+The task becomes runnable again and the decision is a visible one, for the
+manager or for you: nudge the dependency, launch the dependent anyway if its
+premise still holds, or cancel it. A dependency that silently blocked forever
+would have hidden exactly that choice.
+
+**How the dependent reads the upstream's result.** Its prompt gains a block
+naming each dependency with its status and PR url:
+
+```
+# Tasks this one depends on
+
+- a3f2k9: status=done pr=https://github.com/you/my-api/pull/42
+  it was asked to: add rate limiting, open a PR
+
+Read the full record of any of them — reports, PR url, branch — with
+`quorum task show <id>`.
+```
+
+`quorum task show <id>` (add `--json` for the raw record) is the rest of the
+channel: reports, branch, runs, spend. That is the whole mechanism — the
+harness has the CLI and `QUORUM_HOME`, so nothing else is needed.
+
+**The review-task recipe.** Queue both at once and let the manager sequence
+them:
+
+```bash
+quorum task add my-api "implement issue #14 and open a PR" --harness claude
+quorum task add my-api \
+  "review the PR opened by the task you depend on: read its diff with \
+   \`gh pr diff\`, fix what you find on its branch, and report done with a \
+   summary of the changes you made" \
+  --after <the first task's id>
+```
+
+The reviewer cannot start before the PR exists, so it never spends a run
+reviewing nothing — and if the implementation ends up `blocked`, the digest
+says `DEP-FAILED` instead of silently launching a review of a PR that will
+never come.
+
 **Watching.**
 
 ```bash
@@ -389,19 +466,25 @@ when there is something to manage), the manager compiles a **digest**:
 - `perpetual=true` on any task queued with `--perpetual`
   ([above](#perpetual-tasks)), which the default prompt reads as "relaunch
   forever, never call it stuck, never cancel";
+- `waiting-on=<ids>` on a task queued with [`--after`](#chaining-tasks-with---after)
+  whose dependencies have not finished — the prompt tells the manager not to
+  launch it yet (the runner refuses anyway) — and `DEP-FAILED` /
+  `DEP-MISSING` when a dependency ended `blocked`/`cancelled` or lost its
+  record, neither of which blocks anything: they are decisions for the
+  manager, not rules quorum acts on;
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
+- its **notebook** — standing notes it (or you) wrote for future runs, at
+  the top of the digest and under their own budget ([below](#the-notebook));
 - your directives.
 
 It then runs your harness over that digest with `prompts/manager.md` — and
 that prompt file *is* the supervision policy. Edit it to change how your
 manager behaves: how patient it is, when it escalates, how it words its
-pokes. Delete it to restore the default. Both prompt files are seeded by
-`quorum init`; after upgrading quorum, re-run `quorum init` — a prompt you
-never edited is refreshed to the new packaged default, while an edited one
-is left alone (init tells you when its default has moved on so you can
-merge or delete). The manager acts through the same
+pokes. Delete it to restore the default. For a few lines of house policy,
+though, prefer the overlay: [Prompt customization](#prompt-customization)
+below. The manager acts through the same
 CLI you use — launching tasks, nudging them, cancelling them, even creating
 follow-up tasks with `task add` — and every action lands in an auditable
 journal:
@@ -409,6 +492,7 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
+quorum manager notes                      # its notebook: what it remembers
 ```
 
 A `tell` is normally read at the start of the next tick. If the manager's
@@ -431,6 +515,113 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
 
+You do, however, get told. Individual failures go to the **system** board,
+which nothing nags you about — but after five consecutive failed ticks the
+supervisor posts `agent.failing` to the **attention** board, the banner
+`quorum status`, the TUI and the web dashboard all show. An agent that is
+never paused would otherwise fail all night in a channel nobody watches;
+this is the one failure quorum will interrupt you about. It is one post per
+outage, not per tick, and when the manager ticks again a matching
+`agent.recovered` lands on **system** — the outage is over and there is
+nothing for you to do, so it does not add to the banner:
+
+```
+$ quorum status
+supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
+⚠ 1 on #attention in the last 7d — `quorum board read attention`
+
+$ quorum board read attention
+[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
+has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
+so it keeps retrying — last error: manager harness run 01K2… exited 1
+```
+
+### The notebook
+
+Every tick is a fresh run with no memory: the digest is all the manager
+knows. Its action journal covers what it just did, but that window scrolls —
+a fact worth keeping ("that PR is waiting on you", "these tests need a
+running postgres") would be gone by tomorrow morning. So the manager has a
+notebook, and it is the first thing in every digest:
+
+```bash
+quorum manager remember "task a3f2k9's PR is waiting on my review"
+quorum manager remember "codex is rate-limited today" --ttl 2   # expires itself
+quorum manager notes                       # what it currently remembers
+quorum manager forget k7f2ab                # retire one (by the id `notes` prints)
+```
+
+You and the manager write to the same notebook — a note from you reads as
+standing guidance, which is the difference from `manager tell`: a `tell` is
+a one-shot directive, claimed and consumed by the next tick, while a note
+stays until it expires or someone retires it. Nothing else writes there: a
+task reaches the manager with `task report` and the board, and quorum
+refuses a `remember` that comes in tagged as a task or another agent, so no
+amount of task chatter crowds your notes out. (That refusal is a
+convention, not a security boundary — quorum decides who is calling from an
+environment variable, and a determined harness could set it. What actually
+confines a task run is the sandbox, if you use one.) A busy home cannot
+crowd the notebook either — it has its own bounded slot in the digest, ahead
+of the task section, so ten noisy tasks cannot shrink it. When it overflows
+the digest says how many older notes it dropped (and, if the file has grown
+past the window readers scan, how many bytes it did not read), and the
+default prompt tells the manager to consolidate: one note that supersedes
+several, then `forget` the rest.
+
+The same file exists for every agent (`quorum manager remember --agent
+<name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
+own notebook wherever its template writes `{notes}`. Both dashboards show an
+agent's notebook when you select it.
+
+## Prompt customization
+
+Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
+constitution (`manager.md`), the task preamble (`task-preamble.md`), the
+perpetual block (`task-perpetual.md`), and one per prompt-driven agent.
+`quorum init` seeds them, and deleting one restores the packaged default.
+Re-run `quorum init` after upgrading quorum: a prompt you never edited is
+refreshed to the new packaged default (quorum recognizes a pristine seed by
+hash), and one you did edit is left alone.
+
+There are two ways to change one, and the difference matters:
+
+- **An overlay — `prompts/<name>.local.md`.** Yours alone: never seeded,
+  never read by `quorum init`, never upgraded. Its text is merged into the
+  template at the `{local}` slot (the packaged `manager.md` puts the slot
+  right before "How to work", so house rules land above the general
+  guidance; `task-preamble.md` puts it after the delivery protocol, and
+  `task-perpetual.md` after the cycle conventions). A template without a
+  slot — one you rewrote yourself — gets the overlay prepended instead. No
+  overlay file, or an empty one, renders to nothing; so does one quorum
+  cannot read (a bad overlay never breaks a run — `quorum prompt list`
+  flags it instead).
+- **Editing `<name>.md` itself.** Still supported, still wins outright. But
+  an edited file is *yours* from then on: `quorum init` will never upgrade
+  it, so every later improvement to the packaged default stops reaching this
+  home. Init says so, and `quorum prompt diff <name>` shows you exactly what
+  you are missing.
+
+House rules ("run one task at a time", "always open draft PRs") belong in an
+overlay. Rewriting how supervision fundamentally works belongs in the file.
+
+```bash
+quorum prompt list                # each template: default, seeded, or edited (+ overlay)
+quorum prompt diff manager        # your copy vs the packaged default
+```
+
+**Migrating a home that already edited a prompt** — one step, and it is
+worth doing, because an edited `manager.md` from a few releases ago has no
+policy for whatever the digest has learned to report since:
+
+```bash
+quorum prompt diff manager                      # see what the upgrade brings
+$EDITOR ~/.quorum/prompts/manager.local.md      # paste ONLY your own lines here
+rm ~/.quorum/prompts/manager.md && quorum init  # take the current default back
+```
+
+After that, `quorum init` keeps `manager.md` current forever and your
+`manager.local.md` rides on top of every future version of it.
+
 ## Guiding tasks
 
 The steering channel for individual tasks is the task's inbox, and you and
@@ -444,7 +635,9 @@ The **next run starts with the guidance in its prompt** (a "Guidance
 received" section), and a cooperative harness that checks
 `quorum task inbox --claim` mid-run sees it sooner. The TUI makes this
 fluid: select a task, press `n`, type, enter. The web dashboard has the same
-nudge box on each task.
+nudge box on each task. The manager takes direction the same way, through
+its own inbox — `quorum manager tell "prioritise the release tasks"`, or `m`
+in the TUI.
 
 ## Adopting a live session
 
@@ -513,8 +706,11 @@ integration (`enabled = false`).
 
 ## Dashboards
 
-All views are pure readers of the home directory — they work whether or not
-the supervisor is running, including over SSH, and never hold locks.
+All views read the home directory and nothing else — they work whether or
+not the supervisor is running, including over SSH, and never hold locks.
+What they *write* is a short list of steering affordances (nudge a task,
+tell the manager, run, cancel, and in the browser a few more), each one the
+same call the CLI makes.
 
 Escalations are surfaced everywhere: recent posts on the `attention` topic
 (the manager's ask-a-human channel) show up as a warning line in `status`,
@@ -528,21 +724,44 @@ for you is never silent.
   `agent list`).
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
   top; arrow around freely, press enter on a task to open its transcript
-  and reports in the bottom pane (`esc` returns to the board feed, `n`
-  nudges, `q` quits — the header above the pane always says which view
-  you're in). The agents table shows each agent's status, schedule, what its
-  own harness runs have cost (when the harness reports it), and its last and
-  next run (`~` marks an estimate computed from the schedule when the
-  supervisor isn't around to say for sure).
+  and reports in the bottom pane (the header above the pane always says
+  which view you're in). The agents table shows each agent's status,
+  schedule, what its own harness runs have cost (when the harness reports
+  it), and its last and next run (`~` marks an estimate computed from the
+  schedule when the supervisor isn't around to say for sure). The keys:
+
+  | key | does |
+  | --- | --- |
+  | `enter` | open the highlighted task's transcript and reports |
+  | `esc` | back to the board feed (or cancel what you're typing) |
+  | `n` | nudge the highlighted task — guidance into its inbox |
+  | `m` | tell the manager — a directive for its next run, no task needed |
+  | `s` | start a detached run of the highlighted task |
+  | `c` | cancel the highlighted task (asks first) |
+  | `r` | refresh now |
+  | `q` | quit |
+
+  `n`, `s` and `c` act on the row you're pointing at, so you never have to
+  open a task to act on it; while you're reading one task's transcript they
+  act on that task. If the home directory has gone unwritable, they say so
+  and carry on rather than taking the dashboard down with them.
+
+  `s` refuses a task that is already running or attached to a live session;
+  `c` only marks the task cancelled — to also stop a live runner, use
+  `quorum task cancel <id> --kill`. `m` is the widest of the four: the
+  manager can do anything you can ask it to, including creating tasks
+  ("open a task on quorum to fix the flaky nono test"), which is why the
+  dashboard has no task form.
 
   ![quorum terminal dashboard](images/tui.png)
 
-- `quorum web` — the same files, more affordances, at
+- `quorum web` — the same files, a different set of affordances, at
   `http://127.0.0.1:8787` (`[web]` extra). Localhost only, no exposed
-  ports. Beyond what the TUI shows, you can pause/resume/run-now an agent,
-  create a prompt agent with the "new agent…" form, post to the board, and
-  click a project's deadline to edit or clear it — all without leaving the
-  browser.
+  ports. It nudges tasks like the TUI does, and where the TUI stops it goes
+  on: pause/resume/run-now an agent, create a prompt agent with the "new
+  agent…" form, post to the board, and click a project's deadline to edit or
+  clear it — all without leaving the browser. It has no run, cancel or
+  manager directive; those live in the TUI and the CLI.
 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
@@ -553,6 +772,7 @@ for you is never silent.
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
+- `quorum manager notes` — what it is carrying forward between runs.
 
 ## Controlling agents at runtime
 
@@ -562,15 +782,19 @@ config or restarting:
 ```bash
 quorum agent run-now manager      # tick immediately
 quorum agent pause manager        # stop scheduling it
-quorum agent resume manager       # resume (also clears the auto-pause counter)
+quorum agent resume manager       # resume (also clears the failure streak)
 quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
 
 Commands are delivered through the supervisor's inbox and applied within
-~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
-its config sets `auto_pause = false`, as the manager's does, in which case
-it keeps retrying (loud failures, automatic recovery);
-`agent resume` is the recovery lever. A pause survives supervisor restarts.
+~15 seconds. An agent that fails 5 ticks in a row is auto-paused, announced
+on the system board — unless its config sets `auto_pause = false`, as the
+manager's does, in which case it keeps retrying (loud failures, automatic
+recovery) and its streak is escalated once to the attention board instead
+of being paused; `agent resume` is the recovery lever. Either lever ends
+the streak: a successful `run-once` and a `resume` both clear the failure
+counter and the escalation, so the *next* outage escalates afresh. A pause
+survives supervisor restarts.
 
 ## Prompt-driven agents
 
@@ -858,7 +1082,8 @@ def test_milestone(tmp_path):
   config.toml                       yours; quorum never rewrites it
   supervisor.lock                   pid + start time + quorum version; mtime = liveness
   projects/<slug>.json              registered projects
-  tasks/<id>/task.json              spec, reported status, session, run history
+  tasks/<id>/task.json              spec, reported status, session, run history,
+                                    dependencies (`--after`)
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
   tasks/<id>/runner.lock            pid of a live run
@@ -867,8 +1092,10 @@ def test_milestone(tmp_path):
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)
   messages/archive/YYYY-MM.jsonl.gz compacted history
   prompts/*.md                      editable prompt templates (incl. manager.md)
+  prompts/*.local.md                your overlays: house policy init never touches
   state/agents/<name>/              heartbeats + private agent state
   state/manager/journal.jsonl       the manager's auto-recorded actions
+  state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
   state/manager/usage.jsonl         what each manager run cost (agents get
                                     the same file under state/agents/<name>/)

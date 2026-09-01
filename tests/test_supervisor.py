@@ -181,10 +181,17 @@ def test_control_inbox_pause_resume_run_now(home: Path):
         assert hb["status"] == "paused"
 
         sup._failures["ctl"] = 3
+        sup._write_heartbeat("ctl", consecutive_failures=3, escalated_at="2026-08-30T22:10:04Z")
         bus.send("user", "supervisor", type="agent.resume", payload={"agent": "ctl"})
         sup._control()
         assert sup.scheduler.get_job("ctl").next_run_time is not None
         assert sup._failures["ctl"] == 0  # manual resume clears the auto-pause counter
+        # ...on the heartbeat too: a resumed agent starts a fresh streak, so the
+        # next outage can escalate rather than finding a stale stamp
+        hb = fsio.read_json(home / "state/agents/ctl/heartbeat.json")
+        assert hb["status"] == "idle"
+        assert hb["consecutive_failures"] == 0
+        assert hb["escalated_at"] is None
 
         before = sup.scheduler.get_job("ctl").next_run_time
         bus.send("user", "supervisor", type="agent.run-now", payload={"agent": "ctl"})
@@ -366,3 +373,170 @@ def test_auto_pause_false_keeps_a_failing_agent_scheduled(home: Path):
     assert hb["consecutive_failures"] == MAX_CONSECUTIVE_FAILURES + 2
     system = MessageBus(home).read_topic("system")
     assert not any(m.type == "agent.paused" for m in system)  # ...but never paused
+
+
+FAKE_HARNESS = str(Path(__file__).parent / "bin" / "fake_harness.py")
+
+
+def write_flaky_manager(home: Path) -> Config:
+    """A real manager whose harness is the fake one behind a shim that fails
+    until `home/llm-up` exists — the LLM outage of #24, reproduced end to end
+    without touching the manager or the supervisor's notion of failure."""
+    shim = home / "flaky_harness.py"
+    shim.write_text(
+        "import os, sys\n"
+        f"if not os.path.exists({str(home / 'llm-up')!r}):\n"
+        "    sys.exit(3)\n"
+        f"os.execv(sys.executable, [sys.executable, {FAKE_HARNESS!r}, *sys.argv[1:]])\n"
+    )
+    return write_config(
+        home,
+        "[harness.mgr]\n"
+        f'start = ["{sys.executable}", "{shim}"]\n'
+        'env = { FAKE_HARNESS_MODE = "echo" }\n'
+        "[agents.manager]\n"
+        'type = "manager"\n'
+        'schedule = "every 5m"\n'
+        "auto_pause = false\n"
+        "[agents.manager.settings]\n"
+        'harness = "mgr"\n'
+    )
+
+
+def test_sustained_failure_of_an_unpausable_agent_escalates_once(home: Path):
+    """#38: `auto_pause = false` exempts the manager from the auto-pause that
+    would otherwise reach `attention`, so its streak has to escalate on its
+    own — exactly once, and closed by one recovery post."""
+    config = write_flaky_manager(home)
+    bus = MessageBus(home)
+    # A directive keeps the manager's wake condition true every tick: a failing
+    # tick rejects it straight back to new/ for the next one.
+    bus.send("user", "manager", type="directive", text="keep an eye on the queue")
+    sup = Supervisor(home, config)
+
+    for _ in range(MAX_CONSECUTIVE_FAILURES):
+        sup.run_agent_tick("manager")
+    attention = bus.read_topic("attention")
+    assert [m.type for m in attention] == ["agent.failing"]
+    assert attention[0].payload["agent"] == "manager"
+    assert attention[0].payload["consecutive_failures"] == MAX_CONSECUTIVE_FAILURES
+    # the harness failure itself, not a generic "agent broke"
+    assert "exited 3" in attention[0].payload["text"]
+    hb = fsio.read_json(home / "state/agents/manager/heartbeat.json")
+    assert hb["escalated_at"]
+
+    # ...and the streak stays one post, however long the outage runs
+    for _ in range(MAX_CONSECUTIVE_FAILURES):
+        sup.run_agent_tick("manager")
+    assert [m.type for m in bus.read_topic("attention")] == ["agent.failing"]
+    assert not any(m.type == "agent.paused" for m in bus.read_topic("system"))
+    # the per-tick record is unchanged: still loud on the system topic
+    assert sum(m.type == "agent.error" for m in bus.read_topic("system")) == (
+        2 * MAX_CONSECUTIVE_FAILURES
+    )
+
+    # the banner every reader surfaces shows it
+    banner = views.attention_summary(home)
+    assert banner["count"] == 1
+    assert "manager" in banner["recent"][-1]["text"]
+
+    # service returns: one recovery post, dedupe field cleared
+    (home / "llm-up").write_text("")
+    sup.run_agent_tick("manager")
+    hb = fsio.read_json(home / "state/agents/manager/heartbeat.json")
+    assert hb["status"] == "idle" and hb["consecutive_failures"] == 0
+    assert not hb.get("escalated_at")
+    # ...on `system`: a self-healed outage is informational, and an attention
+    # post would keep the ⚠ lit for the rest of the window with nothing to do
+    assert [m.type for m in bus.read_topic("attention")] == ["agent.failing"]
+    assert sum(m.type == "agent.recovered" for m in bus.read_topic("system")) == 1
+    assert views.attention_summary(home)["count"] == 1
+    assert (home / "state/manager/transcript.jsonl").exists()  # the run really happened
+
+
+def test_escalation_never_fires_for_an_auto_pausing_agent(home: Path):
+    """The pause path is unchanged: a normal agent still pauses, and never
+    reports itself as a failing-but-running one."""
+    (home / "plugins" / "bomb2.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Bomb(Agent):\n"
+        "    def tick(self):\n"
+        "        raise RuntimeError('boom')\n"
+    )
+    config = write_config(home, '[agents.bomb2]\ntype = "bomb2:Bomb"\nschedule = "every 1h"\n')
+    sup = Supervisor(home, config)
+    for _ in range(MAX_CONSECUTIVE_FAILURES):
+        sup.run_agent_tick("bomb2")
+
+    hb = fsio.read_json(home / "state/agents/bomb2/heartbeat.json")
+    assert hb["status"] == "paused"
+    assert "escalated_at" not in hb
+    assert not any(m.type == "agent.failing" for m in MessageBus(home).read_topic("attention"))
+
+
+def write_never_pausing_bomb(home: Path, name: str = "bomb3") -> Config:
+    (home / "plugins" / f"{name}.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Bomb(Agent):\n"
+        "    def tick(self):\n"
+        "        raise RuntimeError('llm service down')\n"
+    )
+    return write_config(
+        home,
+        f'[agents.{name}]\ntype = "{name}:Bomb"\nschedule = "every 5m"\nauto_pause = false\n',
+    )
+
+
+def test_a_failed_escalation_post_is_retried_not_stamped(home: Path):
+    """The stamp is written *after* the post: a stamp-first escalation whose
+    post threw would suppress the banner for the rest of the streak, which is
+    exactly the outage it exists to report."""
+    sup = Supervisor(home, write_never_pausing_bomb(home))
+
+    real_post = sup.bus.post
+    calls: list[str] = []
+
+    def flaky_post(sender, topic, *args, **kwargs):
+        calls.append(topic)
+        if topic == "attention":
+            raise OSError("board is unwritable")
+        return real_post(sender, topic, *args, **kwargs)
+
+    sup.bus.post = flaky_post  # type: ignore[method-assign]
+    for _ in range(MAX_CONSECUTIVE_FAILURES - 1):
+        sup.run_agent_tick("bomb3")
+    with pytest.raises(OSError):
+        sup.run_agent_tick("bomb3")
+
+    assert "attention" in calls
+    hb = fsio.read_json(home / "state/agents/bomb3/heartbeat.json")
+    assert not hb.get("escalated_at")  # the dedupe never armed
+    assert not (home / "state/agents/bomb3/tick.lock").exists()  # and the lock is released
+
+    # the next tick escalates for real
+    sup.bus.post = real_post  # type: ignore[method-assign]
+    sup.run_agent_tick("bomb3")
+    assert [m.type for m in sup.bus.read_topic("attention")] == ["agent.failing"]
+    assert fsio.read_json(home / "state/agents/bomb3/heartbeat.json")["escalated_at"]
+
+
+def test_a_non_object_heartbeat_reads_as_no_heartbeat(home: Path):
+    """A hand-edited (or otherwise garbage) heartbeat is bookkeeping, never a
+    rail: it must not raise AttributeError into APScheduler and kill the tick."""
+    (home / "plugins" / "quiet.py").write_text(
+        "from quorum.agent import Agent\n"
+        "class Quiet(Agent):\n"
+        "    def tick(self):\n"
+        "        pass\n"
+    )
+    config = write_config(home, '[agents.quiet]\ntype = "quiet:Quiet"\nschedule = "every 1h"\n')
+    path = home / "state" / "agents" / "quiet" / "heartbeat.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fsio.atomic_write_json(path, ["not", "an", "object"])
+
+    sup = Supervisor(home, config)
+    assert sup._read_heartbeat("quiet") == {}
+    sup.run_agent_tick("quiet")  # must not raise
+
+    hb = fsio.read_json(path)
+    assert hb["status"] == "idle"  # and the garbage is replaced by a real one

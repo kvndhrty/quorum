@@ -182,9 +182,20 @@ async function refresh() {
 
   setSection("tasks", (data.tasks || []).map(t => {
     const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
+    // waiting-on: a queued task whose dependencies have not finished. Read
+    // from files like everything else here; the manager still decides launches.
+    const waiting = (t.waiting_on || []).length
+      ? ` <span class="muted" title="waiting on unfinished dependencies">⏳ ${esc((t.waiting_on || []).join(","))}</span>` : "";
+    // DEP-FAILED / DEP-MISSING: dependencies that can never finish. Nothing
+    // waits on those — they are shown so the decision stays visible.
+    const depFailed = (t.dep_failed || []).length
+      ? ` <span class="status-error" title="a dependency ended ${esc((t.dep_failed || []).join(","))}">DEP-FAILED</span>` : "";
+    const depMissing = (t.dep_missing || []).length
+      ? ` <span class="status-error" title="no task record for ${esc((t.dep_missing || []).join(","))}">DEP-MISSING</span>` : "";
     // "∞": perpetual — never finishes by design, only the user ends it.
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""))
-      + (t.perpetual ? ' <span title="perpetual: runs in cycles until you cancel it">∞</span>' : "");
+      + (t.perpetual ? ' <span title="perpetual: runs in cycles until you cancel it">∞</span>' : "")
+      + waiting + depFailed + depMissing;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over
     // the configured budget — a mark, never a block.
@@ -253,8 +264,12 @@ async function renderAgentDetail() {
   const acts = (a.actions || []).map(x => `${fmtTs(x.at)} ${x.type}: ${x.text}`);
   const journal = (a.journal || []).map(x =>
     `${fmtTs(x.at)} ${x.action}${x.target ? " -> " + x.target : ""}${x.args ? "  " + x.args : ""}`);
+  // the notebook first, the way the agent's own digest reads it
+  const notes = (a.notes || []).map(x =>
+    `(${x.id.slice(-6).toLowerCase()}) [${(x.ts || "").slice(0, 10)}] ${x.sender}: ${x.text}`);
   $("agent-tail").textContent =
-    [...(journal.length ? ["— action journal —", ...journal] : []),
+    [...(notes.length ? ["— notebook (standing notes) —", ...notes] : []),
+     ...(journal.length ? ["— action journal —", ...journal] : []),
      ...(acts.length ? ["— activity —", ...acts] : [])].join("\n") || "no activity yet";
 }
 

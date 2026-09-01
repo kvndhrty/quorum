@@ -1,7 +1,16 @@
-"""Terminal dashboard (Textual). A pure reader of QUORUM_HOME, refreshed on a
+"""Terminal dashboard (Textual). A file reader of QUORUM_HOME, refreshed on a
 timer — works whether or not the supervisor is running, including over SSH.
-Its single write affordance is steering: `n` sends guidance into the selected
-task's inbox, the same channel the manager's pokes use."""
+Its write affordances stay thin bus/store calls, the same ones the CLI and the
+web dashboard make: `n` sends guidance into a task's inbox, `m` sends a
+directive to the manager's inbox (`quorum manager tell`), `s` launches a
+detached run, and `c` cancels a task — the one destructive binding, so it
+confirms first.
+
+Two rules hold for all four. They act on the row the reader is *looking at* —
+the highlighted row while the task table has focus, the open task while
+reading its detail (`enter` opens a transcript; it does not arm the write
+keys) — and they all go through `_write`, because a keystroke on a dashboard
+must never take the dashboard down when QUORUM_HOME turns unwritable."""
 
 from __future__ import annotations
 
@@ -11,11 +20,21 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 from .. import views
-from ..tasks import read_reports, read_transcript_tail
+from ..messages import MessageBus
+from ..tasks import (
+    Task,
+    TaskStore,
+    nudge,
+    read_reports,
+    read_transcript_tail,
+    runner_alive,
+)
 
 STATUS_STYLE = {
     "idle": "green",
@@ -32,6 +51,36 @@ TASK_STATUS_STYLE = {
     "cancelled": "dim",
 }
 
+#: what `_write` returns when the write raised instead of happening
+FAILED = object()
+
+
+class ConfirmScreen(ModalScreen[bool]):
+    """A yes/no gate in front of the one destructive binding."""
+
+    BINDINGS = [
+        ("y", "confirm", "yes"),
+        ("n", "refuse", "no"),
+        ("escape", "refuse", "no"),
+    ]
+    CSS = """
+    ConfirmScreen { align: center middle; }
+    #question { width: 70; height: auto; border: round $warning; padding: 1 2; background: $surface; }
+    """
+
+    def __init__(self, question: str):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"{self.question}\n\ny: yes    n / esc: no", id="question")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_refuse(self) -> None:
+        self.dismiss(False)
+
 
 class QuorumTUI(App):
     TITLE = "quorum"
@@ -39,6 +88,9 @@ class QuorumTUI(App):
         ("q", "quit", "quit"),
         ("r", "refresh", "refresh"),
         ("n", "nudge", "nudge task"),
+        ("m", "directive", "tell manager"),
+        ("s", "run_task", "run task"),
+        ("c", "cancel_task", "cancel task"),
         ("escape", "show_board", "board"),
     ]
     CSS = """
@@ -58,6 +110,11 @@ class QuorumTUI(App):
         super().__init__()
         self.home = Path(home)
         self.selected_task: str | None = None
+        self.selected_agent: str | None = None
+        # which inbox the shared input box writes to: "task" or "manager"
+        self._input_target = "task"
+        # the task a "task" nudge is aimed at, pinned when the box was opened
+        self._input_task: str | None = None
         self._log_lines: list[str] | None = None  # last rendered log content
 
     def compose(self) -> ComposeResult:
@@ -93,39 +150,169 @@ class QuorumTUI(App):
         self.refresh_data()
 
     def action_show_board(self) -> None:
+        box = self.query_one("#nudge", Input)
+        if box.display:
+            # escape means "cancel what I am typing", exactly as the
+            # placeholder promises — not "throw away my task selection"
+            self._close_input()
+            return
         self.selected_task = None
-        self.query_one("#nudge", Input).display = False
+        self.selected_agent = None
         self.refresh_data()
 
     def action_nudge(self) -> None:
-        if self.selected_task is None:
-            self.notify("select a task first", severity="warning")
+        task = self._target_task()
+        if task is None:
             return
-        box = self.query_one("#nudge", Input)
-        box.display = True
-        box.focus()
+        # pin the target now: the box takes focus, so "the row I was looking
+        # at when I pressed n" is the only answer that stays true at submit
+        self._input_task = task.id
+        self._open_input("task", f"guidance for {task.short_id} — enter sends, esc cancels")
+
+    def action_directive(self) -> None:
+        """`quorum manager tell`, from the dashboard: the manager's next run
+        starts with the directive in its digest. No task selection needed."""
+        self._open_input("manager", "directive for the manager — enter sends, esc cancels")
+
+    def action_run_task(self) -> None:
+        task = self._target_task()
+        if task is None:
+            return
+        if task.attached:
+            self.notify(
+                f"task {task.short_id} is attached to a live session — nudge it instead",
+                severity="warning",
+            )
+            return
+        if runner_alive(self.home, task.id):
+            self.notify(f"task {task.short_id} is already running", severity="warning")
+            return
+        from ..runner import launch_detached
+
+        pid = self._write("start the run", lambda: launch_detached(self.home, task.id))
+        if pid is FAILED:
+            return
+        self.notify(f"run started for {task.short_id} (pid {pid})")
+        self.refresh_data()
+
+    def action_cancel_task(self) -> None:
+        task = self._target_task()
+        if task is None:
+            return
+        question = f"cancel task {task.short_id} ({task.status})?"
+        if runner_alive(self.home, task.id):
+            question += "\nits live runner keeps going — `quorum task cancel --kill` SIGTERMs it"
+
+        def cancel(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            done = self._write(
+                f"cancel {task.short_id}",
+                lambda: TaskStore(self.home).update(task.id, status="cancelled"),
+            )
+            if done is FAILED:
+                return
+            self.notify(f"task {task.short_id} cancelled")
+            self.refresh_data()
+
+        self.push_screen(ConfirmScreen(question), cancel)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
+        target = self._input_target
+        task_id = self._input_task
+        self._close_input()
+        if not text:
+            return
+        if target == "manager":
+            sent = self._write(
+                "queue the directive",
+                lambda: MessageBus(self.home).send("user", "manager", type="directive", text=text),
+            )
+            if sent is FAILED:
+                return
+            self.notify("directive queued for the manager's next run")
+            self.refresh_data()
+            return
+        task = TaskStore(self.home).get(task_id) if task_id else None
+        if task is None:
+            self.notify("that task is gone", severity="warning")
+            return
+        sent = self._write(
+            f"nudge {task.short_id}", lambda: nudge(self.home, task, text, sender="user")
+        )
+        if sent is FAILED:
+            return
+        self.notify(f"guidance queued for {task.short_id}")
+        self.refresh_data()
+
+    # -- write-affordance helpers -------------------------------------------
+
+    def _write(self, what: str, do):
+        """Run one write, or say why it did not happen. Every affordance goes
+        through here: QUORUM_HOME can be read-only, full, or on a dead mount,
+        and a dashboard that dies at the keystroke is the worst moment to lose
+        the view of what is going on."""
+        try:
+            return do()
+        except OSError as e:
+            self.notify(f"could not {what}: {e}", severity="error")
+            return FAILED
+
+    def _open_input(self, target: str, placeholder: str) -> None:
+        box = self.query_one("#nudge", Input)
+        self._input_target = target
+        box.placeholder = placeholder
+        box.display = True
+        box.focus()
+
+    def _close_input(self) -> None:
         box = self.query_one("#nudge", Input)
         box.value = ""
         box.display = False
-        if not text or self.selected_task is None:
-            return
-        from ..tasks import TaskStore, nudge
+        self.query_one("#tasks", DataTable).focus()
 
-        task = TaskStore(self.home).get(self.selected_task)
+    def _highlighted_task(self) -> str | None:
+        """The task id under the table cursor, or None when the table is not
+        the focused widget (the reader is in the input box or a modal)."""
+        try:
+            table = self.query_one("#tasks", DataTable)
+        except NoMatches:
+            return None
+        if self.focused is not table or not table.row_count:
+            return None
+        row = Coordinate(table.cursor_row, 0)
+        if not table.is_valid_coordinate(row):
+            return None  # cursor briefly past the end of a shrinking table
+        key = table.coordinate_to_cell_key(row).row_key
+        return key.value
+
+    def _target_task(self) -> Task | None:
+        """Which task a write acts on: the highlighted row while the table has
+        focus — what the reader is pointing at — falling back to the open task
+        when they are down in its detail. `enter` opens a transcript; it must
+        not quietly become the target of every later keystroke."""
+        task_id = self._highlighted_task() or self.selected_task
+        if task_id is None:
+            self.notify("no task to act on", severity="warning")
+            return None
+        task = TaskStore(self.home).get(task_id)
         if task is None:
-            return
-        nudge(self.home, task, text, sender="user")
-        self.notify(f"guidance queued for {task.short_id}")
-        self.refresh_data()
+            self.notify("that task is gone", severity="warning")
+        return task
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # selection is deliberate (enter/click) — merely arrowing through the
         # table must never swap the board pane away
-        if event.data_table.id == "tasks" and event.row_key is not None:
-            self.selected_task = event.row_key.value
+        if event.row_key is None:
+            return
+        if event.data_table.id == "tasks":
+            # tasks and agents share the one log pane, so selecting either
+            # replaces whatever it was showing
+            self.selected_task, self.selected_agent = event.row_key.value, None
+            self.refresh_data()
+        elif event.data_table.id == "agents":
+            self.selected_agent, self.selected_task = event.row_key.value, None
             self.refresh_data()
 
     # -- rendering ---------------------------------------------------------
@@ -141,6 +328,23 @@ class QuorumTUI(App):
         if table.row_count:
             table.move_cursor(row=min(cursor, table.row_count - 1))
         table.scroll_y = scroll
+
+    def _agent_log_lines(self, name: str) -> list[str]:
+        """An agent's notebook and action journal — the standing notes its
+        next run will read, then what it has been doing."""
+        detail = views.agent_detail(self.home, name)
+        if detail is None:
+            return [f"no agent {name}"]
+        lines = detail["notes_text"].splitlines()
+        journal = detail.get("journal") or []
+        if journal:
+            lines.append("— action journal —")
+            for e in journal:
+                at = str(e.get("at", "")).replace("T", " ").rstrip("Z")
+                target = f" -> {e['target']}" if e.get("target") else ""
+                args = f"  {e['args']}" if e.get("args") else ""
+                lines.append(f"[{at}] {e.get('action', '')}{target}{args}")
+        return lines
 
     def refresh_data(self) -> None:
         try:
@@ -167,6 +371,12 @@ class QuorumTUI(App):
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
                 if t.get("perpetual"):
                     status += " ∞"  # never finishes by design; only the user ends it
+                if t.get("waiting_on"):
+                    status += " ⏳" + ",".join(t["waiting_on"])
+                if t.get("dep_failed"):
+                    status += " DEP-FAILED"
+                if t.get("dep_missing"):
+                    status += " DEP-MISSING"
                 style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
                 table.add_row(
                     t["id_short"],
@@ -188,8 +398,12 @@ class QuorumTUI(App):
         if self.selected_task and self.selected_task not in {t["id"] for t in task_rows}:
             self.selected_task = None
 
+        agent_rows = views.agent_rows(self.home)
+        if self.selected_agent and self.selected_agent not in {r["name"] for r in agent_rows}:
+            self.selected_agent = None  # removed (or its config broke) since selection
+
         def fill_agents(table: DataTable) -> None:
-            for r in views.agent_rows(self.home):
+            for r in agent_rows:
                 style = STATUS_STYLE.get(r["status"], "")
                 status = Text(r["status"], style=style)
                 if r["error"]:
@@ -205,6 +419,7 @@ class QuorumTUI(App):
                     r.get("usage_text", ""),
                     (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
                     next_run.replace("T", " ").rstrip("Z"),
+                    key=r["name"],
                 )
 
         self._refill(self.query_one("#agents", DataTable), fill_agents)
@@ -228,10 +443,20 @@ class QuorumTUI(App):
         mode = self.query_one("#logmode", Static)
         if self.selected_task:
             short = self.selected_task[-6:].lower()
-            mode.update(f"task {short} — transcript tail   (esc: board · n: nudge)")
+            mode.update(
+                f"task {short} — transcript tail   "
+                "(esc: board · n: nudge · m: manager · s: run · c: cancel)"
+            )
             lines = self._task_log_lines(self.selected_task)
+        elif self.selected_agent:
+            mode.update(f"agent {self.selected_agent} — notebook & journal   (esc: board)")
+            lines = self._agent_log_lines(self.selected_agent)
         else:
-            mode.update("board — recent messages   (enter on a task: transcript · ⚭ attached · ▶ running)")
+            mode.update(
+                "board — recent messages   "
+                "(enter on a task or agent: its detail · n/s/c act on the highlighted row · "
+                "m: tell manager · ⚭ attached · ▶ running)"
+            )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
                 for m in views.board_tail(self.home, limit=30)

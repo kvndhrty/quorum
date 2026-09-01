@@ -57,10 +57,11 @@ below govern nearly every change:
 
 These are the project's *current* design commitments, not gospel. Quorum is
 evolving: any recorded stance — including the big three above and smaller ones
-noted per-layer below (e.g. the TUI/web being pure readers) — is open to
-deliberate revision when a change is worth it. Don't contort a feature to fit
-an old rule; propose breaking the rule, and when it changes, update this file
-and `docs/architecture.md` in the same commit so the record stays true.
+noted per-layer below (e.g. the TUI/web reading files and writing only through
+thin shared bus calls) — is open to deliberate revision when a change is worth
+it. Don't contort a feature to fit an old rule; propose breaking the rule, and
+when it changes, update this file and `docs/architecture.md` in the same commit
+so the record stays true.
 
 ### Layers
 
@@ -82,6 +83,15 @@ and `docs/architecture.md` in the same commit so the record stays true.
   unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
   (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
   the preamble tells harnesses to commit+push with plain git before reporting done.
+  `depends_on` (`task add --after <id>`, repeatable) lists full ids a task
+  must not start before — validated once at `add` (`resolve_dependencies`:
+  unknown/ambiguous/self rejected, and a perpetual upstream refused because it
+  never finishes) and read back by the total, pure `dependency_state`
+  (waiting/failed/missing/cycle) that the digest, views and runner share. Only
+  a dependency that still *might* finish blocks: `failed` and `missing` are
+  both unsatisfiable upstreams, so both are reported and neither is waited on
+  — a task that silently never runs would hide the decision. Not a DAG engine:
+  the manager still decides every launch.
   `perpetual = true` (`task add --perpetual`) marks a task that is not meant to
   finish: the substrate is unchanged, but the preamble's `{perpetual}` block
   softens delivery into commit+push per cycle, the digest renders
@@ -121,7 +131,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   transcript instead of raising. The runner **never sets task
   status**, and refuses attached tasks outright — a substrate rail (same class as
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
-  the user's live checkout. `launch_detached` spawns `python -m quorum task run`
+  the user's live checkout. The same class of rail refuses a task whose
+  `depends_on` are unfinished unless `--force` (a premature dependent is pure
+  waste); `dependency_note` puts each dependency's status/pr_url in the
+  composed prompt. `launch_detached` spawns `python -m quorum task run`
   in a new session.
 - `usage.py` — token/cost usage read back out of harness result events
   (claude `result`, codex `turn.completed`/`token_count`): loose extraction,
@@ -185,17 +198,44 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `attention_summary`, a time-windowed read of the `attention` topic that `status`,
   the TUI banner, and the web header all surface — the board has no read-state, so
   "needs a look" is time-bounded, not tracked); `quorum status`, the
-  web app, and the TUI are all pure readers of it. `agent_rows` estimates a stale
+  web app, and the TUI all read it and nothing else. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
-  per-agent actions. Write affordances stay thin bus/config calls shared with the
-  CLI: nudging a task (TUI+web), and in the web only, board posts, project edits,
-  agent create (via `config.create_agent`) and pause/resume/run-now/reload.
+  per-agent actions. Write affordances stay thin bus/store/config calls shared with
+  the CLI — never view-local write logic. The two surfaces overlap only on nudge;
+  neither is a superset of the other. **TUI**: nudge (`n`), manager directive (`m`,
+  the `manager` inbox, same as `quorum manager tell`), run (`s`,
+  `runner.launch_detached`, refused on an attached task or a live runner) and cancel
+  (`c`, a `cancelled` status update, the one destructive binding so it confirms
+  through `ConfirmScreen`) — all four target the *highlighted* row while the task
+  table has focus (`enter` opens a transcript, it does not arm the write keys),
+  falling back to the open task, and all four go through `_write`, so an unwritable
+  home notifies instead of taking the dashboard down. **Web**: nudge, board posts,
+  project edits, and agent create (via `config.create_agent`) /
+  pause / resume / run-now / reload.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
   for journaling and message attribution, and the runner `strip_actor_env`s
   spawned children so they act as themselves. Also owns `journal_path`/
-  `transcript_path` (manager at `state/manager/`, others at `state/agents/<name>/`).
+  `notes_path`/`transcript_path` (manager at `state/manager/`, others at
+  `state/agents/<name>/`).
+- `notes.py` — the notebook: an agent's *standing* memory, deliberately a
+  separate buffer from both the journal (a bounded tail of one run's actions,
+  which a busy tick scrolls) and the board (which anything may post to).
+  Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
+  through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
+  any actor that is not the notebook's own agent or an untagged human — tasks
+  reach the manager with `task report` and the board. That fence reads
+  `QUORUM_ACTOR`, so it is a **convention against accidental crowding, not a
+  security boundary** (the sandbox is); say so in docs rather than overselling
+  it. Reads are owner-checked too (`check_owner`, `--agent` is a path
+  component), and a malformed line is skipped, never raised, so one bad line
+  can't fail every tick. `digest_section` renders it **before** the task
+  section under its own `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else
+  spends that budget, so noisy tasks can't shrink it), keeps the newest over
+  the cap and says how many it dropped — plus how many bytes fell outside
+  `NOTES_SCAN_BYTES`, so a truncated memory is visible. No Python
+  summarization: consolidation is prompt policy.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small
@@ -279,6 +319,16 @@ and `docs/architecture.md` in the same commit so the record stays true.
   init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
   change a file in `default_prompts/`, append the replaced version's sha256 to
   `home.py::SUPERSEDED_PROMPT_HASHES`** (`git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256`).
+  `prompts/<name>.local.md` is the *overlay* (#37): user-owned, never seeded,
+  never touched by `init`, merged by `render` at the template's first unescaped
+  `{local}` slot (packaged `manager.md`, `task-preamble.md` and
+  `task-perpetual.md` carry one) or prepended when there is none;
+  absent/blank/unreadable renders to nothing (the slot's own line goes with it) —
+  `load_local` is fail-soft because `render` is on the manager tick and every task
+  run, while `load` of the template itself stays loud. It exists so adding house
+  policy does not fork the whole template and strand the home on an old default —
+  a rewritten `<name>.md` still wins. `quorum prompt list|diff <name>` shows
+  home-copy-vs-packaged-default and degrades per file (`?`) over an unreadable one.
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
   true. Not a builtin; users copy it into `plugins/`.

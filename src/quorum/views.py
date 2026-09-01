@@ -20,8 +20,10 @@ from .tasks import (
     TERMINAL_STATUSES,
     TaskStore,
     attached_state,
+    dependency_states,
     read_reports,
     runner_alive,
+    short_handle,
     workdir_git_state,
 )
 
@@ -131,7 +133,9 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
 
 def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     """One agent's row plus its recent activity: the auto-recorded action
-    journal (harness-driven agents) and its `logs/actions.jsonl` entries."""
+    journal (harness-driven agents), the standing notes in its notebook, and
+    its `logs/actions.jsonl` entries."""
+    from . import notes
     from .actor import journal_path
 
     config = load_config_or_default(home)
@@ -141,6 +145,12 @@ def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     acfg = config.agents.get(name)
     row["settings"] = dict(acfg.settings) if acfg else {}
     row["journal"] = fsio.read_jsonl_tail(journal_path(home, name), limit=20)
+    # The notebook, straight off its file — what the agent's next run reads,
+    # rendered by the same code the digest uses so every reader agrees.
+    row["notes"] = notes.active(home, name)
+    row["notes_text"] = "\n".join(
+        notes.render_section(row["notes"], unscanned=notes.unscanned_bytes(home, name))
+    )
     row["actions"] = [
         a
         for a in fsio.read_jsonl_tail(home / "logs" / "actions.jsonl", max_bytes=512 * 1024)
@@ -172,7 +182,11 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     budget = config.tasks
     rows = []
     now = fsio.utc_now()
-    for t in TaskStore(home).list():
+    all_tasks = TaskStore(home).list()
+    # One pass over the listing we already have: dependencies are read, never
+    # materialized, so every view stays a pure file reader.
+    deps = dependency_states(all_tasks)
+    for t in all_tasks:
         last = read_reports(home, t.id, limit=1)
         git_state = None
         if t.status not in TERMINAL_STATUSES or (
@@ -207,6 +221,18 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                     t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
                 ),
                 "pr_url": t.pr_url,
+                # Dependencies as the views render them: short ids
+                # throughout, since every consumer here displays rather than
+                # links. `t.depends_on` holds the full ids for anyone who
+                # needs one.
+                "depends_on": [short_handle(d) for d in t.depends_on],
+                # Only `waiting_on` blocks. `dep_failed`/`dep_missing` name
+                # dependencies that can never be satisfied — shown so the
+                # decision is visible, not waited on.
+                "waiting_on": deps.get(t.id, {}).get("waiting_on", []),
+                "dep_failed": deps.get(t.id, {}).get("failed", []),
+                "dep_missing": deps.get(t.id, {}).get("missing", []),
+                "dep_cycle": deps.get(t.id, {}).get("cycle", False),
                 "git": git_state,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,

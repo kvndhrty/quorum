@@ -16,6 +16,7 @@ import typer
 from . import doctor as doctor_mod
 from . import fsio, usage
 from . import home as home_mod
+from . import prompts as prompts_mod
 from .actor import (
     ACTOR_CAP_ENV,
     ACTOR_RUN_ENV,
@@ -35,6 +36,9 @@ project_app = typer.Typer(help="Manage registered projects.", no_args_is_help=Tr
 agent_app = typer.Typer(help="Inspect, run, and control agents.", no_args_is_help=True)
 task_app = typer.Typer(help="Create, run, and guide harness-driven tasks.", no_args_is_help=True)
 manager_app = typer.Typer(help="Talk to (and audit) the manager agent.", no_args_is_help=True)
+prompt_app = typer.Typer(
+    help="Inspect prompt templates and their local overlays.", no_args_is_help=True
+)
 integration_app = typer.Typer(
     help="Install harness adapters (session-adoption hooks and plugins).", no_args_is_help=True
 )
@@ -43,6 +47,7 @@ app.add_typer(project_app, name="project")
 app.add_typer(agent_app, name="agent")
 app.add_typer(task_app, name="task")
 app.add_typer(manager_app, name="manager")
+app.add_typer(prompt_app, name="prompt")
 app.add_typer(integration_app, name="integration")
 
 
@@ -193,13 +198,151 @@ def init(home: Path | None = _HOME_OPT) -> None:
         if outcome == "upgraded":
             typer.secho(f"prompts/{name}: unedited, upgraded to the new packaged default", fg="green")
         elif outcome == "edited":
+            stem = name[:-3] if name.endswith(".md") else name
             typer.secho(
                 f"prompts/{name}: keeping your edits, but the packaged default has changed — "
-                f"delete the file to adopt the new default, or merge by hand",
+                f"`quorum prompt diff {stem}` shows what you are missing",
                 fg="yellow",
+            )
+            typer.echo(
+                f"  to resume upgrades: move your own lines into prompts/{stem}.local.md "
+                f"(merged in at the default's {{local}} slot, never touched by init), "
+                f"then delete prompts/{name} and re-run `quorum init`"
             )
         elif outcome == "seeded" and not fresh:
             typer.echo(f"prompts/{name}: seeded from the packaged default")
+
+
+# -- prompts ---------------------------------------------------------------
+
+
+def _prompt_names(home: Path) -> list[str]:
+    """Every template name that resolves here: packaged defaults plus
+    anything the user wrote into prompts/ (overlays are not templates)."""
+    from importlib import resources
+
+    names = set()
+    try:
+        defaults = resources.files("quorum") / "default_prompts"
+        names |= {e.name[:-3] for e in defaults.iterdir() if e.name.endswith(".md")}
+    except (FileNotFoundError, ModuleNotFoundError, OSError):
+        pass
+    for entry in fsio.sorted_entries(home / "prompts", suffix=".md"):
+        if entry.name.endswith(prompts_mod.LOCAL_SUFFIX):
+            continue
+        names.add(entry.name[:-3])
+    return sorted(names)
+
+
+def _read_prompt_file(target: Path) -> str | None:
+    """A prompt file's text, or None when it cannot be read or decoded.
+
+    One unreadable file must not take the whole listing down with it — see
+    `prompt_list`, which marks it `?` and carries on."""
+    try:
+        return target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+@prompt_app.command("list")
+def prompt_list(home: Path | None = _HOME_OPT) -> None:
+    """Show each prompt template: home copy vs packaged default, and overlay."""
+    target = get_home(home)
+    names = _prompt_names(target)
+    for name in names:
+        default = prompts_mod.packaged(name)
+        home_copy = prompts_mod.path(target, name)
+        text = default
+        if not home_copy.is_file():
+            state = "packaged default (no home copy)"
+        else:
+            text = _read_prompt_file(home_copy)
+            if text is None:
+                state = "? unreadable (not UTF-8, or no permission) — every render of it fails"
+            elif default is None:
+                state = "yours (quorum packages no default)"
+            elif text == default:
+                state = "seeded, matches the packaged default"
+            else:
+                state = f"edited — `quorum prompt diff {name}` vs the packaged default"
+        overlay = prompts_mod.local_path(target, name)
+        if overlay.is_file():
+            if _read_prompt_file(overlay) is None:
+                # render() ignores an overlay it cannot decode; say so here,
+                # because silently dead policy is the failure that hurts.
+                note = "? unreadable — ignored when rendering"
+            elif text is None:
+                note = "merged where the template says, once it is readable"
+            else:
+                note = "{local} slot" if prompts_mod.has_slot(text) else "prepended"
+            state += f" + {overlay.name} ({note})"
+        typer.echo(f"  {name:<16} {state}")
+    # an overlay for a template that does not exist is silently dead policy
+    for entry in fsio.sorted_entries(target / "prompts", suffix=prompts_mod.LOCAL_SUFFIX):
+        stem = entry.name[: -len(prompts_mod.LOCAL_SUFFIX)]
+        if stem not in names:
+            typer.secho(
+                f"  {entry.name}: no prompt named {stem!r} — this overlay is never rendered",
+                fg="yellow",
+            )
+
+
+@prompt_app.command("diff")
+def prompt_diff(
+    name: str = typer.Argument(help="Template name, e.g. manager (no .md)."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Diff this home's copy of a prompt against the packaged default.
+
+    What `quorum init` will not do for an edited prompt: show you what the
+    upgrade would have brought. Move your own lines into prompts/<name>.local.md
+    and delete prompts/<name>.md to start receiving them again.
+    """
+    import difflib
+
+    target = get_home(home)
+    name = name[:-3] if name.endswith(".md") else name
+    default = prompts_mod.packaged(name)
+    if default is None:
+        raise _fail(f"quorum packages no default prompt named {name!r} — `quorum prompt list`")
+    home_copy = prompts_mod.path(target, name)
+    if not home_copy.is_file():
+        typer.echo(f"no prompts/{name}.md — this home uses the packaged default unchanged")
+        return
+    text = _read_prompt_file(home_copy)
+    if text is None:
+        raise _fail(
+            f"prompts/{name}.md cannot be read (not UTF-8, or no permission) — "
+            f"nothing to diff; fix or delete it to fall back to the packaged default"
+        )
+    if text == default:
+        typer.echo(f"prompts/{name}.md is identical to the packaged default")
+        return
+    diff = difflib.unified_diff(
+        default.splitlines(keepends=True),
+        text.splitlines(keepends=True),
+        fromfile=f"packaged default ({name}.md)",
+        tofile=f"prompts/{name}.md",
+    )
+    for line in diff:
+        line = line.rstrip("\n")
+        if line.startswith("+"):
+            typer.secho(line, fg="green")
+        elif line.startswith("-"):
+            typer.secho(line, fg="red")
+        elif line.startswith("@@"):
+            typer.secho(line, fg="cyan")
+        else:
+            typer.echo(line)
+    overlay = prompts_mod.local_path(target, name)
+    typer.echo("")
+    typer.echo(
+        f"prompts/{name}.md is yours, so `quorum init` never upgrades it. To take the "
+        f"packaged default again, keep your own lines in prompts/{name}.local.md "
+        + ("(which already exists) " if overlay.is_file() else "")
+        + f"and delete prompts/{name}.md."
+    )
 
 
 # -- supervisor ------------------------------------------------------------
@@ -340,6 +483,10 @@ def doctor(
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ⏳ waiting on unfinished dependencies (`task add --after`); the
+             runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
+             name dependencies that can never finish — nothing waits on those,
+             they are yours (or the manager's) to decide about
           ⚠ uncommitted/unpushed work in the task's workdir
           $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
           cost/tokens are shown when the harness reported them, summed over runs
@@ -440,6 +587,14 @@ def _echo_task_row(t: dict) -> None:
         if git["unpushed"]:
             risks.append(f"{git['unpushed']} unpushed")
         line += "  ⚠ " + ", ".join(risks)
+    if t.get("waiting_on"):
+        line += f"  waiting-on {','.join(t['waiting_on'])}"
+    if t.get("dep_failed"):
+        line += f"  DEP-FAILED {','.join(t['dep_failed'])}"
+    if t.get("dep_missing"):
+        line += f"  DEP-MISSING {','.join(t['dep_missing'])}"
+    if t.get("dep_cycle"):
+        line += "  DEP-CYCLE"
     if t.get("usage_text"):
         line += f"  {t['usage_text']}"
     if t.get("budget_overages"):
@@ -456,6 +611,7 @@ def task_add(
     prompt: str = typer.Argument(help="What the harness should do."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
+    after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
     perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
     home: Path | None = _HOME_OPT,
 ) -> None:
@@ -464,13 +620,16 @@ def task_add(
 
     Example: quorum task add my-api "fix the flaky auth tests"
 
+    Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
+    queues a task the manager will not launch until a1b2c3 finishes.
+
     With --perpetual the task works in cycles instead of finishing: its
     preamble tells it to deliver every cycle and never report done, the
     manager relaunches it whenever its runner dies, and `quorum task cancel`
     is the only way it ends.
     """
     from .projects import ProjectRegistry
-    from .tasks import TaskStore
+    from .tasks import TaskStore, resolve_dependencies, short_handle
 
     target = get_home(home)
     config = _load_config(target)
@@ -483,16 +642,25 @@ def task_add(
     if name not in config.harness:
         known = ", ".join(sorted(config.harness)) or "none configured"
         raise _fail(f"no [harness.{name}] in config.toml (known: {known})")
+    store = TaskStore(target)
+    try:
+        depends_on = resolve_dependencies(store, after or [])
+    except ValueError as e:
+        raise _fail(str(e)) from None
     _actor_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
-    task = TaskStore(target).add(
+    task = store.add(
         project=project,
         prompt=prompt,
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
+        depends_on=depends_on,
         perpetual=perpetual,
     )
     kind = "perpetual task" if perpetual else "task"
     typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
+    if depends_on:
+        waiting = ", ".join(short_handle(d) for d in depends_on)
+        typer.echo(f"waits on: {waiting} — `task run` refuses until they finish (--force overrides)")
     if perpetual:
         typer.echo(
             f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
@@ -749,7 +917,7 @@ def task_show(
 ) -> None:
     """Show one task: what it is, where it stands, and its recent reports."""
     from .config import load_config_or_default
-    from .tasks import read_reports, runner_alive
+    from .tasks import TaskStore, dependency_state, read_reports, runner_alive, short_handle
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
@@ -774,6 +942,18 @@ def task_show(
         typer.echo(f"  session:  {task.session}")
     if task.pr_url:
         typer.echo(f"  pr:       {task.pr_url}")
+    if task.depends_on:
+        deps = dependency_state(task, {t.id: t for t in TaskStore(target).list()})
+        line = ", ".join(short_handle(d) for d in task.depends_on)
+        if deps["waiting_on"]:
+            line += f"  (waiting on {', '.join(deps['waiting_on'])})"
+        if deps["failed"]:
+            line += f"  DEP-FAILED: {', '.join(deps['failed'])}"
+        if deps["missing"]:
+            line += f"  DEP-MISSING: {', '.join(deps['missing'])}"
+        if deps["cycle"]:
+            line += "  DEP-CYCLE"
+        typer.echo(f"  after:    {line}")
     if task.runs:
         last = task.runs[-1]
         typer.echo(
@@ -801,11 +981,12 @@ def task_show(
 def task_run(
     task_id: str,
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
+    force: bool = typer.Option(False, "--force", help="Run even while the task's dependencies are unfinished."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
     under `quorum up`)."""
-    from .runner import RunnerError, launch_detached, run_task
+    from .runner import RunnerError, launch_detached, run_task, unmet_dependencies
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
@@ -816,14 +997,23 @@ def task_run(
             f"task {task.short_id} is attached to a live interactive session — "
             "guide it with `quorum task nudge`, or `quorum task detach` it first"
         )
+    if not force:
+        from .tasks import TaskStore
+
+        blockers = unmet_dependencies(TaskStore(target), task)
+        if blockers:
+            raise _fail(
+                f"task {task.short_id} is waiting on {', '.join(blockers)} — "
+                "unfinished dependencies; `--force` to run anyway"
+            )
     _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
-        pid = launch_detached(target, task.id)
+        pid = launch_detached(target, task.id, force=force)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
         return
     config = _load_config(target)
     try:
-        code = run_task(target, config, task.id)
+        code = run_task(target, config, task.id, force=force)
     except RunnerError as e:
         raise _fail(str(e)) from None
     color = "green" if code == 0 else "red"
@@ -1293,7 +1483,7 @@ def agent_run_once(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Construct an agent and run a single tick (no supervisor needed)."""
-    from .agent import AgentContext, tick_lock_path, write_heartbeat
+    from .agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from .registry import AgentResolutionError, resolve
 
     target = get_home(home)
@@ -1336,14 +1526,10 @@ def agent_run_once(
     finally:
         fsio.release_pid_lock(lock)
     ended = fsio.utc_now()
-    write_heartbeat(
-        target,
-        name,
-        status="idle",
-        last_start=fsio.iso(started),
-        last_end=fsio.iso(ended),
-        duration_ms=int((ended - started).total_seconds() * 1000),
-    )
+    # The same success heartbeat a scheduled tick writes, failure fields and
+    # escalation stamp cleared: a hand-run tick that demonstrably worked must
+    # end the streak, not leave the agent reading as broken.
+    write_heartbeat(target, name, **success_heartbeat_fields(started, ended))
     typer.secho(f"{name}: tick complete", fg="green")
 
 
@@ -1499,6 +1685,99 @@ def manager_note(text: str, home: Path | None = _HOME_OPT) -> None:
     target = get_home(home)
     _actor_guard(target, "note", args=text, always_journal=True)
     typer.echo("noted")
+
+
+_AGENT_OPT = typer.Option(
+    "manager", "--agent",
+    help="Whose notebook (default: the manager's). An agent may only write its own.",
+)
+
+
+@manager_app.command("remember")
+def manager_remember(
+    text: str,
+    ttl: int = typer.Option(0, "--ttl", help="Days until the note expires (0: never)."),
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Write a standing note every future run of that agent will read.
+
+    The notebook (`state/manager/notes.jsonl`) is not the journal: `note`
+    records why *this* run did what it did, `remember` records a fact the
+    next run needs. Tasks and other agents are refused — they reach the
+    manager with `task report` and `board post`.
+    """
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    actor = current_actor()
+    if not notes_mod.may_write(actor, agent):
+        # journal the refusal too: an agent reaching for someone else's
+        # notebook is exactly the kind of thing the next digest should show
+        _actor_guard(target, "remember.refused", target=agent, args=text, always_journal=True)
+        raise _fail(
+            f"action refused: {actor} may not write to {agent}'s notebook — "
+            "report to it with `quorum task report`, or reach it on the board "
+            "with `quorum board post attention`"
+        )
+    _actor_guard(target, "remember", args=text, always_journal=True)
+    try:
+        entry = notes_mod.remember(
+            target, text, owner=agent, sender=actor,
+            run_id=os.environ.get(ACTOR_RUN_ENV, ""), ttl_days=ttl or None,
+        )
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.secho(
+        f"remembered ({notes_mod.short_id(entry['id'])}) — every future {agent} run reads it"
+        + (f", for {ttl}d" if ttl else ""),
+        fg="green",
+    )
+
+
+@manager_app.command("forget")
+def manager_forget(
+    note_id: str,
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Retire a standing note that stopped being true (append-only: the file
+    keeps it, readers hide it)."""
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    actor = current_actor()
+    if not notes_mod.may_write(actor, agent):
+        _actor_guard(target, "forget.refused", target=agent, args=note_id, always_journal=True)
+        raise _fail(f"action refused: {actor} may not write to {agent}'s notebook")
+    _actor_guard(target, "forget", target=note_id, always_journal=True)
+    try:
+        note = notes_mod.forget(
+            target, note_id, owner=agent, sender=actor,
+            run_id=os.environ.get(ACTOR_RUN_ENV, ""),
+        )
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.echo(f"forgot ({notes_mod.short_id(note['id'])}) {note.get('text', '')[:60]}")
+
+
+@manager_app.command("notes")
+def manager_notes(
+    agent: str = _AGENT_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Print the notebook exactly as the digest renders it for that agent."""
+    from . import notes as notes_mod
+
+    # reading is validated like writing: `--agent` is a path component under
+    # state/agents/, so `../../whatever` must not read outside QUORUM_HOME
+    try:
+        notes_mod.check_owner(agent)
+        section = notes_mod.digest_section(get_home(home), owner=agent)
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    for line in section:
+        typer.echo(line)
 
 
 @manager_app.command("journal")

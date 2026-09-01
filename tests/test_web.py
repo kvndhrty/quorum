@@ -78,7 +78,16 @@ def test_agent_create_detail_and_control(client: TestClient, home: Path):
     detail = client.get("/api/agents/standup").json()
     assert detail["schedule"] == "every 30m"
     assert detail["journal"] == [] and detail["actions"] == []
+    assert detail["notes"] == []  # an empty notebook is still an answer
     assert client.get("/api/agents/ghost").status_code == 404
+
+    # the notebook rides along with the detail, read straight off its file
+    from quorum import notes
+
+    notes.remember(home, "the standup skips weekends", owner="standup")
+    detail = client.get("/api/agents/standup").json()
+    assert [n["text"] for n in detail["notes"]] == ["the standup skips weekends"]
+    assert "skips weekends" in detail["notes_text"]
 
     # duplicate creation is refused, loudly
     r = client.post("/api/agents", json={"name": "standup", "prompt_text": "again"})
@@ -109,3 +118,19 @@ def test_patch_deadline_empty_clears_it(client: TestClient, home: Path, tmp_path
     assert r.json()["deadline"] is None
     r = client.patch("/api/projects/clearable", json={"notes": "kept"})
     assert r.json()["deadline"] is None and r.json()["notes"] == "kept"
+
+
+def test_task_rows_expose_dependencies(client: TestClient, home: Path):
+    """The browser gets `waiting_on` from the same read model the CLI and the
+    TUI use — nothing dependency-shaped is materialized to disk (#31)."""
+    store = TaskStore(home)
+    upstream = store.add("web-proj", "build it", "fake")
+    dependent = store.add("web-proj", "review it", "fake", depends_on=[upstream.id])
+
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[dependent.id]["waiting_on"] == [upstream.short_id]
+    assert rows[dependent.id]["dep_failed"] == []
+
+    tasks.report(home, upstream.id, status="done", text="shipped")
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[dependent.id]["waiting_on"] == []

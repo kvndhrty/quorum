@@ -3,9 +3,13 @@
 `quorum up` runs this in the foreground (background it with nohup/tmux — no
 daemonization, no cron, no systemd, no elevated permissions). Each enabled
 agent becomes one scheduler job; a wrapper isolates crashes, writes heartbeat
-files for the dashboards, and pauses an agent that fails repeatedly. An
-internal janitor handles message archival and stale-claim recovery even when
-every agent is disabled.
+files for the dashboards, and pauses an agent that fails repeatedly — or,
+when that agent is exempt from pausing (`auto_pause = false`), escalates its
+streak once to the `attention` board so it still reaches a human. That
+escalation is the only failure path that posts to `attention`; everything
+else the supervisor says (load errors, tick errors, auto-pause, recovery)
+goes to `system`. An internal janitor handles message archival and
+stale-claim recovery even when every agent is disabled.
 
 BackgroundScheduler (threads) rather than AsyncIO: agent work is file scans
 and subprocess calls — blocking and thread-friendly — and synchronous tick()
@@ -25,7 +29,13 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import fsio, installed_version
-from .agent import Agent, AgentContext, tick_lock_path, write_heartbeat
+from .agent import (
+    Agent,
+    AgentContext,
+    success_heartbeat_fields,
+    tick_lock_path,
+    write_heartbeat,
+)
 from .config import Config, parse_schedule
 from .messages import MessageBus
 from .registry import resolve
@@ -141,11 +151,7 @@ class Supervisor:
         kwargs = parse_schedule(self.config.agents[name].schedule)
         # Durable pause: a paused heartbeat survives supervisor restarts, so
         # the job is created paused rather than silently resuming.
-        try:
-            hb = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
-        except (OSError, ValueError):
-            hb = {}
-        if hb.get("status") == "paused":
+        if self._read_heartbeat(name).get("status") == "paused":
             kwargs["next_run_time"] = None
         self.scheduler.add_job(
             lambda: self.run_agent_tick(name),
@@ -197,24 +203,20 @@ class Supervisor:
                 payload={"agent": name},
             )
             acfg = self.config.agents.get(name)
-            if self._failures[name] >= MAX_CONSECUTIVE_FAILURES and (
-                acfg is None or acfg.auto_pause
-            ):
-                self._pause_agent(name)
+            if self._failures[name] >= MAX_CONSECUTIVE_FAILURES:
+                if acfg is None or acfg.auto_pause:
+                    self._pause_agent(name)
+                else:
+                    self._escalate_failing(name, self._failures[name])
             return
         self._failures[name] = 0
         ended = fsio.utc_now()
-        # Heartbeat writes are merges: recovery must clear the failure fields
-        # explicitly, or a long-fixed agent reads as broken in every dashboard.
-        self._finish_heartbeat(
-            name,
-            status="idle",
-            last_start=fsio.iso(started),
-            last_end=fsio.iso(ended),
-            duration_ms=int((ended - started).total_seconds() * 1000),
-            error=None,
-            consecutive_failures=0,
-        )
+        # Read before the write below clears it: the escalation stamp is how a
+        # closed streak is told from one that never reached the banner.
+        escalated_at = self._read_heartbeat(name).get("escalated_at")
+        self._finish_heartbeat(name, **success_heartbeat_fields(started, ended))
+        if escalated_at:
+            self._announce_recovery(name, escalated_at)
 
     def _finish_heartbeat(self, name: str, **fields) -> None:
         """End-of-tick heartbeat write that respects an external pause.
@@ -225,13 +227,58 @@ class Supervisor:
         paused agent as healthy forever (the paused job never runs again to
         correct it). Timing fields still land either way.
         """
-        try:
-            current = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
-        except (OSError, ValueError):
-            current = {}
-        if current.get("status") == "paused":
+        if self._read_heartbeat(name).get("status") == "paused":
             fields.pop("status", None)
         self._write_heartbeat(name, **fields)
+
+    def _escalate_failing(self, name: str, failures: int) -> None:
+        """Put a sustained failure streak of a never-paused agent in front of a human.
+
+        Every failed tick already posts `agent.error`, and a fifth failure
+        auto-pauses the agent with an `agent.paused` post — but both of those
+        go to `system`, which no banner reads. A normally-pausing agent at
+        least *stops*, which is itself the loud signal; an agent with
+        `auto_pause = false` (the manager) is exempt from the pause, so it
+        would fail all night with nothing but system chatter to show for it.
+        This is therefore the single failure path that reaches `attention` —
+        the banner `quorum status`, the TUI and the web header read
+        (`views.attention_summary`). It posts once per *streak*, not per
+        tick: the `escalated_at` heartbeat stamp is the dedupe, and every
+        success path — a scheduled tick, `quorum agent run-once`, `quorum
+        agent resume` — clears it alongside the other failure fields.
+
+        The post comes before the stamp: a stamp written first would survive
+        a bus failure and suppress the escalation for the rest of the streak,
+        whereas this order can at worst repeat the post on the next tick.
+        """
+        hb = self._read_heartbeat(name)
+        if hb.get("escalated_at"):
+            return
+        error = hb.get("error") or "see the agent transcript"
+        self.bus.post(
+            "supervisor",
+            "attention",
+            "agent.failing",
+            text=f"agent {name} has failed {failures} consecutive ticks and is not "
+            f"auto-paused (auto_pause = false), so it keeps retrying — last error: {error}",
+            payload={"agent": name, "consecutive_failures": failures},
+        )
+        self._write_heartbeat(name, escalated_at=fsio.iso(fsio.utc_now()))
+        log.error("agent %s escalated to attention after %d consecutive failures", name, failures)
+
+    def _announce_recovery(self, name: str, escalated_at: str) -> None:
+        """Close the story an `agent.failing` post opened — on `system`, not
+        `attention`: an outage that healed itself needs no human, and the
+        banner has no read-state, so an `attention` post would keep the ⚠ lit
+        for the whole window with nothing left to do about it."""
+        self.bus.post(
+            "supervisor",
+            "system",
+            "agent.recovered",
+            text=f"agent {name} is ticking again (failing since {escalated_at})",
+            payload={"agent": name, "escalated_at": escalated_at},
+        )
+        log.info("agent %s recovered after an escalated failure streak", name)
 
     def _pause_agent(self, name: str) -> None:
         try:
@@ -249,6 +296,19 @@ class Supervisor:
             "(fix the cause and `quorum agent resume` it)",
             payload={"agent": name},
         )
+
+    def _read_heartbeat(self, name: str) -> dict:
+        """An agent's heartbeat, or {} when it has none (or an unreadable one).
+
+        "Unreadable" includes well-formed JSON that isn't an object: a
+        hand-edited heartbeat must never raise into APScheduler and take the
+        tick down with it.
+        """
+        try:
+            data = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _write_heartbeat(self, name: str, **fields) -> None:
         try:
@@ -269,6 +329,8 @@ class Supervisor:
         try:
             current = fsio.read_json(path)
         except (OSError, ValueError):
+            return
+        if not isinstance(current, dict):
             return
         if not current.pop("load_error", False):
             return
@@ -306,9 +368,14 @@ class Supervisor:
             self._write_heartbeat(name, status="paused", error="paused by user")
             log.info("agent %s paused by user", name)
         elif command == "agent.resume":
+            # A human resume is the end of the streak by definition — clear the
+            # escalation stamp too, or the *next* outage would find one already
+            # set and never reach the attention banner.
             self._failures[name] = 0
             job.resume()
-            self._write_heartbeat(name, status="idle", error=None)
+            self._write_heartbeat(
+                name, status="idle", error=None, consecutive_failures=0, escalated_at=None
+            )
             log.info("agent %s resumed by user", name)
         elif command == "agent.run-now":
             job.modify(next_run_time=fsio.utc_now())
