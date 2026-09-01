@@ -80,6 +80,7 @@ quorum task nudge a3f2k9 "prefer the retry approach over sleeps"
 quorum manager tell "the api task is urgent; park everything else"
 quorum manager journal       # what the manager did, and why
 quorum tui                   # dashboard; select a task, press n to steer
+                             # (m tells the manager, s runs, c cancels)
 quorum web                   # http://127.0.0.1:8787
 ```
 
@@ -178,8 +179,10 @@ and the per-harness adapters under
   relaunches whatever died. No degraded fallback mode to babysit.
 - **All state is files** under `QUORUM_HOME` (default `~/.quorum`): task
   records, transcripts, a message board, inboxes — written with atomic
-  tmp+rename. The TUI and web dashboard are pure readers and work even when
-  the supervisor is down. Copy the directory and your whole setup moves.
+  tmp+rename. The TUI and web dashboard read those files and work even when
+  the supervisor is down; what they write (a nudge, a directive, a run, a
+  cancel) is the same call the CLI makes. Copy the directory and your whole
+  setup moves.
 
 ## Supervision policy is a prompt
 

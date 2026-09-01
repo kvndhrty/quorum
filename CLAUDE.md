@@ -57,10 +57,11 @@ below govern nearly every change:
 
 These are the project's *current* design commitments, not gospel. Quorum is
 evolving: any recorded stance — including the big three above and smaller ones
-noted per-layer below (e.g. the TUI/web being pure readers) — is open to
-deliberate revision when a change is worth it. Don't contort a feature to fit
-an old rule; propose breaking the rule, and when it changes, update this file
-and `docs/architecture.md` in the same commit so the record stays true.
+noted per-layer below (e.g. the TUI/web reading files and writing only through
+thin shared bus calls) — is open to deliberate revision when a change is worth
+it. Don't contort a feature to fit an old rule; propose breaking the rule, and
+when it changes, update this file and `docs/architecture.md` in the same commit
+so the record stays true.
 
 ### Layers
 
@@ -185,11 +186,20 @@ and `docs/architecture.md` in the same commit so the record stays true.
   `attention_summary`, a time-windowed read of the `attention` topic that `status`,
   the TUI banner, and the web header all surface — the board has no read-state, so
   "needs a look" is time-bounded, not tracked); `quorum status`, the
-  web app, and the TUI are all pure readers of it. `agent_rows` estimates a stale
+  web app, and the TUI all read it and nothing else. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
-  per-agent actions. Write affordances stay thin bus/config calls shared with the
-  CLI: nudging a task (TUI+web), and in the web only, board posts, project edits,
-  agent create (via `config.create_agent`) and pause/resume/run-now/reload.
+  per-agent actions. Write affordances stay thin bus/store/config calls shared with
+  the CLI — never view-local write logic. The two surfaces overlap only on nudge;
+  neither is a superset of the other. **TUI**: nudge (`n`), manager directive (`m`,
+  the `manager` inbox, same as `quorum manager tell`), run (`s`,
+  `runner.launch_detached`, refused on an attached task or a live runner) and cancel
+  (`c`, a `cancelled` status update, the one destructive binding so it confirms
+  through `ConfirmScreen`) — all four target the *highlighted* row while the task
+  table has focus (`enter` opens a transcript, it does not arm the write keys),
+  falling back to the open task, and all four go through `_write`, so an unwritable
+  home notifies instead of taking the dashboard down. **Web**: nudge, board posts,
+  project edits, and agent create (via `config.create_agent`) /
+  pause / resume / run-now / reload.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`

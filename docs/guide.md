@@ -484,7 +484,9 @@ The **next run starts with the guidance in its prompt** (a "Guidance
 received" section), and a cooperative harness that checks
 `quorum task inbox --claim` mid-run sees it sooner. The TUI makes this
 fluid: select a task, press `n`, type, enter. The web dashboard has the same
-nudge box on each task.
+nudge box on each task. The manager takes direction the same way, through
+its own inbox — `quorum manager tell "prioritise the release tasks"`, or `m`
+in the TUI.
 
 ## Adopting a live session
 
@@ -553,8 +555,11 @@ integration (`enabled = false`).
 
 ## Dashboards
 
-All views are pure readers of the home directory — they work whether or not
-the supervisor is running, including over SSH, and never hold locks.
+All views read the home directory and nothing else — they work whether or
+not the supervisor is running, including over SSH, and never hold locks.
+What they *write* is a short list of steering affordances (nudge a task,
+tell the manager, run, cancel, and in the browser a few more), each one the
+same call the CLI makes.
 
 Escalations are surfaced everywhere: recent posts on the `attention` topic
 (the manager's ask-a-human channel) show up as a warning line in `status`,
@@ -568,21 +573,44 @@ for you is never silent.
   `agent list`).
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
   top; arrow around freely, press enter on a task to open its transcript
-  and reports in the bottom pane (`esc` returns to the board feed, `n`
-  nudges, `q` quits — the header above the pane always says which view
-  you're in). The agents table shows each agent's status, schedule, what its
-  own harness runs have cost (when the harness reports it), and its last and
-  next run (`~` marks an estimate computed from the schedule when the
-  supervisor isn't around to say for sure).
+  and reports in the bottom pane (the header above the pane always says
+  which view you're in). The agents table shows each agent's status,
+  schedule, what its own harness runs have cost (when the harness reports
+  it), and its last and next run (`~` marks an estimate computed from the
+  schedule when the supervisor isn't around to say for sure). The keys:
+
+  | key | does |
+  | --- | --- |
+  | `enter` | open the highlighted task's transcript and reports |
+  | `esc` | back to the board feed (or cancel what you're typing) |
+  | `n` | nudge the highlighted task — guidance into its inbox |
+  | `m` | tell the manager — a directive for its next run, no task needed |
+  | `s` | start a detached run of the highlighted task |
+  | `c` | cancel the highlighted task (asks first) |
+  | `r` | refresh now |
+  | `q` | quit |
+
+  `n`, `s` and `c` act on the row you're pointing at, so you never have to
+  open a task to act on it; while you're reading one task's transcript they
+  act on that task. If the home directory has gone unwritable, they say so
+  and carry on rather than taking the dashboard down with them.
+
+  `s` refuses a task that is already running or attached to a live session;
+  `c` only marks the task cancelled — to also stop a live runner, use
+  `quorum task cancel <id> --kill`. `m` is the widest of the four: the
+  manager can do anything you can ask it to, including creating tasks
+  ("open a task on quorum to fix the flaky nono test"), which is why the
+  dashboard has no task form.
 
   ![quorum terminal dashboard](images/tui.png)
 
-- `quorum web` — the same files, more affordances, at
+- `quorum web` — the same files, a different set of affordances, at
   `http://127.0.0.1:8787` (`[web]` extra). Localhost only, no exposed
-  ports. Beyond what the TUI shows, you can pause/resume/run-now an agent,
-  create a prompt agent with the "new agent…" form, post to the board, and
-  click a project's deadline to edit or clear it — all without leaving the
-  browser.
+  ports. It nudges tasks like the TUI does, and where the TUI stops it goes
+  on: pause/resume/run-now an agent, create a prompt agent with the "new
+  agent…" form, post to the board, and click a project's deadline to edit or
+  clear it — all without leaving the browser. It has no run, cancel or
+  manager directive; those live in the TUI and the CLI.
 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">

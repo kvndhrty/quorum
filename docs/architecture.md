@@ -16,7 +16,8 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    copying the directory migrates the whole system; sandbox profiles reduce
    to "rw on this tree (and per-task worktrees), ro elsewhere".
 3. **Fail loudly, recover automatically.** Dashboards and views degrade
-   gracefully (pure file readers; they work with the supervisor stopped),
+   gracefully (their reads are pure file reads; they work with the
+   supervisor stopped),
    and a harness that ignores the report protocol is still observed
    passively. Supervision itself, however, is deliberately *not*
    degradable: the manager **is** a harness run, and without a working
@@ -45,7 +46,8 @@ manager ──(its harness runs `quorum task run --detach`)──► detached ru
                                ├─ git worktree in worktrees/<id>/
                                └─ harness subprocess (stdout → transcript.jsonl)
 
-quorum web / quorum tui / quorum status ──► pure readers of QUORUM_HOME
+quorum web / quorum tui / quorum status ──► read QUORUM_HOME's files
+                                     (writes: thin shared bus/store calls)
 ```
 
 Two process shapes on purpose. Agent ticks are short, synchronous, and
@@ -729,6 +731,43 @@ v1 delivers directly (writer → recipient's `new/`), because everything
 shares one permission domain. If agents are ever sandboxed *from each
 other*, the seam is `MessageBus.post()/send()`: swap in an
 outbox-spool-plus-router implementation with no agent code changes.
+
+## Views and their write affordances
+
+`views.py` assembles the read model out of files alone — no locks, no
+network, no supervisor required — and `quorum status`, the TUI and the web
+app are all readers of that one model, which is why they never disagree.
+
+The reads are pure; the writes are deliberately not absent. Both dashboards
+carry a small set of *write affordances*, and the rule is that each is a
+thin call into the same code path the CLI uses — a `MessageBus` send, a
+`TaskStore.update`, `runner.launch_detached`, `config.create_agent` — never
+write logic that lives in a view:
+
+- **TUI** (`tui/app.py`): nudge a task (`n`), send the manager a directive
+  (`m` — the `manager` inbox, exactly `quorum manager tell`, and the reason
+  the TUI needs no task-add form: the manager runs `task add` itself,
+  journaled and capped), start a detached run (`s`), cancel a task (`c`).
+  `s` refuses an attached task and a task whose runner is alive, mirroring
+  the runner's own substrate rails; `c` is the one destructive binding, so
+  it goes through a yes/no `ConfirmScreen` and, like `quorum task cancel`
+  without `--kill`, marks the status without signalling a live runner.
+  All four resolve their target the same way (`_target_task`): the
+  *highlighted* row while the task table has focus, falling back to the open
+  task when the reader is down in its detail. `enter` opens a transcript for
+  reading and nothing more — a selection made once must not silently become
+  the target of every later keystroke. And all four run through `_write`,
+  which turns an `OSError` into an error notification: an unwritable
+  QUORUM_HOME is exactly when a reader needs the dashboard most, so no
+  keystroke may take it down.
+- **Web** (`web/app.py`): the same task nudge, plus board posts, project
+  deadline/notes edits, agent create and pause/resume/run-now/reload.
+
+Neither view holds a lock, spawns an agent tick, or writes state of its own
+invention; a dashboard that vanishes mid-keystroke leaves nothing behind but
+the message it already queued. This revises the earlier "the views are pure
+readers whose one write affordance is nudging a task" stance (issue #11) —
+the invariant that survived it is *thin, shared, no view-local write logic*.
 
 ## Projects
 
