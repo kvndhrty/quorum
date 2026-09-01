@@ -1,6 +1,9 @@
 <!-- Prepended to every task run's prompt. Placeholders: {{task_id}} the task's
-     short id; {{project_path}} the directory the harness runs in. Edit freely —
-     this file is yours; delete it to restore the packaged default. -->
+     short id; {{project_path}} the directory the harness runs in;
+     {{perpetual}} the extra instructions for a task queued with
+     `task add --perpetual` (empty for an ordinary task — see
+     prompts/task-perpetual.md). Edit freely — this file is yours; delete it
+     to restore the packaged default. -->
 You are an autonomous coding agent working on a quorum-managed task.
 
 Task ID: {task_id}
@@ -34,4 +37,5 @@ assume gh, glab, or any other forge CLI is installed):
 - When the work is complete (committed, pushed, PR opened if possible):
     quorum task report {task_id} --status done "<summary incl. branch name>"
 
+{perpetual}
 Work autonomously; do not wait for interactive input.

@@ -13,7 +13,7 @@ import os
 import subprocess
 import threading
 
-from .. import fsio
+from .. import fsio, usage
 from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, actor_env, transcript_path
 from ..agent import AgentContext
 from ..runner import build_harness_argv, guidance_pump, resolve_harness, stream_transcript
@@ -39,6 +39,10 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
     An inject-capable harness can be steered while the run is in flight:
     messages landing in the agent's own inbox are forwarded as user turns by
     the same `GuidancePump` the task runner uses.
+
+    Whatever the harness said the run cost is captured off the same parsed
+    events (`usage.py`, fail-soft) and appended to the agent's usage ledger
+    — the agent-side counterpart of a task run's `usage` field.
     """
     harness = resolve_agent_harness(ctx)
     run_id = fsio.ulid()
@@ -63,28 +67,37 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
         bufsize=1,
         env=env,
     )
-    with guidance_pump(ctx.home, ctx.name, harness, proc, prompt) as pump:
-        reader = threading.Thread(
-            target=stream_transcript,
-            args=(proc, transcript),
-            kwargs={
-                "extra": {"run": run_id},
-                "now": ctx.now,
-                "on_event": pump.on_event if pump is not None else None,
-            },
-            daemon=True,
-        )
-        reader.start()
-        try:
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            reader.join(2)
-            raise RuntimeError(
-                f"{ctx.name} harness run {run_id} timed out after {int(timeout)}s and was killed"
-            ) from None
-    reader.join(5)
+    spend = usage.UsageCollector()
+    try:
+        with guidance_pump(ctx.home, ctx.name, harness, proc, prompt) as pump:
+
+            def on_event(event: object) -> None:
+                spend.add(event)
+                if pump is not None:
+                    pump.on_event(event)
+
+            reader = threading.Thread(
+                target=stream_transcript,
+                args=(proc, transcript),
+                kwargs={"extra": {"run": run_id}, "now": ctx.now, "on_event": on_event},
+                daemon=True,
+            )
+            reader.start()
+            try:
+                code = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                reader.join(2)
+                raise RuntimeError(
+                    f"{ctx.name} harness run {run_id} timed out after {int(timeout)}s "
+                    "and was killed"
+                ) from None
+        reader.join(5)
+    finally:
+        # A run that timed out or crashed still spent what it spent, and a
+        # run count only means something if every run is in the ledger.
+        usage.record_agent_run(ctx.home, ctx.name, run_id, spend.result(), ctx.now())
     if code != 0:
         raise RuntimeError(f"{ctx.name} harness run {run_id} exited {code}")
     return run_id

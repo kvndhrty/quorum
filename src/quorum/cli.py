@@ -97,17 +97,6 @@ def _load_config(home: Path):
         raise _fail(str(e)) from None
 
 
-def _try_config(home: Path):
-    """Config for a read-only view: an absent or broken config.toml degrades
-    to defaults instead of failing the display (views never demand config)."""
-    from .config import Config, ConfigError, load_config
-
-    try:
-        return load_config(home)
-    except ConfigError:
-        return Config()
-
-
 def _actor_guard(
     home: Path,
     action: str,
@@ -378,10 +367,12 @@ def doctor(home: Path | None = _HOME_OPT) -> None:
 
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
+          ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
           ⚠ uncommitted/unpushed work in the task's workdir
           $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
           cost/tokens are shown when the harness reported them, summed over runs
-  agents: ● idle   ◐ running   ✗ error   ‖ paused   ○ never ran"""
+  agents: ● idle   ◐ running   ✗ error   ‖ paused   ○ never ran
+          an agent's own harness spend is shown when its harness reports it"""
 
 
 @app.command()
@@ -423,6 +414,10 @@ def status(
             line = f"  {marker} {r['name']:<12} {r['status']:<10} schedule: {r['schedule']}"
             if r["last_end"]:
                 line += f"  last: {r['last_end']}"
+            # Only when the agent's harness reported a spend — an agent that
+            # reports nothing (or isn't harness-driven) shows no figure.
+            if r.get("usage_text"):
+                line += f"  {r['usage_text']}"
             if r["error"]:
                 line += f"  [{r['error']}]"
             typer.echo(line)
@@ -454,7 +449,8 @@ def _echo_task_row(t: dict) -> None:
         marker = "⚭"
     else:
         marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
-    line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {t['status']:<12} {t['harness']}"
+    status = t["status"] + (" ∞" if t.get("perpetual") else "")
+    line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {status:<12} {t['harness']}"
     if t["last_report"]:
         line += f"  {t['last_report'][:60]}"
     if t["pr_url"]:
@@ -483,12 +479,18 @@ def task_add(
     prompt: str = typer.Argument(help="What the harness should do."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
+    perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
     yourself with `quorum task run`.
 
     Example: quorum task add my-api "fix the flaky auth tests"
+
+    With --perpetual the task works in cycles instead of finishing: its
+    preamble tells it to deliver every cycle and never report done, the
+    manager relaunches it whenever its runner dies, and `quorum task cancel`
+    is the only way it ends.
     """
     from .projects import ProjectRegistry
     from .tasks import TaskStore
@@ -510,8 +512,14 @@ def task_add(
         prompt=prompt,
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
+        perpetual=perpetual,
     )
-    typer.secho(f"queued task {task.short_id} on {project} (harness: {name})", fg="green")
+    kind = "perpetual task" if perpetual else "task"
+    typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
+    if perpetual:
+        typer.echo(
+            f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
+        )
     typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
 
 
@@ -763,6 +771,7 @@ def task_show(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Show one task: what it is, where it stands, and its recent reports."""
+    from .config import load_config_or_default
     from .tasks import read_reports, runner_alive
 
     target = get_home(home)
@@ -776,6 +785,8 @@ def task_show(
         state += " (attached to a live session)"
     elif running:
         state += " (runner alive)"
+    if task.perpetual:
+        state += " [perpetual — only you end it]"
     typer.echo(f"task {task.short_id}  ({task.id})")
     typer.echo(f"  project:  {task.project}")
     typer.echo(f"  status:   {state}")
@@ -795,7 +806,7 @@ def task_show(
         spent = usage.describe(usage.total(r.usage for r in task.runs))
         if spent:
             typer.echo(f"  usage:    {spent} (as reported by the harness)")
-        config = _try_config(target)
+        config = load_config_or_default(target)
         for note in usage.run_overages(
             task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
         ):

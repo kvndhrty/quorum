@@ -72,7 +72,8 @@ supervisor.lock                   pid + start time; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
-                                   note, reported token/cost usage)
+                                   note, reported token/cost usage) + the
+                                  attached / perpetual flags
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -85,10 +86,13 @@ messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
-                                  (+ journal.jsonl and transcript.jsonl for
-                                  harness-driven agents other than the manager)
+                                  (+ journal.jsonl, transcript.jsonl and
+                                  usage.jsonl for harness-driven agents other
+                                  than the manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
 state/manager/transcript.jsonl    the manager harness's own stdout
+state/manager/usage.jsonl         one line per manager harness run: what it
+                                  spent ({at, run, usage|null})
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
@@ -200,6 +204,25 @@ transcript. So capture is one more look at each parsed event
   agree) and `budget_overages`; `quorum status` / `task list` append
   `$0.42 · 11.0k tok` to the row, `task show` breaks it out, and the
   manager digest gets a `usage:` line per task.
+- **Agent runs are ledgered, not embedded.** The manager's tick and every
+  prompt agent run through `agents/harness_run.py`, which captures usage off
+  the same parsed events — but an agent has no `task.json` to hang it on, so
+  each run appends one line to `state/manager/usage.jsonl` (or
+  `state/agents/<name>/usage.jsonl`, the same split as `journal_path`):
+  `{"at": ..., "run": <run id>, "usage": {...}|null}`. Every run is
+  recorded, including the ones that reported nothing and the ones that
+  timed out or exited nonzero — a spent-and-then-died run still spent, and a
+  run count only means something if it counts every run. Writing it can
+  never fail a tick (`usage.record_agent_run` swallows `OSError`). The file
+  is append-only and unbounded, so readers take a bounded tail
+  (`usage.agent_usage`, `AGENT_USAGE_TAIL` = 200 runs; a total over a full
+  tail is labelled "recent runs", never presented as all-time) and report the window
+  alongside the figure: `views.agent_rows` carries `usage` (`last` / `total`
+  / `runs` / `window`) and a rendered `usage_text`, which `quorum status`,
+  the TUI's agent table and the web agent row show when it is known. The
+  manager digest opens with the same figure for the manager itself — the one
+  recurring cost nothing else in the digest accounts for, and in a live home
+  usually the largest.
 - **The budget is an observation, not (yet) a rail.** `[tasks]
   max_cost_per_run` / `max_tokens_per_run` (validated non-negative, 0 =
   off) turn an over-budget run into a `BUDGET-EXCEEDED` digest line and a
@@ -249,6 +272,55 @@ still gets passive monitoring (transcript mtimes, lock liveness, exit
 codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
+
+### Perpetual tasks
+
+(User-facing how-to: [guide.md](guide.md#perpetual-tasks).)
+
+`quorum task add --perpetual` sets `perpetual = true` on the task record.
+Nothing about the substrate changes: the runner still does one run, status
+is still a free-form reported word, `TERMINAL_STATUSES` still means what it
+means, and the manager still relaunches any task whose runner died with a
+non-terminal status — which is *already* an endless loop for a task that
+never reports one. The flag exists because three readings of that same
+substrate were wrong for a task that is not trying to finish:
+
+- **the run preamble.** `compose_prompt` substitutes the preamble's
+  `{perpetual}` placeholder with `prompts/task-perpetual.md` (empty for an
+  ordinary task): work in cycles, commit and push *every* cycle rather than
+  "before finishing", report a changing status word per cycle (`cycle-7`,
+  `idle`) so an unchanging one still means something, and never report
+  `done` or `cancelled`. Both files are ordinary user-editable prompts.
+- **the digest.** The task line carries `perpetual=true` (only when true, so
+  ordinary lines are untouched), and the `possible-loop` observation is
+  **suppressed** for it. That flag reads repetition in a live run as a
+  symptom; for a task whose job is a repeating cycle it would fire every
+  tick, and a flag that is always on teaches the manager to ignore a signal
+  that still means something everywhere else.
+- **the manager prompt.** `prompts/manager.md` is told to relaunch it
+  forever, to never read a long `runs=` count or a cycling status as stuck,
+  to never cancel it (only the user ends it, with `task cancel`), and to
+  judge it instead on its per-cycle reports and git state — escalating to a
+  human when the same report repeats verbatim, when it reports `blocked`,
+  or when spend climbs with nothing to show.
+
+Views badge it (`∞` in `quorum status`, `task list` and the TUI; a titled
+`∞` in the web row) so "still running after 40 runs" reads as working.
+
+Two consequences worth knowing before queuing one:
+
+- **One worktree and one resumed session, indefinitely.** Runs reuse the
+  task's worktree (fine — that is where its work accumulates) and its
+  captured session id, so a `resume` template hands the harness an
+  ever-growing context. Expect a session reset eventually: clearing
+  `session` in `tasks/<id>/task.json` (plain files, no schema migration)
+  makes the next run start fresh, and the worktree keeps the work.
+- **The manager's tick cadence is the floor on cycle latency.** Nothing
+  relaunches a perpetual task between ticks, so with the default
+  `every 5m` manager schedule a cycle that ends is idle for up to five
+  minutes before the next one starts. Tighten the schedule if the loop
+  needs to be tighter; there is deliberately no self-relaunch path in the
+  runner (that would be a second scheduler).
 
 ### Attached tasks: adopting a live session
 
@@ -316,7 +388,8 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 2. **Digest** (`agents/manager.py::build_digest`, a pure function over
    files): every active task's status, runner liveness, quiet time, recent
    reports and transcript tail, plus a `git:` line when its working
-   directory holds uncommitted changes or unpushed commits; attached
+   directory holds uncommitted changes or unpushed commits, and
+   `perpetual=true` on a task that is not meant to finish (above); attached
    sessions in their own clearly-labeled section (last hook event age, git
    state, reports — never runner liveness, which they don't have); recently
    finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they
@@ -329,7 +402,8 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
    configured `[tasks]` budget (both observations — see *Token/cost usage*
-   above); the manager's own
+   above); a header line with what the manager's *own* recent runs have
+   cost, read from its usage ledger; the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -371,6 +445,8 @@ scores the last `LOOP_WINDOW_CALLS` (12) of them. The evidence must be
 current: only a live runner is scored (the transcript is append-only; a
 dead task would stay flagged forever) and only entries newer than the last
 *completed* run (a relaunch is not indicted by its predecessor's spinning).
+A perpetual task is skipped entirely — repetition is its job, so the read
+has nothing to say about it (above).
 Extraction is deliberately loose — a recursive walk for any nested dict
 tagged `tool_use` / `tool_call` / `function_call` / `command_execution` /
 `local_shell_call` (or carrying a string `tool_name`), counted once per
@@ -423,8 +499,16 @@ earning `gh` a capability grant. Cost is bounded twice, because digest build
 blocks the tick: `[ci].timeout_seconds` (10) per call, and `CI_MAX_PROBES`
 (12) probes per digest, spent in digest order so a home with more tasks than
 budget still covers its live work. `[ci].enabled = false` skips the probe
-entirely. Those are the only knobs, and none of them changes what anything
-*does* about the result.
+entirely — and so does a config.toml quorum cannot read at all: the table it
+failed to parse may be the one holding that switch, so an unreadable config
+means *disabled*, never "defaults". That is the general policy for the two
+fail-soft probes (`ci.py`, `herdr.py`): they read config through
+`config.try_load_config`, whose `None` means "no usable config" and
+therefore off, while the read-only views degrade through
+`config.load_config_or_default` — the single fallback helper the CLI, views
+and the manager digest share — which fills in defaults but is never allowed
+to *enable* something a user may have switched off. Those are the only
+knobs, and none of them changes what anything *does* about the result.
 
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`

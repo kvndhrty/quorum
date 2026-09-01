@@ -83,6 +83,12 @@ so the record stays true.
   unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
   (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
   the preamble tells harnesses to commit+push with plain git before reporting done.
+  `perpetual = true` (`task add --perpetual`) marks a task that is not meant to
+  finish: the substrate is unchanged, but the preamble's `{perpetual}` block
+  softens delivery into commit+push per cycle, the digest renders
+  `perpetual=true` and withholds `possible-loop` (repetition is the job), the
+  manager prompt relaunches it forever and never cancels it, and views badge it
+  `∞`.
   `attached = true` marks an *adopted* live interactive session (`quorum task
   adopt`): workdir = the user's checkout, no worktree, liveness from
   `tasks/<id>/attached.json` (rewritten by `task hook-session-start`/
@@ -125,7 +131,12 @@ so the record stays true.
   elementwise **max** within a run (harnesses report run-cumulative totals
   and a pumped run emits one result per turn — summing would multiply the
   spend; max prefers under-counting) and a **sum** across runs. The runner
-  records it on the `TaskRun`; views/`quorum status`/the digest surface it.
+  records it on the `TaskRun`; agent runs (`agents/harness_run.py`) have no
+  such record, so each appends one `{at, run, usage}` line to
+  `actor.usage_path` (`state/manager/usage.jsonl`,
+  `state/agents/<name>/usage.jsonl`) — every run, failures included, read back
+  over a bounded tail by `usage.agent_usage`. Views/`quorum status`/the digest
+  surface both (the digest opens with the manager's own spend).
   `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
   over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
   class as `possible-loop`; enforcement is deliberately not implemented.
@@ -211,7 +222,9 @@ so the record stays true.
   the maildir inbox; herdr is a doorbell, never a second transport). Optional
   `[herdr]` table (`socket` override, `enabled`).
 - `ci.py` — the *only* module that shells out to `gh`, and the second fail-soft
-  probe (herdr's mold, not sandbox.py's): `pr_state(home, task)` runs one
+  probe (herdr's mold, not sandbox.py's; both read config through
+  `try_load_config`, so an unreadable config.toml disables them):
+  `pr_state(home, task)` runs one
   `gh pr view --json ...` *inside* the task's workdir (gh resolves repo from the
   remote, PR from the checked-out branch) and returns state / check counts /
   failing check names / merge conflict — or `None` for every disappointment
@@ -224,7 +237,13 @@ so the record stays true.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
   `timeout_seconds`).
-- `config.py` — `config.toml` is user-owned and **quorum never writes it back**; machine
+- `config.py` — one place to load config: `load_config` raises,
+  `try_load_config` returns defaults for a *missing* file (the user said
+  nothing) and None for a malformed/undecodable one — what the fail-soft
+  probes use, so an unreadable config means their feature is **off**, never
+  fail-open, and it never raises — `load_config_or_default` fills in defaults
+  for everything (cli/views/digest).
+  `config.toml` is user-owned and **quorum never writes it back**; machine
   state goes to JSON. The one config location quorum may write is `agents/<name>.toml`
   (file-defined agents, atomic whole-file writes via `write_agent_file`/`create_agent`;
   merged over `[agents.*]` at load, file wins; names validated + reserved-checked).
@@ -237,7 +256,7 @@ so the record stays true.
   `ProjectRegistry` and must only ever *read* project dirs — task writes happen in
   worktrees.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
-  `default_prompts/` (`task-preamble`, `manager`, `babysitter`); deleting a file restores the
+  `default_prompts/` (`task-preamble`, `task-perpetual`, `manager`, `babysitter`); deleting a file restores the
   default. `format_map` with a missing-key-preserving dict. Re-running `quorum
   init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
   change a file in `default_prompts/`, append the replaced version's sha256 to
