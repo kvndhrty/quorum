@@ -777,6 +777,68 @@ def test_run_once_failure_is_one_line_not_a_traceback(home: Path):
     assert "intentional explosion" in r.output and "--verbose" in r.output
 
 
+def test_task_add_after_chains_two_tasks(home: Path, tmp_path: Path):
+    """--after persists resolved full ids, refuses the premature run, and
+    lets it through once the upstream finishes (#31)."""
+    slug = setup_task_env(home, tmp_path)
+
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    first = r.output.split("queued task ")[1].split(" ")[0]
+
+    r = runner.invoke(app, ["task", "add", slug, "review the PR", "--harness", "fake",
+                            "--after", first, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert f"waits on: {first}" in r.output
+    second = r.output.split("queued task ")[1].split(" ")[0]
+
+    # persisted as the resolved *full* id
+    from quorum.tasks import TaskStore
+
+    store = TaskStore(home)
+    upstream, dependent = store.resolve(first), store.resolve(second)
+    assert dependent.depends_on == [upstream.id]
+
+    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    assert f"after:    {first}  (waiting on {first})" in r.output
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert f"waiting-on {first}" in r.output
+
+    r = runner.invoke(app, ["task", "run", second, "--home", str(home)])
+    assert r.exit_code == 1 and f"waiting on {first}" in r.output
+    assert store.resolve(second).runs == []
+
+    # --force is the escape hatch, and the refusal lifts on its own once the
+    # dependency reaches a terminal status
+    r = runner.invoke(app, ["task", "report", first, "shipped", "--status", "done", "--home", str(home)])
+    assert r.exit_code == 0
+    r = runner.invoke(app, ["task", "run", second, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert len(store.resolve(second).runs) == 1
+
+
+def test_task_add_after_rejects_an_unknown_dependency(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "review something", "--harness", "fake",
+                            "--after", "zzzzzz", "--home", str(home)])
+    assert r.exit_code == 1 and "no task matching" in r.output
+    from quorum.tasks import TaskStore
+
+    assert TaskStore(home).list() == []  # nothing queued on a bad dependency
+
+
+def test_task_run_force_overrides_the_dependency_refusal(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    first = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "add", slug, "review it", "--harness", "fake",
+                            "--after", first, "--home", str(home)])
+    second = r.output.split("queued task ")[1].split(" ")[0]
+
+    r = runner.invoke(app, ["task", "run", second, "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    from quorum.tasks import TaskStore
+
+    assert len(TaskStore(home).resolve(second).runs) == 1
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 

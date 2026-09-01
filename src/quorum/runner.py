@@ -57,9 +57,11 @@ from .tasks import (
     Task,
     TaskRun,
     TaskStore,
+    dependency_state,
     inbox_name,
     runner_lock_path,
     runner_log_path,
+    short_handle,
     transcript_path,
     worktree_path,
 )
@@ -270,6 +272,39 @@ def claim_guidance(home: Path, task_id: str) -> list[str]:
     return notes
 
 
+def dependency_note(home: Path, task: Task) -> str | None:
+    """What this task's dependencies ended up as, or None when it has none.
+
+    The cheapest sufficient answer to "how does a dependent task read its
+    upstream's outcome": the fields are already in task.json, so composing
+    the prompt costs one read per dependency and no new state. Anything
+    deeper — the full record, reports, transcript — is a
+    `quorum task show <id>` away, which the note says out loud.
+    """
+    if not task.depends_on:
+        return None
+    store = TaskStore(home)
+    lines = []
+    for dep_id in task.depends_on:
+        dep = store.get(dep_id)
+        if dep is None:
+            lines.append(f"- {short_handle(dep_id)}: no record (the task was deleted)")
+            continue
+        line = f"- {dep.short_id}: status={dep.status}"
+        if dep.pr_url:
+            line += f" pr={dep.pr_url}"
+        first = dep.prompt.strip().splitlines()[0] if dep.prompt.strip() else ""
+        if first:
+            line += f"\n  it was asked to: {first[:160]}"
+        lines.append(line)
+    return (
+        "# Tasks this one depends on\n\n"
+        + "\n".join(lines)
+        + "\n\nRead the full record of any of them — reports, PR url, branch — with "
+        "`quorum task show <id>`."
+    )
+
+
 _PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
 
 
@@ -302,6 +337,9 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
         re.sub(r"\n{3,}", "\n\n", preamble).strip(),
         f"# Task\n\n{task.prompt}",
     ]
+    upstream = dependency_note(home, task)
+    if upstream:
+        parts.append(upstream)
     if guidance:
         parts.append("# Guidance received since your last run\n\n" + "\n".join(f"- {g}" for g in guidance))
     return "\n\n".join(parts)
@@ -488,8 +526,12 @@ def stream_transcript(
         fsio.append_jsonl(transcript, entry)
 
 
-def run_task(home: Path, config: Config, task_prefix: str) -> int:
-    """Execute one run of a task in the foreground. Returns the harness exit code."""
+def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) -> int:
+    """Execute one run of a task in the foreground. Returns the harness exit code.
+
+    `force` waives the dependency refusal below; nothing else about a run
+    changes.
+    """
     home = Path(home)
     store = TaskStore(home)
     try:
@@ -505,6 +547,17 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         raise RunnerError(
             f"task {task.short_id} is attached to a live interactive session — "
             "guide it with `quorum task nudge`, or `quorum task detach` it first"
+        )
+    blockers = unmet_dependencies(store, task) if not force else []
+    if blockers:
+        # The second substrate rail, same class as the attached refusal: a
+        # dependent task launched before its prerequisite is pure waste (it
+        # reviews a PR that does not exist yet). The manager still decides
+        # every launch — this only refuses the launch it already knows is
+        # premature, and `--force` waives it.
+        raise RunnerError(
+            f"task {task.short_id} is waiting on {', '.join(blockers)} — "
+            "unfinished dependencies; `--force` to run anyway"
         )
     harness = resolve_harness(config, task.harness)
 
@@ -577,7 +630,17 @@ def run_task(home: Path, config: Config, task_prefix: str) -> int:
         fsio.release_pid_lock(lock)
 
 
-def launch_detached(home: Path, task_id: str) -> int:
+def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
+    """Short ids of the task's dependencies that have not finished — empty
+    (and free, no listing) for the overwhelming majority of tasks, which
+    declare none."""
+    if not task.depends_on:
+        return []
+    by_id = {t.id: t for t in store.list()}
+    return dependency_state(task, by_id)["waiting_on"]
+
+
+def launch_detached(home: Path, task_id: str, force: bool = False) -> int:
     """Start `quorum task run <id>` as a detached process; returns its pid.
 
     stdout/stderr go to the task's runner.log (the transcript captures the
@@ -591,7 +654,10 @@ def launch_detached(home: Path, task_id: str) -> int:
     env = strip_actor_env({**os.environ, "QUORUM_HOME": str(home)})
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home)],
+            [
+                sys.executable, "-m", "quorum", "task", "run", task_id,
+                "--home", str(home), *(["--force"] if force else []),
+            ],
             stdout=log,
             stderr=log,
             stdin=subprocess.DEVNULL,

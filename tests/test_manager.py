@@ -41,6 +41,7 @@ def write_config(
     extra_settings: str = "",
     run_timeout_seconds: int = 60,
     mgr_inject: bool = False,
+    extra_harness: str = "",
     manager_usage: str = "",
     manager_note: str = "",
 ) -> None:
@@ -50,6 +51,7 @@ def write_config(
         "[harness.tasktool]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
         'env = { FAKE_HARNESS_MODE = "echo" }\n'
+        f"{extra_harness}"
         "[harness.mgr]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
         f'env = {{ FAKE_HARNESS_MODE = "{manager_mode}"'
@@ -478,6 +480,82 @@ def test_loop_signal_only_scores_the_most_recent_calls():
     assert loop_signal(escaped) is None
 
 
+# -- task dependencies (#31) ----------------------------------------------
+
+
+def test_digest_marks_waiting_failed_and_cycled_dependencies(home: Path, clock, project: str):
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    upstream = store.add(project, "build it", "tasktool")
+    dependent = store.add(project, "review it", "tasktool", depends_on=[upstream.id])
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    line = next(line for line in digest.splitlines() if f"[queued] {dependent.short_id}" in line)
+    assert f"waiting-on={upstream.short_id}" in line
+    assert "DEP-FAILED" not in digest
+    assert f"deps: waiting on {upstream.short_id}" in digest
+
+    # a dependency that ends blocked never satisfies: an observation, and the
+    # dependent is no longer "waiting" on anything
+    tasks.report(home, upstream.id, "blocked", "needs a human")
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    line = next(line for line in digest.splitlines() if f"[queued] {dependent.short_id}" in line)
+    assert "waiting-on=" not in line and "DEP-FAILED" in line
+    assert f"DEP-FAILED: dependency {upstream.short_id} ended blocked" in digest
+
+    # a hand-edited cycle is flagged, not crashed on
+    store.update(upstream.id, status="queued", depends_on=[dependent.id])
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "DEP-CYCLE" in digest
+
+
+def test_digest_says_nothing_about_a_task_without_dependencies(
+    home: Path, clock, project: str
+):
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    store.add(project, "ordinary work", "tasktool")
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "waiting-on" not in digest and "deps:" not in digest
+
+
+def test_manager_drives_a_two_task_chain_in_order(home: Path, clock, project: str):
+    """End to end with the fake harness: the manager launches the upstream
+    task, and only launches the dependent one after the upstream reports
+    `done` — the prompt rule doing the deciding, with the runner's refusal
+    behind it."""
+    write_config(
+        home,
+        "manager_chain",
+        extra_harness=(
+            "[harness.reporter]\n"
+            f'start = ["{sys.executable}", "{FAKE}"]\n'
+            'env = { FAKE_HARNESS_MODE = "report" }\n'
+        ),
+    )
+    store = TaskStore(home)
+    upstream = store.add(project, "build it", "reporter")
+    dependent = store.add(project, "review it", "reporter", depends_on=[upstream.id])
+
+    make_manager(home, clock).tick()
+
+    text = manager_transcript_text(home)
+    assert f"ACT| task run {upstream.short_id} -> exit 0" in text
+    assert f"SKIP| {dependent.short_id} waiting on its dependencies" in text
+    assert store.get(upstream.id).status == "done"  # the fake reported it
+    assert store.get(dependent.id).runs == []  # not a single run spent early
+
+    make_manager(home, clock).tick()
+
+    text = manager_transcript_text(home)
+    assert f"ACT| task run {dependent.short_id} -> exit 0" in text
+    assert len(store.get(dependent.id).runs) == 1
+    assert store.get(dependent.id).status == "done"
+    # the dependent's prompt carried the upstream's outcome
+    dep_text = "\n".join(
+        e.get("line", "") for e in fsio.read_jsonl(tasks.transcript_path(home, dependent.id))
+    )
+    assert f"- {upstream.short_id}: status=done" in dep_text
 # -- what supervision itself costs (#32) -------------------------------------
 
 

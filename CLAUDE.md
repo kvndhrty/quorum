@@ -83,6 +83,15 @@ so the record stays true.
   unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
   (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
   the preamble tells harnesses to commit+push with plain git before reporting done.
+  `depends_on` (`task add --after <id>`, repeatable) lists full ids a task
+  must not start before — validated once at `add` (`resolve_dependencies`:
+  unknown/ambiguous/self rejected, and a perpetual upstream refused because it
+  never finishes) and read back by the total, pure `dependency_state`
+  (waiting/failed/missing/cycle) that the digest, views and runner share. Only
+  a dependency that still *might* finish blocks: `failed` and `missing` are
+  both unsatisfiable upstreams, so both are reported and neither is waited on
+  — a task that silently never runs would hide the decision. Not a DAG engine:
+  the manager still decides every launch.
   `perpetual = true` (`task add --perpetual`) marks a task that is not meant to
   finish: the substrate is unchanged, but the preamble's `{perpetual}` block
   softens delivery into commit+push per cycle, the digest renders
@@ -122,7 +131,10 @@ so the record stays true.
   transcript instead of raising. The runner **never sets task
   status**, and refuses attached tasks outright — a substrate rail (same class as
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
-  the user's live checkout. `launch_detached` spawns `python -m quorum task run`
+  the user's live checkout. The same class of rail refuses a task whose
+  `depends_on` are unfinished unless `--force` (a premature dependent is pure
+  waste); `dependency_note` puts each dependency's status/pr_url in the
+  composed prompt. `launch_detached` spawns `python -m quorum task run`
   in a new session.
 - `usage.py` — token/cost usage read back out of harness result events
   (claude `result`, codex `turn.completed`/`token_count`): loose extraction,

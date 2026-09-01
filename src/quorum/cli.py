@@ -511,6 +511,10 @@ def doctor(home: Path | None = _HOME_OPT) -> None:
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ⏳ waiting on unfinished dependencies (`task add --after`); the
+             runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
+             name dependencies that can never finish — nothing waits on those,
+             they are yours (or the manager's) to decide about
           ⚠ uncommitted/unpushed work in the task's workdir
           $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
           cost/tokens are shown when the harness reported them, summed over runs
@@ -606,6 +610,14 @@ def _echo_task_row(t: dict) -> None:
         if git["unpushed"]:
             risks.append(f"{git['unpushed']} unpushed")
         line += "  ⚠ " + ", ".join(risks)
+    if t.get("waiting_on"):
+        line += f"  waiting-on {','.join(t['waiting_on'])}"
+    if t.get("dep_failed"):
+        line += f"  DEP-FAILED {','.join(t['dep_failed'])}"
+    if t.get("dep_missing"):
+        line += f"  DEP-MISSING {','.join(t['dep_missing'])}"
+    if t.get("dep_cycle"):
+        line += "  DEP-CYCLE"
     if t.get("usage_text"):
         line += f"  {t['usage_text']}"
     if t.get("budget_overages"):
@@ -622,6 +634,7 @@ def task_add(
     prompt: str = typer.Argument(help="What the harness should do."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
+    after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
     perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
     home: Path | None = _HOME_OPT,
 ) -> None:
@@ -630,13 +643,16 @@ def task_add(
 
     Example: quorum task add my-api "fix the flaky auth tests"
 
+    Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
+    queues a task the manager will not launch until a1b2c3 finishes.
+
     With --perpetual the task works in cycles instead of finishing: its
     preamble tells it to deliver every cycle and never report done, the
     manager relaunches it whenever its runner dies, and `quorum task cancel`
     is the only way it ends.
     """
     from .projects import ProjectRegistry
-    from .tasks import TaskStore
+    from .tasks import TaskStore, resolve_dependencies, short_handle
 
     target = get_home(home)
     config = _load_config(target)
@@ -649,16 +665,25 @@ def task_add(
     if name not in config.harness:
         known = ", ".join(sorted(config.harness)) or "none configured"
         raise _fail(f"no [harness.{name}] in config.toml (known: {known})")
+    store = TaskStore(target)
+    try:
+        depends_on = resolve_dependencies(store, after or [])
+    except ValueError as e:
+        raise _fail(str(e)) from None
     _actor_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
-    task = TaskStore(target).add(
+    task = store.add(
         project=project,
         prompt=prompt,
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
+        depends_on=depends_on,
         perpetual=perpetual,
     )
     kind = "perpetual task" if perpetual else "task"
     typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
+    if depends_on:
+        waiting = ", ".join(short_handle(d) for d in depends_on)
+        typer.echo(f"waits on: {waiting} — `task run` refuses until they finish (--force overrides)")
     if perpetual:
         typer.echo(
             f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
@@ -915,7 +940,7 @@ def task_show(
 ) -> None:
     """Show one task: what it is, where it stands, and its recent reports."""
     from .config import load_config_or_default
-    from .tasks import read_reports, runner_alive
+    from .tasks import TaskStore, dependency_state, read_reports, runner_alive, short_handle
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
@@ -940,6 +965,18 @@ def task_show(
         typer.echo(f"  session:  {task.session}")
     if task.pr_url:
         typer.echo(f"  pr:       {task.pr_url}")
+    if task.depends_on:
+        deps = dependency_state(task, {t.id: t for t in TaskStore(target).list()})
+        line = ", ".join(short_handle(d) for d in task.depends_on)
+        if deps["waiting_on"]:
+            line += f"  (waiting on {', '.join(deps['waiting_on'])})"
+        if deps["failed"]:
+            line += f"  DEP-FAILED: {', '.join(deps['failed'])}"
+        if deps["missing"]:
+            line += f"  DEP-MISSING: {', '.join(deps['missing'])}"
+        if deps["cycle"]:
+            line += "  DEP-CYCLE"
+        typer.echo(f"  after:    {line}")
     if task.runs:
         last = task.runs[-1]
         typer.echo(
@@ -967,11 +1004,12 @@ def task_show(
 def task_run(
     task_id: str,
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
+    force: bool = typer.Option(False, "--force", help="Run even while the task's dependencies are unfinished."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
     under `quorum up`)."""
-    from .runner import RunnerError, launch_detached, run_task
+    from .runner import RunnerError, launch_detached, run_task, unmet_dependencies
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
@@ -982,14 +1020,23 @@ def task_run(
             f"task {task.short_id} is attached to a live interactive session — "
             "guide it with `quorum task nudge`, or `quorum task detach` it first"
         )
+    if not force:
+        from .tasks import TaskStore
+
+        blockers = unmet_dependencies(TaskStore(target), task)
+        if blockers:
+            raise _fail(
+                f"task {task.short_id} is waiting on {', '.join(blockers)} — "
+                "unfinished dependencies; `--force` to run anyway"
+            )
     _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
-        pid = launch_detached(target, task.id)
+        pid = launch_detached(target, task.id, force=force)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
         return
     config = _load_config(target)
     try:
-        code = run_task(target, config, task.id)
+        code = run_task(target, config, task.id, force=force)
     except RunnerError as e:
         raise _fail(str(e)) from None
     color = "green" if code == 0 else "red"

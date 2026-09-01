@@ -371,6 +371,12 @@ class QuorumTUI(App):
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
                 if t.get("perpetual"):
                     status += " ∞"  # never finishes by design; only the user ends it
+                if t.get("waiting_on"):
+                    status += " ⏳" + ",".join(t["waiting_on"])
+                if t.get("dep_failed"):
+                    status += " DEP-FAILED"
+                if t.get("dep_missing"):
+                    status += " DEP-MISSING"
                 style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
                 table.add_row(
                     t["id_short"],

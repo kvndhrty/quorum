@@ -4,6 +4,7 @@ injection, session capture/resume, and the cooperative report channel."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -620,6 +621,151 @@ def test_task_rows_surface_git_state_but_skip_settled_tasks(home: Path, tmp_path
     old = fsio.utc_now() - timedelta(hours=views.GIT_PROBE_TERMINAL_HOURS + 1)
     store.update(task.id, now=old, status="done")
     assert views.task_rows(home)[0]["git"] is None
+
+
+# -- dependencies (#31) ---------------------------------------------------
+
+
+def test_resolve_dependencies_accepts_short_ids_and_dedupes(home: Path):
+    store = TaskStore(home)
+    first = store.add("proj", "upstream", "fake")
+    second = store.add("proj", "other upstream", "fake")
+    resolved = tasks.resolve_dependencies(
+        store, [first.short_id, second.id, first.short_id.upper()]
+    )
+    assert resolved == [first.id, second.id]
+
+
+def test_resolve_dependencies_rejects_unknown_and_self(home: Path):
+    store = TaskStore(home)
+    existing = store.add("proj", "upstream", "fake")
+    with pytest.raises(ValueError, match="no task matching"):
+        tasks.resolve_dependencies(store, ["zzzzzz"])
+    with pytest.raises(ValueError, match="cannot depend on itself"):
+        tasks.resolve_dependencies(store, [existing.short_id], self_id=existing.id)
+
+
+def test_cannot_depend_on_a_perpetual_task(home: Path):
+    """A perpetual task never reaches a terminal status, so a dependent would
+    wait on it forever — `task add --after` refuses the chain outright."""
+    store = TaskStore(home)
+    upstream = store.add("proj", "forever", "fake")
+    store.update(upstream.id, perpetual=True)
+    with pytest.raises(ValueError, match="perpetual"):
+        tasks.resolve_dependencies(store, [upstream.short_id])
+
+
+def test_dependency_state_reads_waiting_failed_and_missing(home: Path):
+    store = TaskStore(home)
+    running = store.add("proj", "still going", "fake")
+    finished = store.add("proj", "shipped", "fake", status="done")
+    dead = store.add("proj", "gave up", "fake", status="blocked")
+    dependent = store.add(
+        "proj", "the follow-up", "fake",
+        depends_on=[running.id, finished.id, dead.id, "01GHOSTGHOSTGHOSTGHOSTGH0ST"],
+    )
+    state = tasks.dependency_state(dependent, {t.id: t for t in store.list()})
+    # only a dependency that still might finish blocks
+    assert state["waiting_on"] == [running.short_id]
+    assert state["failed"] == [dead.short_id]  # never blocks: the manager judges it
+    assert state["missing"] == ["tgh0st"]  # same class as failed, same treatment
+    assert state["cycle"] is False
+
+    # once the upstream reports done, nothing is waiting — a pruned dependency
+    # is reported, not waited on, so it can never strand the dependent
+    tasks.report(home, running.id, "done", "shipped it")
+    state = tasks.dependency_state(
+        store.get(dependent.id), {t.id: t for t in store.list()}
+    )
+    assert state["waiting_on"] == [] and state["missing"] == ["tgh0st"]
+
+
+def test_dependency_state_flags_a_hand_edited_cycle_instead_of_crashing(home: Path):
+    store = TaskStore(home)
+    a = store.add("proj", "a", "fake")
+    b = store.add("proj", "b", "fake", depends_on=[a.id])
+    store.update(a.id, depends_on=[b.id])  # only reachable by hand-editing
+    by_id = {t.id: t for t in store.list()}
+    state = tasks.dependency_state(store.get(b.id), by_id)
+    assert state["cycle"] is True and state["waiting_on"] == [a.short_id]
+    # an upstream cycle the task is not itself part of is flagged too
+    c = store.add("proj", "c", "fake", depends_on=[b.id])
+    assert tasks.dependency_state(c, {t.id: t for t in store.list()})["cycle"] is True
+
+
+def test_run_refuses_a_task_with_unfinished_dependencies(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    with pytest.raises(RunnerError, match=f"waiting on {upstream.short_id}"):
+        run_task(home, config, dependent.id)
+    assert store.get(dependent.id).runs == []  # nothing was spent
+
+
+def test_force_overrides_the_dependency_refusal(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    assert run_task(home, config, dependent.id, force=True) == 0
+    assert len(store.get(dependent.id).runs) == 1
+
+
+def test_a_satisfied_dependency_runs_and_reaches_the_prompt(
+    home: Path, project: str, monkeypatch
+):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "build the thing", "fake")
+    tasks.report(home, upstream.id, "done", "shipped", pr_url="https://x/pr/7")
+    dependent = store.add(project, "review the PR", "fake", depends_on=[upstream.id])
+
+    assert run_task(home, config, dependent.id) == 0
+    text = transcript_text(home, dependent.id)
+    # the cheapest sufficient upstream handoff: status + pr url in the prompt,
+    # and a pointer at `task show` for everything else
+    assert f"- {upstream.short_id}: status=done pr=https://x/pr/7" in text
+    assert "quorum task show" in text
+
+
+def test_task_rows_surface_waiting_on(home: Path):
+    from quorum import views
+
+    store = TaskStore(home)
+    upstream = store.add("proj", "first", "fake")
+    dependent = store.add("proj", "second", "fake", depends_on=[upstream.id])
+    rows = {r["id"]: r for r in views.task_rows(home)}
+    assert rows[dependent.id]["waiting_on"] == [upstream.short_id]
+    assert rows[dependent.id]["depends_on"] == [upstream.short_id]
+    assert rows[upstream.id]["waiting_on"] == []
+
+    tasks.report(home, upstream.id, "cancelled", "dropped")
+    rows = {r["id"]: r for r in views.task_rows(home)}
+    assert rows[dependent.id]["waiting_on"] == []
+    assert rows[dependent.id]["dep_failed"] == [upstream.short_id]
+
+
+def test_a_pruned_dependency_is_reported_not_waited_on(home: Path, project: str):
+    """A dependency whose task directory is gone can never reach `done`, so it
+    is treated exactly like a `blocked`/`cancelled` one: `DEP-MISSING` in the
+    views, out of `waiting_on`, and no runner refusal. Waiting forever on it
+    would strand the dependent with nothing on screen saying why."""
+    from quorum import views
+
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    shutil.rmtree(tasks.task_dir(home, upstream.id))
+
+    row = {r["id"]: r for r in views.task_rows(home)}[dependent.id]
+    assert row["waiting_on"] == [] and row["dep_missing"] == [upstream.short_id]
+    assert run_task(home, config, dependent.id) == 0  # not refused
 
 
 # -- perpetual tasks (#12) ---------------------------------------------------

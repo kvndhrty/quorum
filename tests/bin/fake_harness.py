@@ -19,6 +19,10 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
     agent_act       echo + act like a generic prompt agent: post a board note,
                     then journal a reasoning note — two capped actions, so a
                     cap of 1 provably refuses the second
+    manager_chain   echo + act like a manager that obeys the dependency rule
+                    in prompts/manager.md: launch every queued task whose
+                    digest line has no `waiting-on=`, and print a SKIP line
+                    for the ones that have
     manager_flood   echo + nudge the first task repeatedly until the CLI's
                     per-run action cap refuses; print the refusal
     manager_remember  echo + write one standing note into the manager's
@@ -177,6 +181,17 @@ def main() -> int:
             print(f"ACT| task nudge {target} -> exit {nudged.returncode}")
             noted = quorum("manager", "note", f"launched and nudged {target}")
             print(f"ACT| note -> exit {noted.returncode}")
+
+    elif mode == "manager_chain":
+        for line in re.findall(r"- \[queued\] .*", prompt):
+            target = line.split()[2]
+            if "waiting-on=" in line:
+                print(f"SKIP| {target} waiting on its dependencies")
+                continue
+            ran = quorum("task", "run", target)
+            print(f"ACT| task run {target} -> exit {ran.returncode}")
+            if ran.returncode != 0:
+                print(f"REFUSED| {ran.stderr.strip().splitlines()[-1] if ran.stderr.strip() else 'refused'}")
 
     elif mode == "agent_act":
         posted = quorum("board", "post", "notes", "hello from the prompt agent")

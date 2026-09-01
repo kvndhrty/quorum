@@ -138,12 +138,15 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the #19 (usage/budget) revision, replaced by the merge with the
         # ci-probe revision
         "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
-        # replaced by the perpetual-task + self-cost revision (#12, #32)
+        # the ci-probe revision, replaced by the perpetual-task + self-cost
+        # revision (#12, #32)
         "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
         # replaced by the {local} overlay-slot revision (#37)
         "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
         # replaced by the notebook revision (#35): note vs remember vs forget
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
+        # the notebook revision, replaced by the #31 task-dependency rule
+        "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
     },
 }
 
