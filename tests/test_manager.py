@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, runner, tasks
+from quorum.actor import usage_path
 from quorum.agent import AgentContext
 from quorum.agents.manager import (
     LOOP_WINDOW_CALLS,
@@ -40,6 +41,7 @@ def write_config(
     run_timeout_seconds: int = 60,
     mgr_inject: bool = False,
     extra_harness: str = "",
+    manager_usage: str = "",
 ) -> None:
     (home / "config.toml").write_text(
         "[tasks]\n"
@@ -50,7 +52,9 @@ def write_config(
         f"{extra_harness}"
         "[harness.mgr]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
-        f'env = {{ FAKE_HARNESS_MODE = "{manager_mode}" }}\n'
+        f'env = {{ FAKE_HARNESS_MODE = "{manager_mode}"'
+        + (f', FAKE_HARNESS_USAGE = "{manager_usage}"' if manager_usage else "")
+        + " }\n"
         + ('inject = "stream-json"\n' if mgr_inject else "")
         + "[agents.manager]\n"
         'type = "manager"\n'
@@ -549,3 +553,92 @@ def test_manager_drives_a_two_task_chain_in_order(home: Path, clock, project: st
         e.get("line", "") for e in fsio.read_jsonl(tasks.transcript_path(home, dependent.id))
     )
     assert f"- {upstream.short_id}: status=done" in dep_text
+# -- what supervision itself costs (#32) -------------------------------------
+
+
+def test_the_manager_records_and_reads_back_its_own_spend(
+    home: Path, clock, project: str
+):
+    """The manager's runs are the steadiest recurring cost in a live home, so
+    they land in a ledger of their own and come back in the next digest."""
+    from quorum import views
+
+    write_config(home, "manager_act", manager_usage="0.30")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    entries = fsio.read_jsonl(usage_path(home, "manager"))
+    assert len(entries) == 1 and entries[0]["usage"]["cost_usd"] == 0.30
+
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    assert "Your own runs have cost: last $0.30 · 11.0k tok" in digest
+
+    row = next(r for r in views.agent_rows(home) if r["name"] == "manager")
+    assert row["usage"]["total"]["cost_usd"] == 0.30
+    assert row["usage_text"] == "last $0.30 · 11.0k tok"
+
+
+def test_a_manager_harness_that_reports_no_spend_says_nothing(
+    home: Path, clock, project: str
+):
+    from quorum import views
+
+    write_config(home, "manager_act")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    # the run is still counted (an unreported spend is unknown, not zero)
+    entries = fsio.read_jsonl(usage_path(home, "manager"))
+    assert len(entries) == 1 and entries[0]["usage"] is None
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    assert "Your own runs have cost" not in digest
+    row = next(r for r in views.agent_rows(home) if r["name"] == "manager")
+    assert row["usage"] is None and row["usage_text"] == ""
+
+
+# -- perpetual tasks (#12) ---------------------------------------------------
+
+
+def test_a_perpetual_task_is_marked_and_never_flagged_as_looping(
+    home: Path, clock, project: str
+):
+    """Repetition is the job for a perpetual task, so the digest marks it and
+    withholds the one observation that would read it as stuck."""
+    store = TaskStore(home)
+    forever = store.add(project, "watch CI and fix what breaks", "tasktool", perpetual=True)
+    ordinary = store.add(project, "one-off work", "tasktool")
+    store.update(forever.id, status="cycle-9")
+    store.update(ordinary.id, status="executing")
+    for task in (forever, ordinary):
+        mark_runner_alive(home, task.id)
+        write_transcript(home, task.id, [tool_use("Bash", "gh pr checks", f"c{i}") for i in range(6)])
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    marked = digest.split(f"[cycle-9] {forever.short_id}")[1]
+    assert marked.splitlines()[0].endswith("perpetual=true")
+    assert "possible-loop" not in marked.split("- [")[0]
+    # the identical transcript on an ordinary task is still flagged
+    assert "possible-loop" in digest.split(f"[executing] {ordinary.short_id}")[1]
+
+
+def test_a_perpetual_task_that_reported_done_is_observed_not_forgotten(
+    home: Path, clock, project: str
+):
+    """Terminal tasks drop out of the active list, so the one thing a
+    perpetual task must never do would otherwise be invisible."""
+    store = TaskStore(home)
+    ended = store.add(project, "watch CI", "tasktool", perpetual=True)
+    stopped = store.add(project, "watch builds", "tasktool", perpetual=True)
+    ordinary = store.add(project, "one-off", "tasktool")
+    store.update(ended.id, status="done")
+    store.update(stopped.id, status="cancelled")
+    store.update(ordinary.id, status="done")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    assert f"PERPETUAL-ENDED {ended.short_id}: reported 'done'" in digest
+    assert stopped.short_id not in digest.split("## Active tasks")[0]
+    assert ordinary.short_id not in digest.split("## Active tasks")[0]

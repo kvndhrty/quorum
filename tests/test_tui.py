@@ -121,5 +121,15 @@ def test_task_table_shows_waiting_on_dependencies(home: Path):
         table = app.query_one("#tasks", DataTable)
         cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
         assert any(f"⏳{upstream.short_id}" in c for c in cells)
+def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
+    """`∞` is how "40 runs and counting" reads as working rather than stuck."""
+    store = TaskStore(home)
+    store.add("proj-a", "watch CI", "fake", perpetual=True)
+    store.add("proj-a", "one-off", "fake")
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
+        assert statuses[0].endswith("∞") and "∞" not in statuses[1]
 
     drive(home, script)

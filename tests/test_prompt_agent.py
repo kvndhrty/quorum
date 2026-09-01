@@ -22,11 +22,12 @@ from quorum.messages import MessageBus
 FAKE = str(Path(__file__).parent / "bin" / "fake_harness.py")
 
 
-def write_config(home: Path, mode: str = "echo") -> None:
+def write_config(home: Path, mode: str = "echo", usage_cost: str = "") -> None:
+    cost = f', FAKE_HARNESS_USAGE = "{usage_cost}"' if usage_cost else ""
     (home / "config.toml").write_text(
         "[harness.agenttool]\n"
         f'start = ["{sys.executable}", "{FAKE}"]\n'
-        f'env = {{ FAKE_HARNESS_MODE = "{mode}" }}\n'
+        f'env = {{ FAKE_HARNESS_MODE = "{mode}"{cost} }}\n'
     )
 
 
@@ -164,3 +165,73 @@ def test_shipped_babysitter_prompt_runs_as_an_ordinary_prompt_agent(home: Path, 
     assert "Two strikes" in text  # the give-up rule, the part that is policy
     assert "{now}" not in text and "{directives}" not in text
     assert fsio.iso(clock()) in text
+
+
+# -- what an agent's own runs cost (#32) ------------------------------------
+
+
+def test_agent_runs_record_their_spend_under_the_agent(home: Path, clock):
+    """A prompt agent's ledger lives beside its journal — under
+    state/agents/<name>/, never in the manager's historical spot."""
+    from quorum import usage
+    from quorum.actor import usage_path
+
+    write_config(home, usage_cost="0.25")
+    seed_agent(home)
+    make_agent(home, clock).tick()
+
+    entries = fsio.read_jsonl(usage_path(home, "standup"))
+    assert len(entries) == 1
+    assert entries[0]["usage"]["cost_usd"] == 0.25
+    assert entries[0]["run"] and entries[0]["at"]
+    assert not usage_path(home, "manager").exists()
+
+    spent = usage.agent_usage(home, "standup")
+    assert spent["runs"] == 1 and spent["total"]["cost_usd"] == 0.25
+    assert usage.describe_agent(spent) == "last $0.25 · 11.0k tok"
+
+
+def test_a_failed_run_still_lands_in_the_ledger(home: Path, clock):
+    """A run that spent tokens and then died is still spend; and a run count
+    only means anything if every run is counted."""
+    from quorum.actor import usage_path
+
+    write_config(home, mode="fail")
+    seed_agent(home)
+    with pytest.raises(RuntimeError, match="exited 3"):
+        make_agent(home, clock).tick()
+
+    entries = fsio.read_jsonl(usage_path(home, "standup"))
+    assert len(entries) == 1 and entries[0]["usage"] is None
+
+
+def test_a_corrupt_ledger_line_is_silence_not_a_raise(home: Path):
+    """The ledger is read by status, the TUI, the web and the digest — a
+    hand-edited or truncated line must degrade to nothing, never propagate."""
+    from quorum import usage
+    from quorum.actor import usage_path
+
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('"just a string"\n[1, 2]\n{"usage": 5}\n{"at": "x", "run": "r", "usage": null}\n')
+    assert usage.agent_usage(home, "manager") is None
+    assert usage.describe_agent(usage.agent_usage(home, "manager")) == ""
+
+    fsio.append_jsonl(path, {"at": "y", "run": "s", "usage": {"input_tokens": 10, "cost_usd": 0.5}})
+    fsio.append_jsonl(path, {"at": "z", "run": "t", "usage": {"input_tokens": 10, "cost_usd": 0.5}})
+    spent = usage.agent_usage(home, "manager")
+    assert spent["runs"] == 2 and spent["truncated"] is False
+    assert usage.describe_agent(spent).endswith("over 2 runs")
+
+
+def test_a_full_tail_is_labelled_recent_not_all_time(home: Path):
+    from quorum import usage
+    from quorum.actor import usage_path
+
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for i in range(usage.AGENT_USAGE_TAIL + 5):
+        fsio.append_jsonl(path, {"at": str(i), "run": str(i), "usage": {"cost_usd": 0.01}})
+    spent = usage.agent_usage(home, "manager")
+    assert spent["truncated"] is True and spent["window"] == usage.AGENT_USAGE_TAIL
+    assert "recent runs" in usage.describe_agent(spent)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import fsio, usage
-from .config import Config, ConfigError, load_config, parse_schedule
+from .config import Config, load_config_or_default, parse_schedule
 from .messages import MessageBus
 from .projects import ProjectRegistry
 from .supervisor import LOCK_TOUCH_SECONDS
@@ -83,10 +83,7 @@ def _estimate_next_run(schedule: str, hb: dict[str, Any], now) -> str | None:
 
 def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     if config is None:
-        try:
-            config = load_config(home)
-        except ConfigError:
-            config = Config()
+        config = load_config_or_default(home)
     now = fsio.utc_now()
     rows = []
     for name, acfg in sorted(config.agents.items()):
@@ -110,6 +107,9 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
                 est = _estimate_next_run(acfg.schedule, hb, now)
                 if est:
                     next_run, estimated = est, True
+        # What this agent's own harness runs have cost (harness-driven agents
+        # only; None whenever nothing was reported — never read as zero).
+        spent = usage.agent_usage(home, name)
         rows.append(
             {
                 "name": name,
@@ -123,6 +123,9 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
                 "next_run": next_run,
                 "next_run_estimated": estimated,
                 "error": hb.get("error"),
+                "usage": spent,
+                # Rendered once, here, so the CLI, TUI and browser agree.
+                "usage_text": usage.describe_agent(spent),
             }
         )
     return rows
@@ -133,10 +136,7 @@ def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     journal (harness-driven agents) and its `logs/actions.jsonl` entries."""
     from .actor import journal_path
 
-    try:
-        config = load_config(home)
-    except ConfigError:
-        config = Config()
+    config = load_config_or_default(home)
     row = next((r for r in agent_rows(home, config) if r["name"] == name), None)
     if row is None:
         return None
@@ -170,10 +170,7 @@ def project_rows(home: Path) -> list[dict[str, Any]]:
 
 def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     if config is None:
-        try:
-            config = load_config(home)
-        except ConfigError:
-            config = Config()
+        config = load_config_or_default(home)
     budget = config.tasks
     rows = []
     now = fsio.utc_now()
@@ -200,6 +197,10 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 "harness": t.harness,
                 "running": runner_alive(home, t.id),
                 "attached": t.attached,
+                # A task that is never expected to finish (task add
+                # --perpetual): views badge it, so "still running after 40
+                # runs" reads as working, not stuck.
+                "perpetual": t.perpetual,
                 "attached_state": attached_state(home, t.id) if t.attached else None,
                 "runs": len(t.runs),
                 # Absent (None) whenever no run reported usage — the common
@@ -274,10 +275,7 @@ def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int 
 
 
 def overview(home: Path) -> dict[str, Any]:
-    try:
-        config = load_config(home)
-    except ConfigError:
-        config = None
+    config = load_config_or_default(home)
     return {
         "home": str(home),
         "supervisor": supervisor_status(home),

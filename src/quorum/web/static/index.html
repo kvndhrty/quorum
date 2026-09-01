@@ -188,7 +188,10 @@ async function refresh() {
       ? ` <span class="muted" title="waiting on unfinished dependencies">⏳ ${esc((t.waiting_on || []).join(","))}</span>` : "";
     const depFailed = (t.dep_failed || []).length
       ? ` <span class="status-error" title="a dependency ended ${esc((t.dep_failed || []).join(","))}">DEP-FAILED</span>` : "";
-    const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : "")) + waiting + depFailed;
+    // "∞": perpetual — never finishes by design, only the user ends it.
+    const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""))
+      + (t.perpetual ? ' <span title="perpetual: runs in cycles until you cancel it">∞</span>' : "")
+      + waiting + depFailed;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over
     // the configured budget — a mark, never a block.
@@ -213,7 +216,7 @@ async function refresh() {
     return `<tr class="agent-row${sel}" data-name="${esc(a.name)}"${err}>
       <td>${esc(a.name)}${a.error ? ' <span class="status-error">!</span>' : ""}</td>
       <td class="status-${esc(a.status)}">${esc(a.status)}</td>
-      <td class="muted">${esc(a.schedule)}</td>
+      <td class="muted">${esc(a.schedule)}${a.usage_text ? `<br><span title="the agent's own harness spend, as reported">${esc(a.usage_text)}</span>` : ""}</td>
       <td class="muted">last ${fmtTs(a.last_end) || "—"}</td>
       <td class="muted">next ${next || "—"}</td></tr>`;
   }).join("") || `<tr><td class="muted">no agents — quorum agent create, or the form below</td></tr>`);

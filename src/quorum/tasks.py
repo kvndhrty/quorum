@@ -83,6 +83,17 @@ class Task(BaseModel):
     # and these only say when a launch would be premature. See
     # `dependency_state` for how they are read.
     depends_on: list[str] = Field(default_factory=list)
+    # True: this task is not expected to finish. It works in cycles — watch,
+    # tidy, poll, groom — and only the user ends it. Quorum enforces nothing
+    # (status stays free-form and TERMINAL_STATUSES still means what it
+    # means); the flag is *observation context*, and it changes three
+    # readings of the same substrate: the run preamble softens the
+    # deliver-then-report-done conventions into deliver-every-cycle, the
+    # digest renders `perpetual=true` and suppresses the `possible-loop`
+    # observation (repetition is the job, not a symptom), and the manager
+    # prompt is told to relaunch it forever and never call a long run count
+    # stuck. See docs/architecture.md ("Perpetual tasks").
+    perpetual: bool = False
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -173,6 +184,7 @@ class TaskStore:
         attached: bool = False,
         status: str = "queued",
         depends_on: list[str] | None = None,
+        perpetual: bool = False,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -187,6 +199,7 @@ class TaskStore:
             attached=attached,
             status=status,
             depends_on=list(depends_on or []),
+            perpetual=perpetual,
             created_at=created,
             updated_at=created,
         )

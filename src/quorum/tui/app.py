@@ -78,7 +78,7 @@ class QuorumTUI(App):
         tasks.add_columns("task", "project", "status", "harness", "spent", "last report", "pr")
         tasks.cursor_type = "row"
         agents = self.query_one("#agents", DataTable)
-        agents.add_columns("agent", "status", "schedule", "last run", "next run")
+        agents.add_columns("agent", "status", "schedule", "spent", "last run", "next run")
         agents.cursor_type = "row"
         projects = self.query_one("#projects", DataTable)
         projects.add_columns("project", "deadline", "path")
@@ -165,6 +165,8 @@ class QuorumTUI(App):
         def fill_tasks(table: DataTable) -> None:
             for t in task_rows:
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
+                if t.get("perpetual"):
+                    status += " ∞"  # never finishes by design; only the user ends it
                 if t.get("waiting_on"):
                     status += " ⏳" + ",".join(t["waiting_on"])
                 if t.get("dep_failed"):
@@ -203,6 +205,8 @@ class QuorumTUI(App):
                     r["name"],
                     status,
                     r["schedule"],
+                    # "" unless this agent's own harness reported a spend.
+                    r.get("usage_text", ""),
                     (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
                     next_run.replace("T", " ").rstrip("Z"),
                 )

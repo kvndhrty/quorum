@@ -39,6 +39,18 @@ def transcript_path(home: Path, name: str = "manager") -> Path:
     return Path(home) / "state" / "agents" / name / "transcript.jsonl"
 
 
+def usage_path(home: Path, name: str = "manager") -> Path:
+    """An agent's per-run spend ledger (same split as `journal_path`).
+
+    A task records usage on its own run entry in task.json; an agent has no
+    such record — its runs are the ticks of a schedule — so they get one
+    append-only line each here. See `usage.record_agent_run`.
+    """
+    if name == "manager":
+        return Path(home) / "state" / "manager" / "usage.jsonl"
+    return Path(home) / "state" / "agents" / name / "usage.jsonl"
+
+
 def current_actor() -> str:
     """The tagged agent name when running under an actor-tagged environment,
     else "user"."""

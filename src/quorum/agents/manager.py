@@ -31,7 +31,7 @@ from pathlib import Path
 from .. import actor, ci, fsio, herdr, tasks, usage
 from ..actor import journal_path
 from ..agent import Agent
-from ..config import Config, ConfigError, TasksConfig, load_config
+from ..config import TasksConfig, load_config_or_default
 from ..runner import guidance_note
 from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
 
@@ -259,10 +259,7 @@ def _budget(home: Path, tasks_config: TasksConfig | None) -> TasksConfig:
     when the caller has no config and none can be read."""
     if tasks_config is not None:
         return tasks_config
-    try:
-        return load_config(home).tasks
-    except ConfigError:
-        return Config().tasks
+    return load_config_or_default(home).tasks
 
 
 def build_digest(
@@ -289,6 +286,12 @@ def build_digest(
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
+    # What supervision itself costs, read from the manager's own usage
+    # ledger: the one spend nothing else in the digest accounts for. Absent
+    # when the manager's harness reports nothing, like every other figure.
+    self_spend = usage.describe_agent(usage.agent_usage(home, "manager"))
+    if self_spend:
+        lines += [f"Your own runs have cost: {self_spend}", ""]
     # Resolved once: without gh (or with [ci].enabled = false) no task is
     # probed at all.
     ci_budget = CI_MAX_PROBES if ci.available(home) else 0
@@ -303,6 +306,22 @@ def build_digest(
         ci_budget -= 1
         return ci.pr_state(home, task)
 
+    # A perpetual task is never supposed to finish, so one that reported a
+    # terminal status is either the user ending it (cancelled — fine) or a
+    # harness that ignored its cycle instructions. The digest lists only
+    # live tasks, so without this line the failure would be invisible.
+    ended = [
+        t for t in all_tasks
+        if t.perpetual and t.status in tasks.TERMINAL_STATUSES and t.status != "cancelled"
+    ]
+    for t in ended:
+        lines.append(
+            f"PERPETUAL-ENDED {t.short_id}: reported {t.status!r} — a perpetual task never "
+            "finishes; relaunch it with a nudge about its cycle instructions unless the user "
+            "ended it"
+        )
+    if ended:
+        lines.append("")
     lines.append("## Active tasks")
     if not active:
         lines.append("(none)")
@@ -313,6 +332,9 @@ def build_digest(
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
             f"runner={'alive' if alive else 'dead'} runs={len(t.runs)} quiet={quiet}"
+            # Only when true: an ordinary task's line stays as it was, and
+            # the marker reads as the exception it is.
+            + (" perpetual=true" if t.perpetual else "")
             + _dependency_marks(deps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
@@ -337,8 +359,12 @@ def build_digest(
         # append-only, so a dead task would stay flagged forever), and only
         # entries newer than the last *completed* run — after a relaunch, the
         # previous run's spinning must not indict the fresh one.
+        # A perpetual task is exempt: cycling over the same few tool calls
+        # forever IS its job, so the repetition read has nothing to say about
+        # it and the flag would fire every tick, teaching the manager to
+        # ignore a signal that still means something on ordinary tasks.
         loop = None
-        if alive:
+        if alive and not t.perpetual:
             boundary = t.runs[-1].ended_at if t.runs else None
             current = [e for e in scan if not boundary or e.get("at", "") >= boundary]
             loop = loop_signal(current)

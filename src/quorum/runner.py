@@ -40,6 +40,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -304,9 +305,36 @@ def dependency_note(home: Path, task: Task) -> str | None:
     )
 
 
+_PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
+
+
 def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -> str:
+    # A perpetual task gets an extra block in place of the preamble's
+    # {perpetual} placeholder: it never reaches "done", so its delivery step
+    # is commit + push every cycle (prompts/task-perpetual.md, user-editable
+    # like every other template). An ordinary task substitutes nothing.
+    perpetual = (
+        prompts.render(home, "task-perpetual", task_id=task.short_id).strip()
+        if task.perpetual
+        else ""
+    )
+    preamble = prompts.render(
+        home,
+        "task-preamble",
+        task_id=task.short_id,
+        project_path=str(workdir),
+        perpetual=perpetual,
+    )
+    # An edited preamble from before the placeholder existed never
+    # substitutes it (format_map preserves unknown keys but cannot invent
+    # one), and a perpetual task that silently gets the ordinary "report
+    # done" instructions ends on its first cycle. Append the block instead.
+    # (The header documents the key as an escaped `{{perpetual}}`, so look
+    # for an *unescaped* placeholder, not the substring.)
+    if perpetual and not _PERPETUAL_SLOT.search(prompts.load(home, "task-preamble")):
+        preamble = f"{preamble.rstrip()}\n\n{perpetual}"
     parts = [
-        prompts.render(home, "task-preamble", task_id=task.short_id, project_path=str(workdir)),
+        re.sub(r"\n{3,}", "\n\n", preamble).strip(),
         f"# Task\n\n{task.prompt}",
     ]
     upstream = dependency_note(home, task)
