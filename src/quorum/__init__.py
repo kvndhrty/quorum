@@ -3,7 +3,7 @@
 Always-on, file-based agents that make a busy researcher's life easier.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def installed_version() -> str:

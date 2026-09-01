@@ -9,6 +9,8 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-01
+
 ### Added
 - `quorum doctor`: one pass over everything that fails soft — config (the one
   strict parse), `[harness.*]` binaries and argv templates, git, projects, gh
@@ -18,7 +20,27 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   opt-in `--smoke [HARNESS]` that runs your harness for real through the
   runner's own code — in a scratch directory *and* a scratch `QUORUM_HOME`,
   killing the whole process tree on timeout. Diagnoses only; never repairs.
-  (#24)
+  (#39, #49)
+- Task dependencies: `quorum task add --after <id>...` queues a task that
+  waits on others. The runner refuses to start it while any upstream is
+  still unfinished (`⏳` in status/TUI/web, `waiting-on=` in the digest, and
+  the manager prompt tells it never to launch one); an upstream that ended
+  `blocked`/`cancelled` or was pruned no longer blocks — it is surfaced as
+  `DEP-FAILED` / `DEP-MISSING` for the manager to judge. A perpetual task
+  can never be an upstream. (#31, #45)
+- Prompt overlays: `prompts/<name>.local.md` is merged into the packaged
+  template at a `{local}` slot (manager, task preamble, perpetual block), so
+  house policy lives beside the default instead of forking it, and
+  `quorum init` keeps upgrading the unedited template. An unreadable overlay
+  renders as no overlay rather than failing every tick; `quorum prompt
+  list|diff` show overlays and degrade per file. (#37, #46)
+- Manager notebook: `quorum manager remember|notes|forget` is a standing
+  memory separate from the scrolling action journal — `notes.jsonl` per
+  agent, optional `--ttl`, rendered in its own bounded slot at the top of
+  every digest (with a line for what was dropped or not scanned). Only the
+  owner or the user may write to it (a convention, not a security boundary);
+  malformed lines are skipped, never crash a tick. Both dashboards show an
+  agent's notebook. (#35, #47)
 - TUI write affordances beyond the nudge: `m` sends the manager a directive
   (`quorum manager tell`), `s` starts a detached run (refused on an attached
   task or a live runner), `c` cancels a task behind a yes/no confirmation.
@@ -94,5 +116,6 @@ per-task git worktrees, a harness-driven manager whose policy lives in
 transports, live-session adoption for claude-code / codex / opencode, TUI and
 web dashboards as pure readers, optional nono sandboxing, and a herdr doorbell.
 
-[Unreleased]: https://github.com/kvndhrty/quorum/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kvndhrty/quorum/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kvndhrty/quorum/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kvndhrty/quorum/releases/tag/v0.1.0
