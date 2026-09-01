@@ -362,6 +362,24 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
 
+You do, however, get told. After five consecutive failed ticks the
+supervisor posts `agent.failing` to the **attention** board — the banner
+`quorum status`, the TUI and the web dashboard all show — because an agent
+that is never paused would otherwise fail all night in a channel nobody
+watches. It is one post per outage, not per tick, and a matching
+`agent.recovered` lands when the manager ticks again:
+
+```
+$ quorum status
+supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
+⚠ 1 on #attention in the last 7d — `quorum board read attention`
+
+$ quorum board read attention
+[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
+has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
+so it keeps retrying — last error: manager harness run 01K2… exited 1
+```
+
 ## Guiding tasks
 
 The steering channel for individual tasks is the task's inbox, and you and
@@ -500,7 +518,8 @@ quorum agent run-once manager     # one tick in *this* shell, supervisor optiona
 Commands are delivered through the supervisor's inbox and applied within
 ~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
 its config sets `auto_pause = false`, as the manager's does, in which case
-it keeps retrying (loud failures, automatic recovery);
+it keeps retrying (loud failures, automatic recovery) and its streak is
+escalated once to the attention board instead of being paused;
 `agent resume` is the recovery lever. A pause survives supervisor restarts.
 
 ## Prompt-driven agents

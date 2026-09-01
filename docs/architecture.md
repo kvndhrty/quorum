@@ -33,6 +33,7 @@ quorum up ──► Supervisor
               ├─ APScheduler (BackgroundScheduler, thread pool)
               │   ├─ job: manager  (every 5m)  ── crash-isolated wrapper:
               │   ├─ job: <user plugins…>         heartbeats, error posts,
+              │   │                               auto-pause or escalation,
               │   ├─ job: _control (15s: claims supervisor inbox —
               │   │        agent.pause / agent.resume / agent.run-now /
               │   │        agent.reload)
@@ -518,7 +519,12 @@ its result to disk, so `views.py` never acquires a network call.
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
 `auto_pause = false` config keeps the schedule firing so recovery needs no
-human intervention.
+human intervention. Because that same flag exempts it from the auto-pause
+that posts to `attention`, a *sustained* streak escalates on its own: at
+`MAX_CONSECUTIVE_FAILURES` the supervisor posts one `agent.failing` to
+`attention` (the banner `quorum status`, the TUI and the web header all
+read), and one `agent.recovered` when it ticks again. See
+[Messaging protocol](#messaging-protocol) for the dedupe.
 
 ### Prompt agents
 
@@ -593,6 +599,22 @@ command covers create, edit, and delete. A pause is durable: it lands in
 the agent's heartbeat, and a restarting supervisor schedules any agent whose
 heartbeat says `paused` with its job paused rather than silently resuming
 it.
+
+**Failure escalation** rides the board rather than the control channel. Every
+failed tick posts `agent.error` to `system` and records the streak on the
+heartbeat (`consecutive_failures`, `error`); at `MAX_CONSECUTIVE_FAILURES`
+(5) the agent is auto-paused with an `agent.paused` post. An agent whose
+config sets `auto_pause = false` — the manager, which must keep firing so it
+self-recovers — is exempt from that pause, and so was exempt from the only
+signal that reached a human: `views.attention_summary` reads the `attention`
+topic alone. So the supervisor posts one `agent.failing` to `attention` for
+such an agent instead, and one `agent.recovered` when it succeeds again. The
+dedupe is a third heartbeat field, `escalated_at`: set at the moment of
+escalation, checked before posting (so a ten-hour outage is one post, not
+one per tick), and cleared by the success path alongside `error` and
+`consecutive_failures` — which is also what makes the recovery post fire
+exactly once. Nothing here pauses, retries or throttles the agent; the post
+is an observation, in the same class as `possible-loop` and `ci:`.
 
 ### Design seam: outboxes and a router
 
