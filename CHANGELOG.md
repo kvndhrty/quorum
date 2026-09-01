@@ -10,6 +10,17 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 ## [Unreleased]
 
 ### Added
+- First-class perpetual tasks: `quorum task add --perpetual` marks work that
+  is not meant to finish. The preamble's `{perpetual}` block (new packaged
+  `task-perpetual.md`, appended even on homes with an edited preamble)
+  softens delivery to commit+push per cycle; the digest renders
+  `perpetual=true`, withholds `possible-loop`, and flags `PERPETUAL-ENDED`
+  when such a task reports a terminal status; the manager prompt relaunches
+  it forever and never cancels it; status/TUI/web badge it `∞`. (#12, #36)
+- Agent-run usage ledger: manager and prompt-agent harness runs append
+  `{at, run, usage}` to `state/manager/usage.jsonl` /
+  `state/agents/<name>/usage.jsonl`; surfaced on agent rows and as the
+  digest's opening self-cost line. (#32, #36)
 - Optional auto-commit safety net: with `[tasks].auto_commit = true` a dirty
   worktree is committed to the task branch after the harness exits — never
   pushed, never sets status, refuses detached-HEAD / mid-merge trees, skipped
@@ -33,6 +44,12 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   policy-owned supervision and session adoption claimed explicitly. (#22, #26)
 
 ### Fixed
+- `[ci].enabled = false` (and `[herdr]`) inside a malformed `config.toml`
+  was silently ignored — the probes fell back to enabled. An unreadable
+  config now disables them; a missing one still auto-detects; neither can
+  raise into the manager tick. The four private load-config fallbacks in
+  cli/views/manager/ci became `config.try_load_config` /
+  `load_config_or_default`. (#33, #34, #36)
 - Harnesses with `inject = "stream-json"` receive the prompt as the opening
   stdin turn instead of an ignored argv argument — previously every such run
   hung until timeout. (#24)
