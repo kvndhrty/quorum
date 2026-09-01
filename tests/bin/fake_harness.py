@@ -21,6 +21,9 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     cap of 1 provably refuses the second
     manager_flood   echo + nudge the first task repeatedly until the CLI's
                     per-run action cap refuses; print the refusal
+    manager_remember  echo + write one standing note into the manager's
+                    notebook (FAKE_HARNESS_NOTE), which the *next* tick's
+                    digest must render back
     inject          speak the real stream-json protocol, like claude does:
                     the prompt arrives as the *first user turn on stdin*
                     (never via argv — the real CLI ignores an argv prompt in
@@ -47,6 +50,7 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                        that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
                              its own task, "tell" sends `manager tell`
+  FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
 """
 
 import json
@@ -181,6 +185,13 @@ def main() -> int:
         print(f"ACT| note -> exit {noted.returncode}")
         if noted.returncode != 0 and noted.stderr.strip():
             print(f"REFUSED| {noted.stderr.strip().splitlines()[0]}")
+
+    elif mode == "manager_remember":
+        note = os.environ.get("FAKE_HARNESS_NOTE", "a standing fact for next time")
+        r = quorum("manager", "remember", note)
+        print(f"ACT| remember -> exit {r.returncode}")
+        if r.returncode != 0 and r.stderr.strip():
+            print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
 
     elif mode == "manager_flood":
         m = re.search(r"- \[\w+\] (\S+)", prompt)

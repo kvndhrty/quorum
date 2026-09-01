@@ -235,3 +235,19 @@ def test_a_full_tail_is_labelled_recent_not_all_time(home: Path):
     spent = usage.agent_usage(home, "manager")
     assert spent["truncated"] is True and spent["window"] == usage.AGENT_USAGE_TAIL
     assert "recent runs" in usage.describe_agent(spent)
+
+
+def test_a_template_that_asks_for_notes_gets_its_own_notebook(home: Path, clock):
+    """A prompt agent has the same memory problem as the manager; it reads
+    its notebook by writing `{notes}` in its template, under the same caps."""
+    from quorum import notes
+
+    write_config(home)
+    seed_agent(home, prompt="check on things\n\n{notes}\n")
+    notes.remember(home, "the flaky test is tracked in #41", owner="standup")
+
+    make_agent(home, clock).tick()
+
+    text = "\n".join(e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "standup")))
+    assert notes.SECTION_HEADER in text
+    assert "the flaky test is tracked in #41" in text

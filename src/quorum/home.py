@@ -122,6 +122,13 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "28f1079b09bfad2841dca8ebbeae8131969c81b97a0b6a7611deb4035f2048be",
         # replaced by the {perpetual} placeholder revision (#12)
         "ac344c667083649b04166a4801c8646240a67f37a078b90c13db922005079a6d",
+        # replaced by the {local} overlay-slot revision (#37)
+        "f564262f9fa66c42301e211c64e77433e981003f0df138964aa78174898845f0",
+    },
+    "task-perpetual.md": {
+        # the original (#12) block, replaced by the {local} overlay-slot
+        # revision (#37)
+        "5023261d8d55f456570cba3df7c1212de7f7fd4c7fedd11a8c86f77330743934",
     },
     "manager.md": {
         "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
@@ -133,6 +140,10 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
         # replaced by the perpetual-task + self-cost revision (#12, #32)
         "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
+        # replaced by the {local} overlay-slot revision (#37)
+        "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
+        # replaced by the notebook revision (#35): note vs remember vs forget
+        "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
     },
 }
 

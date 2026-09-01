@@ -1,6 +1,9 @@
 <!-- Appended to the run prompt of a task queued with `task add --perpetual`,
      in place of the {{perpetual}} placeholder in task-preamble.md (an
-     ordinary task gets nothing here). Placeholders: {{task_id}}. Edit
+     ordinary task gets nothing here). Placeholders: {{task_id}};
+     {{local}} the perpetual-cycle conventions of this home, from
+     prompts/task-perpetual.local.md — never seeded, never touched by
+     `quorum init`, so house rules there keep this file upgradable. Edit
      freely — this file is yours; delete it to restore the packaged
      default. -->
 This is a PERPETUAL task: it is not expected to finish, and the delivery
@@ -22,3 +25,5 @@ conventions above bend accordingly.
   how the job is retuned while it runs.
 - If your run ends anyway (crash, timeout, a harness turn limit), that is
   fine: the manager relaunches you and the worktree still holds your work.
+
+{local}
