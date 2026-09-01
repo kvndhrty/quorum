@@ -1549,6 +1549,9 @@ def manager_remember(
     target = get_home(home)
     actor = current_actor()
     if not notes_mod.may_write(actor, agent):
+        # journal the refusal too: an agent reaching for someone else's
+        # notebook is exactly the kind of thing the next digest should show
+        _actor_guard(target, "remember.refused", target=agent, args=text, always_journal=True)
         raise _fail(
             f"action refused: {actor} may not write to {agent}'s notebook — "
             "report to it with `quorum task report`, or reach it on the board "
@@ -1582,6 +1585,7 @@ def manager_forget(
     target = get_home(home)
     actor = current_actor()
     if not notes_mod.may_write(actor, agent):
+        _actor_guard(target, "forget.refused", target=agent, args=note_id, always_journal=True)
         raise _fail(f"action refused: {actor} may not write to {agent}'s notebook")
     _actor_guard(target, "forget", target=note_id, always_journal=True)
     try:
@@ -1602,7 +1606,14 @@ def manager_notes(
     """Print the notebook exactly as the digest renders it for that agent."""
     from . import notes as notes_mod
 
-    for line in notes_mod.digest_section(get_home(home), owner=agent):
+    # reading is validated like writing: `--agent` is a path component under
+    # state/agents/, so `../../whatever` must not read outside QUORUM_HOME
+    try:
+        notes_mod.check_owner(agent)
+        section = notes_mod.digest_section(get_home(home), owner=agent)
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    for line in section:
         typer.echo(line)
 
 

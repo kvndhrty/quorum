@@ -146,7 +146,9 @@ def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     # The notebook, straight off its file — what the agent's next run reads,
     # rendered by the same code the digest uses so every reader agrees.
     row["notes"] = notes.active(home, name)
-    row["notes_text"] = "\n".join(notes.render_section(row["notes"]))
+    row["notes_text"] = "\n".join(
+        notes.render_section(row["notes"], unscanned=notes.unscanned_bytes(home, name))
+    )
     row["actions"] = [
         a
         for a in fsio.read_jsonl_tail(home / "logs" / "actions.jsonl", max_bytes=512 * 1024)

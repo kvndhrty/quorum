@@ -49,7 +49,8 @@ NOTE_MAX_CHARS = 600
 # The file is append-only and unbounded in principle, but a consolidated
 # notebook is small; readers take a bounded tail like every other jsonl log
 # here. A note older than this window is invisible (and so is its tombstone,
-# which is why the pair stays consistent).
+# which is why the pair stays consistent) — including a permanent one, so the
+# digest says how many bytes it did not scan rather than quietly forgetting.
 NOTES_SCAN_BYTES = 256 * 1024
 
 SECTION_HEADER = "## Your notebook (standing notes to yourself)"
@@ -82,10 +83,11 @@ def may_write(actor_name: str, owner: str) -> bool:
     return actor_name == "user" or actor_name == owner
 
 
-def _check_owner(owner: str) -> None:
-    """A notebook is written under `state/agents/<owner>/`, so an owner name
-    is a path component: hold it to the same rules as any agent name (the
-    manager's historical spot is the one exemption)."""
+def check_owner(owner: str) -> None:
+    """A notebook lives under `state/agents/<owner>/`, so an owner name is a
+    path component: hold it to the same rules as any agent name (the
+    manager's historical spot is the one exemption). Every entry point that
+    takes an owner from the outside — reads included — goes through here."""
     if owner == "manager":
         return
     from .config import ConfigError, validate_agent_name
@@ -97,11 +99,29 @@ def _check_owner(owner: str) -> None:
 
 
 def _entries(home: Path, owner: str = "manager") -> list[dict]:
+    """Well-formed lines only. Anything hand-edited, half-written or written
+    by a future version — a missing id, an id that is not a string — is
+    skipped rather than allowed to raise out of a digest build, because a
+    single bad line would otherwise fail every manager tick forever."""
     return [
         e
         for e in fsio.read_jsonl_tail(notes_path(home, owner), max_bytes=NOTES_SCAN_BYTES)
-        if isinstance(e, dict) and e.get("id")
+        if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
     ]
+
+
+def unscanned_bytes(home: Path, owner: str = "manager") -> int:
+    """How much of the notebook fell outside the `NOTES_SCAN_BYTES` tail.
+
+    Readers take a bounded tail, so a big enough file silently hides its
+    oldest notes — including permanent ones. The count is surfaced in the
+    digest (an observation, like `possible-loop`), never acted on here.
+    """
+    try:
+        size = notes_path(home, owner).stat().st_size
+    except OSError:
+        return 0
+    return max(0, size - NOTES_SCAN_BYTES)
 
 
 def expires_at(entry: dict) -> datetime | None:
@@ -131,13 +151,19 @@ def active(home: Path, owner: str = "manager", now: datetime | None = None) -> l
     return out
 
 
-def resolve(home: Path, handle: str, owner: str = "manager") -> dict:
+def resolve(
+    home: Path, handle: str, owner: str = "manager", now: datetime | None = None
+) -> dict:
     """Find one note by full id, unique prefix, or unique suffix (what
     `short_id` hands out) — the same handle rules as tasks."""
     wanted = handle.strip().upper()
+    if not wanted:
+        # every id starts with and ends with "", so an empty handle would
+        # match the whole notebook and read as "ambiguous"; say what's wrong
+        raise NotebookError("a note handle is required — `quorum manager notes`")
     matches = [
         e
-        for e in active(home, owner)
+        for e in active(home, owner, now=now)
         if e["id"] == wanted or e["id"].startswith(wanted) or e["id"].endswith(wanted)
     ]
     if not matches:
@@ -160,7 +186,7 @@ def remember(
     now: datetime | None = None,
 ) -> dict:
     """Append a standing note to `owner`'s notebook. Raises on a refused sender."""
-    _check_owner(owner)
+    check_owner(owner)
     if not may_write(sender, owner):
         raise NotebookError(
             f"{sender} may not write to {owner}'s notebook — reach it with "
@@ -193,10 +219,10 @@ def forget(
     now: datetime | None = None,
 ) -> dict:
     """Retire a note by appending a tombstone; readers hide both lines."""
-    _check_owner(owner)
+    check_owner(owner)
     if not may_write(sender, owner):
         raise NotebookError(f"{sender} may not write to {owner}'s notebook")
-    note = resolve(home, handle, owner)
+    note = resolve(home, handle, owner, now=now)
     fsio.append_jsonl(
         notes_path(home, owner),
         {
@@ -225,10 +251,14 @@ def describe(entry: dict, now: datetime | None = None) -> str:
         # than a day of imprecision
         days = max(0, math.ceil((end - now).total_seconds() / 86400))
         ttl = f", expires in {days}d"
-    return f"- ({short_id(entry['id'])}) [{when}{ttl}] {entry.get('sender', '?')}: {text}"
+    note_id = entry.get("id")
+    handle = short_id(note_id) if isinstance(note_id, str) else "??????"
+    return f"- ({handle}) [{when}{ttl}] {entry.get('sender', '?')}: {text}"
 
 
-def render_section(notes: list[dict], now: datetime | None = None) -> list[str]:
+def render_section(
+    notes: list[dict], now: datetime | None = None, unscanned: int = 0
+) -> list[str]:
     """The notebook as digest lines, under the notebook's own caps.
 
     Over the cap the *newest* notes are kept — a standing fact written today
@@ -236,9 +266,19 @@ def render_section(notes: list[dict], now: datetime | None = None) -> list[str]:
     where they would have been, so the manager can see it has consolidating
     to do. Summarizing them is deliberately not attempted here: the prompt
     tells the manager to write one superseding note and forget the rest.
+
+    `unscanned` is the second, quieter way notes go missing: the file grew
+    past `NOTES_SCAN_BYTES` and its oldest lines — permanent notes included —
+    were never read. Saying so is the point; the manager decides what to do.
     """
     now = now or fsio.utc_now()
     lines = [SECTION_HEADER]
+    if unscanned:
+        lines.append(
+            f"({unscanned} bytes of older notes were not scanned — the notebook file "
+            "is past its read window, so notes older than the ones below are "
+            "invisible, permanent ones included; consolidate what you still need)"
+        )
     if not notes:
         return lines + [EMPTY_LINE]
     kept = notes[-NOTES_MAX_ENTRIES:]
@@ -263,4 +303,6 @@ def digest_section(
     """`render_section` straight off the files — what the digest and
     `quorum manager notes` both call."""
     now = now or fsio.utc_now()
-    return render_section(active(home, owner, now=now), now=now)
+    return render_section(
+        active(home, owner, now=now), now=now, unscanned=unscanned_bytes(home, owner)
+    )

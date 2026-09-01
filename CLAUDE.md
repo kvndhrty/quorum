@@ -203,11 +203,17 @@ and `docs/architecture.md` in the same commit so the record stays true.
   Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
   through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
   any actor that is not the notebook's own agent or an untagged human — tasks
-  reach the manager with `task report` and the board, never by writing into its
-  memory. `digest_section` renders it **before** the task section under its own
-  `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else spends that budget, so
-  noisy tasks can't shrink it), keeps the newest over the cap and says how many
-  it dropped. No Python summarization: consolidation is prompt policy.
+  reach the manager with `task report` and the board. That fence reads
+  `QUORUM_ACTOR`, so it is a **convention against accidental crowding, not a
+  security boundary** (the sandbox is); say so in docs rather than overselling
+  it. Reads are owner-checked too (`check_owner`, `--agent` is a path
+  component), and a malformed line is skipped, never raised, so one bad line
+  can't fail every tick. `digest_section` renders it **before** the task
+  section under its own `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else
+  spends that budget, so noisy tasks can't shrink it), keeps the newest over
+  the cap and says how many it dropped — plus how many bytes fell outside
+  `NOTES_SCAN_BYTES`, so a truncated memory is visible. No Python
+  summarization: consolidation is prompt policy.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small

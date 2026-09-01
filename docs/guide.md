@@ -383,12 +383,17 @@ quorum manager forget k7f2ab                # retire one (by the id `notes` prin
 You and the manager write to the same notebook — a note from you reads as
 standing guidance, which is the difference from `manager tell`: a `tell` is
 a one-shot directive, claimed and consumed by the next tick, while a note
-stays until it expires or someone retires it. Nothing else can write there:
-a task reaches the manager with `task report` and the board, never by
-writing into its memory, so no amount of task chatter can crowd your notes
-out. Neither can a busy home — the notebook has its own bounded slot in the
-digest, ahead of the task section, so ten noisy tasks cannot shrink it. When
-it overflows the digest says how many older notes it dropped, and the
+stays until it expires or someone retires it. Nothing else writes there: a
+task reaches the manager with `task report` and the board, and quorum
+refuses a `remember` that comes in tagged as a task or another agent, so no
+amount of task chatter crowds your notes out. (That refusal is a
+convention, not a security boundary — quorum decides who is calling from an
+environment variable, and a determined harness could set it. What actually
+confines a task run is the sandbox, if you use one.) A busy home cannot
+crowd the notebook either — it has its own bounded slot in the digest, ahead
+of the task section, so ten noisy tasks cannot shrink it. When it overflows
+the digest says how many older notes it dropped (and, if the file has grown
+past the window readers scan, how many bytes it did not read), and the
 default prompt tells the manager to consolidate: one note that supersedes
 several, then `forget` the rest.
 

@@ -448,17 +448,25 @@ run's action cap.
 
 It is a **separate buffer** on both sides, and that is the whole design:
 
-- *Write side.* Not a board topic: nothing else can post into it. Only the
-  notebook's own agent and an untagged human may write (`notes.may_write`);
-  a call tagged as a task or another agent is refused with a pointer to
-  `task report` and `board post attention`. A task run cannot even reach
-  that check — the runner strips the actor tag — so this is the second
-  fence, not the only one.
+- *Write side.* Not a board topic, so no reporting task or chatty agent
+  posts into it in the ordinary course of things. Only the notebook's own
+  agent and an untagged human may write (`notes.may_write`); a call tagged
+  as a task or another agent is refused with a pointer to `task report` and
+  `board post attention`. Be honest about what that fence is: `may_write`
+  reads `QUORUM_ACTOR` from the environment, and any process that can run
+  the quorum CLI can set it. The runner stripping the actor tag from task
+  runs, and this check, are **conventions that keep honest callers out of
+  each other's memory** — they stop accidental crowding, not a harness that
+  decides to impersonate the manager. The real boundary around a notebook
+  is the filesystem the run is given (`sandbox.py`), not this check.
 - *Read side.* `notes.digest_section` renders the notebook **before** the
   task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
   else in the digest spends. Ten live tasks with long report tails cannot
   shrink it. Over the cap the newest notes are kept and the digest says how
-  many older ones it dropped; a single very long note is truncated
+  many older ones it dropped; when the file itself has outgrown
+  `NOTES_SCAN_BYTES` the section also says how many bytes went unscanned, so
+  a truncated memory is visible rather than silent; a single very long note
+  is truncated
   (`NOTE_MAX_CHARS`) rather than allowed to evict the rest.
 
 Nothing is compacted or summarized in Python: expiry is the only automatic

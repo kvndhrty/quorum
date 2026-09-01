@@ -166,16 +166,101 @@ def test_agent_detail_carries_the_notebook_for_the_views(home: Path):
 
 
 def test_a_torn_or_foreign_line_never_breaks_a_reader(home: Path):
+    """A digest build must survive anything on that file: the alternative is
+    one hand-edited line failing every manager tick, forever."""
     notes.remember(home, NOTE)
     with open(notes_path(home), "a", encoding="utf-8") as f:
         f.write(json.dumps({"no": "id"}) + "\n")
+        f.write(json.dumps({"id": 7, "ts": "2026-09-01T00:00:00Z", "text": "int id"}) + "\n")
+        f.write(json.dumps({"id": None, "text": "null id"}) + "\n")
+        f.write(json.dumps(["not", "even", "an", "object"]) + "\n")
         f.write('{"id": "01BROKEN", "ts": "not-a-date", "text": "x", "ttl_days": 1}\n')
         f.write("{half a line\n")
-    assert NOTE in "\n".join(notes.digest_section(home))
+
+    section = "\n".join(notes.digest_section(home))
+    assert NOTE in section
+    assert "int id" not in section and "null id" not in section
+    # every reader over the same file, not just the digest ("01BROKEN" keeps
+    # its note: an unparseable ttl loses the expiry, never the text)
+    assert [e["text"] for e in notes.active(home)] == [NOTE, "x"]
+    assert notes.resolve(home, notes.short_id(notes.active(home)[0]["id"]))["text"] == NOTE
+    r = invoke(home, "manager", "notes")
+    assert r.exit_code == 0 and NOTE in r.output
+    assert views.agent_detail(home, "manager")["notes_text"].count(NOTE) == 1
 
 
 def test_a_notebook_owner_is_a_valid_agent_name(home: Path):
-    """`--agent` becomes a path component under state/agents/."""
+    """`--agent` becomes a path component under state/agents/ — on the read
+    side as much as the write side."""
     r = invoke(home, "manager", "remember", "escape", "--agent", "../../etc")
     assert r.exit_code == 1 and "invalid agent name" in r.output
     assert not (home.parent.parent / "etc").exists()
+
+    r = invoke(home, "manager", "forget", "abc123", "--agent", "../../etc")
+    assert r.exit_code == 1 and "invalid agent name" in r.output
+
+    r = invoke(home, "manager", "notes", "--agent", "../../etc")
+    assert r.exit_code == 1 and "invalid agent name" in r.output
+    assert notes.SECTION_HEADER not in r.output
+
+
+def test_an_empty_handle_is_refused_rather_than_matching_everything(home: Path):
+    notes.remember(home, NOTE)
+    notes.remember(home, "and another")
+    with pytest.raises(notes.NotebookError, match="handle is required"):
+        notes.resolve(home, "   ")
+    r = invoke(home, "manager", "forget", "")
+    assert r.exit_code == 1 and "handle is required" in r.output
+    assert len(notes.active(home)) == 2
+
+
+def test_forget_honours_the_clock_it_is_given(home: Path):
+    """`forget` resolves through `active`, which filters on `now`; a note that
+    has expired by the caller's clock is no longer forgettable."""
+    now = fsio.utc_now()
+    entry = notes.remember(home, "rate-limited today", ttl_days=1, now=now)
+    handle = notes.short_id(entry["id"])
+    with pytest.raises(notes.NotebookError, match="no note matching"):
+        notes.forget(home, handle, now=now + timedelta(days=2))
+    notes.forget(home, handle, now=now)
+    assert notes.active(home, now=now) == []
+
+
+def test_a_notebook_past_the_scan_window_says_what_it_could_not_read(home: Path):
+    """The tail is bounded, so a big enough file hides its oldest notes —
+    permanent ones included. The manager is told, and left to judge."""
+    notes.remember(home, "the oldest standing fact")
+    padding = {"id": "01PADPADPAD", "ts": "2026-01-01T00:00:00Z", "retired": True,
+               "pad": "x" * 4000}
+    while notes.unscanned_bytes(home) == 0:
+        fsio.append_jsonl(notes_path(home), padding)
+    notes.remember(home, "today's fact")
+
+    assert notes.unscanned_bytes(home) > 0
+    section = notes.digest_section(home)
+    assert section[0] == notes.SECTION_HEADER
+    assert "not scanned" in section[1] and "invisible" in section[1]
+    assert "the oldest standing fact" not in "\n".join(section)  # what it warns about
+    assert "today's fact" in section[-1]
+    assert "not scanned" in invoke(home, "manager", "notes").output
+    assert "not scanned" in views.agent_detail(home, "manager")["notes_text"]
+
+
+def test_a_small_notebook_says_nothing_about_the_scan_window(home: Path):
+    notes.remember(home, NOTE)
+    assert notes.unscanned_bytes(home) == 0
+    assert "not scanned" not in "\n".join(notes.digest_section(home))
+
+
+def test_a_refused_write_is_journaled_too(home: Path, monkeypatch: pytest.MonkeyPatch):
+    """An agent reaching for someone else's notebook is exactly the kind of
+    thing the next digest should show; the refusal must not be invisible."""
+    monkeypatch.setenv("QUORUM_ACTOR", "babysitter")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01REFUSED")
+    assert invoke(home, "manager", "remember", "not mine").exit_code == 1
+    assert invoke(home, "manager", "forget", "abc123").exit_code == 1
+
+    journaled = lines(journal_path(home, "babysitter"))
+    assert [e["action"] for e in journaled] == ["remember.refused", "forget.refused"]
+    assert journaled[0]["target"] == "manager" and journaled[0]["run"] == "01REFUSED"
+    assert not notes_path(home).exists()

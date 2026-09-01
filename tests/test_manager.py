@@ -8,6 +8,7 @@ exactly how the mechanism separates concerns in production too.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, notes, runner, tasks
-from quorum.actor import usage_path
+from quorum.actor import notes_path, usage_path
 from quorum.agent import AgentContext
 from quorum.agents.manager import (
     LOOP_WINDOW_CALLS,
@@ -643,3 +644,16 @@ def test_noisy_tasks_cannot_shrink_the_notebook(home: Path, clock, project: str)
     assert notebook_section(digest) == quiet
     # and the notebook comes before the first task line
     assert digest.index(notes.SECTION_HEADER) < digest.index("## Active tasks")
+
+
+def test_a_malformed_note_line_does_not_fail_the_tick(home: Path, clock):
+    """The digest build is the one thing that must never raise over a file
+    anyone can hand-edit: a bad line there would fail every tick, forever."""
+    good = notes.remember(home, "the user wants at most two tasks running", now=clock())
+    with open(notes_path(home), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": 7, "ts": "2026-09-01T00:00:00Z", "text": "int id"}) + "\n")
+        f.write("not json at all\n")
+
+    section = notebook_section(build_digest(home, [], clock(), []))
+    assert any(good["text"] in line for line in section)
+    assert not any("int id" in line for line in section)
