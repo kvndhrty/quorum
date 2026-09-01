@@ -270,8 +270,23 @@ def claim_guidance(home: Path, task_id: str) -> list[str]:
 
 
 def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -> str:
+    # A perpetual task gets an extra block in place of the preamble's
+    # {perpetual} placeholder: it never reaches "done", so its delivery step
+    # is commit + push every cycle (prompts/task-perpetual.md, user-editable
+    # like every other template). An ordinary task substitutes nothing.
+    perpetual = (
+        prompts.render(home, "task-perpetual", task_id=task.short_id).strip()
+        if task.perpetual
+        else ""
+    )
     parts = [
-        prompts.render(home, "task-preamble", task_id=task.short_id, project_path=str(workdir)),
+        prompts.render(
+            home,
+            "task-preamble",
+            task_id=task.short_id,
+            project_path=str(workdir),
+            perpetual=perpetual,
+        ).strip(),
         f"# Task\n\n{task.prompt}",
     ]
     if guidance:

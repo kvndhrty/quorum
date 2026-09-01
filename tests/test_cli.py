@@ -331,6 +331,7 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     fresh, outcomes = home_mod.scaffold(target)
     assert fresh
     assert outcomes["task-preamble.md"] == "seeded"
+    assert outcomes["task-perpetual.md"] == "seeded"  # the perpetual block (#12)
 
     # a pristine seed from an older quorum: content whose hash is registered
     old_default = "old packaged preamble\n"
@@ -674,3 +675,66 @@ def test_run_once_failure_is_one_line_not_a_traceback(home: Path):
     assert r.exit_code == 1
     assert r.exception is None or isinstance(r.exception, SystemExit)
     assert "intentional explosion" in r.output and "--verbose" in r.output
+
+
+# -- perpetual tasks (#12) ---------------------------------------------------
+
+
+def test_perpetual_tasks_are_queued_and_badged_everywhere(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "watch CI forever", "--perpetual", "--harness", "fake",
+         "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert "queued perpetual task" in r.output and "task cancel" in r.output
+    short = r.output.split("queued perpetual task ")[1].split(" ")[0]
+
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["perpetual"] is True
+
+    assert "∞" in runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "∞" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "∞" in runner.invoke(app, ["status", "--legend"]).output
+    assert "perpetual" in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
+
+
+def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["perpetual"] is False
+    assert "∞" not in runner.invoke(app, ["task", "list", "--home", str(home)]).output
+
+
+# -- one load-config fallback (#34) ------------------------------------------
+
+
+def test_load_config_or_default_is_the_one_fallback(home: Path, tmp_path: Path):
+    """Missing and malformed config.toml both degrade to defaults for the
+    read-only callers — and `try_load_config` tells the two apart from a
+    config that actually parsed, which is what the fail-soft probes need."""
+    from quorum.config import load_config_or_default, try_load_config
+
+    empty = tmp_path / "no-home"
+    empty.mkdir()
+    assert try_load_config(empty) is None
+    assert load_config_or_default(empty).tasks.default_harness == ""
+
+    (home / "config.toml").write_text("[tasks\nthis is not toml")
+    assert try_load_config(home) is None
+    assert load_config_or_default(home).ci.enabled is True  # the model default
+
+    (home / "config.toml").write_text('[tasks]\ndefault_harness = "claude"\n')
+    assert try_load_config(home).tasks.default_harness == "claude"
+    assert load_config_or_default(home).tasks.default_harness == "claude"
+
+
+def test_views_still_render_over_a_broken_config(home: Path):
+    """Views never demand config: a syntax error must not blank the dashboard."""
+    from quorum import views
+
+    (home / "config.toml").write_text("nonsense = [[[")
+    overview = views.overview(home)
+    assert overview["agents"] == [] and overview["tasks"] == []

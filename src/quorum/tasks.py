@@ -72,6 +72,17 @@ class Task(BaseModel):
     # The herdr pane hosting the session, when it runs inside herdr: enables
     # pane-status observation and the nudge doorbell (herdr.py).
     herdr_pane: str | None = None
+    # True: this task is not expected to finish. It works in cycles — watch,
+    # tidy, poll, groom — and only the user ends it. Quorum enforces nothing
+    # (status stays free-form and TERMINAL_STATUSES still means what it
+    # means); the flag is *observation context*, and it changes three
+    # readings of the same substrate: the run preamble softens the
+    # deliver-then-report-done conventions into deliver-every-cycle, the
+    # digest renders `perpetual=true` and suppresses the `possible-loop`
+    # observation (repetition is the job, not a symptom), and the manager
+    # prompt is told to relaunch it forever and never call a long run count
+    # stuck. See docs/architecture.md ("Perpetual tasks").
+    perpetual: bool = False
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -161,6 +172,7 @@ class TaskStore:
         session: str | None = None,
         attached: bool = False,
         status: str = "queued",
+        perpetual: bool = False,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -174,6 +186,7 @@ class TaskStore:
             session=session,
             attached=attached,
             status=status,
+            perpetual=perpetual,
             created_at=created,
             updated_at=created,
         )

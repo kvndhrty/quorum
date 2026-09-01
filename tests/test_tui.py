@@ -108,3 +108,17 @@ def test_nudge_lands_in_the_selected_tasks_inbox(home: Path):
         assert MessageBus(home).pending(inbox_name(ids[0]))
 
     drive(home, script)
+
+
+def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
+    """`∞` is how "40 runs and counting" reads as working rather than stuck."""
+    store = TaskStore(home)
+    store.add("proj-a", "watch CI", "fake", perpetual=True)
+    store.add("proj-a", "one-off", "fake")
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
+        assert statuses[0].endswith("∞") and "∞" not in statuses[1]
+
+    drive(home, script)

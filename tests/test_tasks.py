@@ -620,3 +620,43 @@ def test_task_rows_surface_git_state_but_skip_settled_tasks(home: Path, tmp_path
     old = fsio.utc_now() - timedelta(hours=views.GIT_PROBE_TERMINAL_HOURS + 1)
     store.update(task.id, now=old, status="done")
     assert views.task_rows(home)[0]["git"] is None
+
+
+# -- perpetual tasks (#12) ---------------------------------------------------
+
+
+def test_a_perpetual_run_gets_the_softened_delivery_conventions(
+    home: Path, project: str
+):
+    """The preamble's "commit, push, report done" becomes "deliver every
+    cycle, never report done" — and an ordinary task sees none of it."""
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    forever = store.add(project, "watch the build", "fake", perpetual=True)
+    ordinary = store.add(project, "fix the docs", "fake")
+
+    assert run_task(home, config, forever.id) == 0
+    assert run_task(home, config, ordinary.id) == 0
+
+    cycling = transcript_text(home, forever.id)
+    assert "This is a PERPETUAL task" in cycling
+    assert "Never report `done` or `cancelled`" in cycling
+    assert "--status cycle-3" in cycling
+    # the placeholder is always substituted (the preamble's comment header
+    # still *documents* it, as it does {task_id} — hence the line anchor)
+    assert "PROMPT| {perpetual}" not in cycling
+
+    once = transcript_text(home, ordinary.id)
+    assert "PERPETUAL" not in once and "PROMPT| {perpetual}" not in once
+    # the ordinary delivery protocol survives in both
+    assert "git push -u origin HEAD" in cycling and "git push -u origin HEAD" in once
+
+
+def test_perpetual_survives_a_round_trip_and_defaults_off(home: Path):
+    store = TaskStore(home)
+    assert store.add("proj", "ordinary", "fake").perpetual is False
+    forever = store.add("proj", "forever", "fake", perpetual=True)
+    assert store.get(forever.id).perpetual is True
+    # nothing about it changes what quorum treats as terminal
+    assert store.update(forever.id, status="cycle-2").status not in tasks.TERMINAL_STATUSES
