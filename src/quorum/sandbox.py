@@ -68,6 +68,27 @@ def _import_nono():
         ) from e
 
 
+def availability() -> tuple[bool, str]:
+    """Whether a nono sandbox could actually be applied here, and why not.
+
+    The read-only counterpart to `_import_nono` for `quorum doctor`: this
+    module stays the only one that imports nono-py, so a diagnostic must be
+    able to ask "configured, but would it work?" without failing closed the
+    way a real run does. Returns (available, one-line detail).
+    """
+    try:
+        nono_py = _import_nono()
+    except SandboxUnavailable as e:
+        return False, str(e)
+    try:
+        if nono_py.is_supported():
+            return True, "nono-py installed, kernel support present"
+        info = nono_py.support_info()
+        return False, f"this platform is unsupported: {getattr(info, 'details', info)}"
+    except Exception as e:
+        return False, f"nono-py could not report platform support: {e}"
+
+
 def _add_system_reads(nono_py, caps) -> None:
     """Layer nono's own baseline of system read paths onto `caps`.
 

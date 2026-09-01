@@ -24,7 +24,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from . import fsio
+from . import fsio, installed_version
 from .agent import Agent, AgentContext, tick_lock_path, write_heartbeat
 from .config import Config, parse_schedule
 from .messages import MessageBus
@@ -76,7 +76,13 @@ class Supervisor:
     def run(self) -> None:
         """Blocking foreground run until SIGINT/SIGTERM."""
         _setup_logging(self.home)
-        fsio.acquire_pid_lock(self.lock_path, meta={"role": "supervisor"})
+        # The version goes on the lock so `quorum doctor` can say "you
+        # upgraded but never restarted" — the running process keeps executing
+        # the code it started with, and nothing else records which that was.
+        fsio.acquire_pid_lock(
+            self.lock_path,
+            meta={"role": "supervisor", "version": installed_version()},
+        )
         try:
             for name, agent in self.agents.items():
                 self._schedule_agent(name, agent)

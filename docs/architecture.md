@@ -45,6 +45,7 @@ manager ──(its harness runs `quorum task run --detach`)──► detached ru
                                └─ harness subprocess (stdout → transcript.jsonl)
 
 quorum web / quorum tui / quorum status ──► pure readers of QUORUM_HOME
+quorum doctor ──────────────────────────► pure reader + one opt-in probe (--smoke)
 ```
 
 Two process shapes on purpose. Agent ticks are short, synchronous, and
@@ -66,7 +67,8 @@ config.toml                       user-owned; quorum never rewrites it
 agents/<name>.toml                file-defined agents (the one config location
                                   quorum may write: `agent create` and the web
                                   dashboard; merges over [agents.*], file wins)
-supervisor.lock                   pid + start time; mtime = liveness heartbeat
+supervisor.lock                   pid + start time + the version of quorum that
+                                  started it; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
@@ -665,6 +667,51 @@ binary in mode 1.
 The asymmetry is the design: a sandboxed quorum can *see* the machine, but
 the only durable marks it can leave are `QUORUM_HOME`, the worktrees, and
 the grants you added explicitly.
+
+## Diagnostics: `quorum doctor`
+
+`doctor.py` is the counterweight to how much of quorum fails soft. Every
+degradation elsewhere in this document is deliberate — an unreadable
+config.toml disables the optional probes rather than killing a tick, an
+unauthenticated `gh` yields `None`, a stale seed in `prompts/` keeps
+rendering, a crashed run leaves a `runner.lock` nobody trips over — and each
+one is invisible by construction. Doctor is the single place that goes and
+looks.
+
+Three rails, and they are the whole design:
+
+1. **Diagnose, never repair.** Each line names its own fix (a config key, a
+   shell command); nothing in the module writes to QUORUM_HOME. `--fix` is
+   not a planned feature — an autofix would have to guess which of two
+   defensible states the user wanted.
+2. **A pure reader plus exactly one opt-in probe.** The static checks are
+   file reads and `shutil.which`, in the same family as `views.py`. The
+   exception is `--smoke`, which runs a harness for real, in a
+   `TemporaryDirectory`, through the runner's own `build_harness_argv` /
+   `guidance_pump` / `stream_transcript` — including `inject` stdin
+   delivery — and asserts a `result` event and a captured session id inside
+   a short timeout. It reuses the runner's code rather than a simplified
+   copy because a copy would drift away from the very bug it exists to
+   catch (#24: a stream-json CLI ignoring an argv prompt, so every run hung
+   until it timed out). Its guidance pump is pointed at the scratch
+   directory, so the probe creates no inbox and writes nothing to the home.
+3. **Three states, no fourth.** `ok` / `problem` / `na` (✓ / ✗ / –), where
+   `na` covers "you turned this off" and "there is nothing configured to
+   check". Only `problem` sets a non-zero exit, which is what makes
+   `quorum doctor --json` usable in a script and keeps a `–` from training
+   anyone to ignore the output.
+
+One small function per check, each taking only what it needs (a `Config`, a
+`HarnessConfig`, a home path), so every check has both a passing and a
+failing test. `check_config` is the one caller in the codebase that uses
+strict `load_config` on purpose: everywhere else papers a broken file over
+with defaults so work can continue, and this is where the user finally
+hears about it.
+
+Two things elsewhere exist to feed it: `supervisor.lock` records the version
+of quorum that started the process (so "you upgraded but never restarted" is
+a line rather than a memory), and `home.classify_prompts` is the read-only
+half of the seeding logic `quorum init` acts on.
 
 ## Testing strategy
 

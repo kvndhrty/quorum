@@ -154,39 +154,78 @@ def scaffold(home: Path) -> tuple[bool, dict[str, str]]:
     return fresh, _seed_prompts(home)
 
 
-def _seed_prompts(home: Path) -> dict[str, str]:
-    """Seed packaged prompt templates into prompts/ and upgrade stale seeds.
+def packaged_prompts() -> dict[str, str]:
+    """The packaged default prompt templates, {filename: text}.
 
-    A missing file is seeded. An existing file is replaced only when its
-    content matches a previously shipped default (`SUPERSEDED_PROMPT_HASHES`)
-    — i.e. the user never edited it. An edited file is never touched; when
-    the packaged default has moved on it is reported as "edited" so the CLI
-    can tell the user. Returns {filename: "seeded" | "upgraded" | "edited"}
-    covering only files that changed or need attention.
+    Empty when the package's default_prompts/ cannot be read at all — every
+    caller treats that as "nothing to say", never as "everything is stale".
     """
     from importlib import resources
 
-    target = home / "prompts"
-    outcomes: dict[str, str] = {}
     try:
         defaults = resources.files("quorum") / "default_prompts"
         entries = [e for e in defaults.iterdir() if e.name.endswith(".md")]  # type: ignore[attr-defined]
     except (FileNotFoundError, ModuleNotFoundError):
-        return outcomes
-    for entry in entries:
-        current = entry.read_text(encoding="utf-8")
-        dest = target / entry.name
-        if not dest.is_file():
+        return {}
+    return {e.name: e.read_text(encoding="utf-8") for e in entries}
+
+
+def classify_prompt(existing: str | None, current: str, filename: str) -> str:
+    """One home prompt copy against the packaged default.
+
+    "missing" (nothing seeded), "default" (identical to what ships now),
+    "upgradable" (a pristine seed from an older quorum — recognized by hash,
+    so `quorum init` may safely replace it) or "edited" (anything else: the
+    user's own words, over a default that has since moved on).
+    """
+    if existing is None:
+        return "missing"
+    if existing == current:
+        return "default"
+    digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()
+    if digest in SUPERSEDED_PROMPT_HASHES.get(filename, set()):
+        return "upgradable"
+    return "edited"
+
+
+def classify_prompts(home: Path) -> dict[str, str]:
+    """`classify_prompt` for every packaged default — the read-only view of
+    prompt staleness `quorum doctor` reports and `_seed_prompts` acts on."""
+    target = Path(home) / "prompts"
+    states = {}
+    for filename, current in packaged_prompts().items():
+        dest = target / filename
+        try:
+            existing = dest.read_text(encoding="utf-8") if dest.is_file() else None
+        except OSError:
+            existing = None
+        states[filename] = classify_prompt(existing, current, filename)
+    return states
+
+
+def _seed_prompts(home: Path) -> dict[str, str]:
+    """Seed packaged prompt templates into prompts/ and upgrade stale seeds.
+
+    A missing file is seeded. An existing file is replaced only when it is a
+    pristine seed from an older quorum (`classify_prompts` → "upgradable").
+    An edited file is never touched; when the packaged default has moved on
+    it is reported as "edited" so the CLI can tell the user. Returns
+    {filename: "seeded" | "upgraded" | "edited"} covering only files that
+    changed or need attention.
+    """
+    target = home / "prompts"
+    outcomes: dict[str, str] = {}
+    states = classify_prompts(home)
+    for filename, current in packaged_prompts().items():
+        state = states.get(filename)
+        dest = target / filename
+        if state == "missing":
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(current, encoding="utf-8")
-            outcomes[entry.name] = "seeded"
-            continue
-        existing = dest.read_text(encoding="utf-8")
-        if existing == current:
-            continue
-        digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()
-        if digest in SUPERSEDED_PROMPT_HASHES.get(entry.name, set()):
+            outcomes[filename] = "seeded"
+        elif state == "upgradable":
             fsio.atomic_write_text(dest, current)
-            outcomes[entry.name] = "upgraded"
-        else:
-            outcomes[entry.name] = "edited"
+            outcomes[filename] = "upgraded"
+        elif state == "edited":
+            outcomes[filename] = "edited"
     return outcomes

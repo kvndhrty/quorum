@@ -61,6 +61,11 @@ and set `default_harness`. (Runs are unattended, so the harness needs
 permission to act without asking; the shipped blocks use a scoped tool
 allowlist, not a blanket bypass.)
 
+`quorum doctor` checks that config against reality — the binary on PATH, the
+argv template, git, projects, the state left behind by earlier runs — one
+line per check, `✓ / ✗ / –`, and a non-zero exit if anything is `✗`. Add
+`--smoke` and it runs your harness once for real to prove it answers.
+
 Register a repo and queue work:
 
 ```bash

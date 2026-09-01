@@ -232,6 +232,19 @@ and `docs/architecture.md` in the same commit so the record stays true.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
   `timeout_seconds`).
+- `doctor.py` — `quorum doctor`: the one place that looks at everything that
+  fails soft (config, `[harness.*]` binaries/templates, git, projects, gh
+  auth, herdr, nono, prompt staleness, supervisor lock + version, orphaned
+  runner.locks, stale `cur/` claims, agent failure streaks). One small
+  function per check returning `Check(name, status, summary, fix)` in three
+  states — `ok`/`problem`/`na` (✓/✗/–), only `problem` exits non-zero — so
+  each has a passing and a failing test. It **diagnoses and never repairs**
+  (every ✗ names its fix; no `--fix`), and is a pure reader apart from the
+  opt-in `--smoke [harness]` probe, which runs a harness for real in a
+  `TemporaryDirectory` through the runner's own argv/pump/transcript code
+  (inject included) and asserts a `result` event plus a session id — the
+  check that would have caught the stream-json hang (#24). `check_config` is
+  the codebase's one deliberate strict `load_config` caller.
 - `config.py` — one place to load config: `load_config` raises,
   `try_load_config` returns None for missing/malformed (what the fail-soft
   probes use, so an unreadable config means their feature is **off** — never

@@ -517,7 +517,11 @@ def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
     assert "default_harness is unset" in r.output
 
     cfg = home / "config.toml"
-    cfg.write_text(cfg.read_text().replace('default_harness = ""', 'default_harness = "fake"'))
+    text = cfg.read_text().replace('default_harness = ""', 'default_harness = "fake"')
+    # The CI probe is on by default and the machine running these tests may
+    # well have a gh that is installed but unauthenticated — which doctor is
+    # right to call a problem, and which has nothing to do with this test.
+    cfg.write_text(text.replace("[ci]\nenabled = true", "[ci]\nenabled = false"))
     r = runner.invoke(app, ["doctor", "--home", str(home)])
     assert r.exit_code == 0, r.output
     assert "all checks passed" in r.output
