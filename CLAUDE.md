@@ -254,6 +254,13 @@ and `docs/architecture.md` in the same commit so the record stays true.
   init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
   change a file in `default_prompts/`, append the replaced version's sha256 to
   `home.py::SUPERSEDED_PROMPT_HASHES`** (`git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256`).
+  `prompts/<name>.local.md` is the *overlay* (#37): user-owned, never seeded,
+  never touched by `init`, merged by `render` at the template's first unescaped
+  `{local}` slot (packaged `manager.md` and `task-preamble.md` carry one) or
+  prepended when there is none; absent/blank renders to nothing (the slot's own
+  line goes with it). It exists so adding house policy does not fork the whole
+  template and strand the home on an old default — a rewritten `<name>.md` still
+  wins. `quorum prompt list|diff <name>` shows home-copy-vs-packaged-default.
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
   true. Not a builtin; users copy it into `plugins/`.

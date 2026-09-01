@@ -80,6 +80,9 @@ tasks/<id>/runner.log             detached-run bootstrap output
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
 prompts/<name>.md                 user-editable prompt templates (re-running
                                   `quorum init` upgrades never-edited seeds)
+prompts/<name>.local.md           per-prompt overlay: user-owned, never
+                                  seeded, merged at the template's {local}
+                                  slot (else prepended) — see "Prompts"
 messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
@@ -94,6 +97,45 @@ state/manager/usage.jsonl         one line per manager harness run: what it
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
+
+## Prompts
+
+`quorum.prompts` resolves a template name three ways, in order: the home
+copy `prompts/<name>.md`, else the packaged `default_prompts/<name>.md`,
+else `KeyError`. Rendering is `str.format_map` over a missing-key-preserving
+dict, so a template may contain braces quorum knows nothing about
+(`{{escaped}}` documentation in the header comments, JSON shapes in
+examples) without any escaping discipline at the call sites.
+
+`quorum init` seeds the packaged defaults and, on re-run, upgrades any copy
+whose sha256 is in `home.SUPERSEDED_PROMPT_HASHES` — i.e. a pristine seed
+from an older quorum. Anything else is a user edit and is never touched.
+That rule has a cliff: the first edit to `<name>.md`, however small, opts
+the home out of every future upgrade to that prompt, silently. A home that
+prepended five lines of house policy to `manager.md` kept running the
+manager prompt from the release it edited, with no policy for any digest
+observation added since.
+
+The **overlay** removes the reason to take the cliff. `prompts/<name>.local.md`
+is user-owned, never seeded, never read by `init`, never upgraded. `render`
+merges it into the resolved template:
+
+- at the first unescaped `{local}` slot, which the packaged `manager.md`
+  (before "How to work", so house rules outrank the general guidance) and
+  `task-preamble.md` (after the delivery protocol) carry — `{{local}}` in a
+  header comment is documentation, not a slot;
+- prepended, when the template has no slot — the case of a home that
+  rewrote `<name>.md` before the slot existed, where a silently dropped
+  overlay would be the worse failure;
+- as nothing at all when the overlay is absent or blank, taking the slot's
+  own line with it so an unused slot leaves no hole.
+
+`local` is otherwise an ordinary placeholder key: pass it explicitly and it
+wins over the file. Overriding a whole template by rewriting `<name>.md`
+keeps working exactly as before — the overlay is a second, cheaper lever,
+not a replacement. `quorum prompt list` and `quorum prompt diff <name>`
+(home copy vs packaged default) make the state of both levers visible, and
+`init`'s `edited` line points at them.
 
 ## Tasks and the runner
 

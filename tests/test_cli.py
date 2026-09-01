@@ -361,6 +361,61 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     assert "keeping your edits" in result.output
 
 
+def test_init_points_an_edited_prompt_at_the_overlay(tmp_path: Path):
+    """An `edited` prompt is a home that stopped receiving upgrades; init has
+    to say what to do about it, not just that it happened (#37)."""
+    from quorum import home as home_mod
+
+    target = tmp_path / "qhome"
+    home_mod.scaffold(target)
+    (target / "prompts" / "manager.md").write_text("my custom manager policy\n")
+
+    result = runner.invoke(app, ["init", "--home", str(target)])
+    assert result.exit_code == 0
+    out = _plain(result.output)
+    assert "quorum prompt diff manager" in out
+    assert "prompts/manager.local.md" in out
+    assert "{local}" in out
+
+
+def test_prompt_diff_and_list_show_home_vs_packaged(home: Path):
+    r = runner.invoke(app, ["prompt", "diff", "manager"])
+    assert r.exit_code == 0
+    assert "identical to the packaged default" in r.output
+
+    (home / "prompts" / "manager.md").write_text("my custom manager policy\n")
+    (home / "prompts" / "manager.local.md").write_text("one task at a time\n")
+    r = runner.invoke(app, ["prompt", "diff", "manager.md"])  # .md tolerated
+    assert r.exit_code == 0
+    out = _plain(r.output)
+    assert "-You are the manager of a quorum home" in out  # what you are missing
+    assert "+my custom manager policy" in out
+    assert "delete prompts/manager.md" in out
+
+    r = runner.invoke(app, ["prompt", "list"])
+    assert r.exit_code == 0
+    out = _plain(r.output)
+    assert "manager" in out and "edited" in out
+    assert "manager.local.md (prepended)" in out  # the edit has no {local} slot
+    assert "task-preamble" in out and "matches the packaged default" in out
+    # an overlay is not a template of its own
+    assert not any(line.split()[:1] == ["manager.local"] for line in out.splitlines())
+
+    # a misspelled overlay is dead policy nobody would ever notice
+    (home / "prompts" / "manger.local.md").write_text("oops\n")
+    r = runner.invoke(app, ["prompt", "list"])
+    assert r.exit_code == 0
+    assert "manger.local.md: no prompt named 'manger'" in _plain(r.output)
+
+    # a template quorum does not package has nothing to diff against
+    r = runner.invoke(app, ["prompt", "diff", "nope"])
+    assert r.exit_code == 1 and "packages no default prompt" in _plain(r.output)
+
+    (home / "prompts" / "manager.md").unlink()
+    r = runner.invoke(app, ["prompt", "diff", "manager"])
+    assert r.exit_code == 0 and "packaged default unchanged" in r.output
+
+
 def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     """The babysitter example ships as a packaged prompt; creating an agent
     over it must not require pasting the prompt back in."""

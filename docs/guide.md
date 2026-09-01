@@ -10,6 +10,7 @@ writing your own agents. (Internals and design rationale live in
 - [Harnesses](#harnesses)
 - [Tasks](#tasks)
 - [The manager](#the-manager)
+- [Prompt customization](#prompt-customization)
 - [Guiding tasks](#guiding-tasks)
 - [Dashboards](#dashboards)
 - [Controlling agents at runtime](#controlling-agents-at-runtime)
@@ -328,11 +329,9 @@ when there is something to manage), the manager compiles a **digest**:
 It then runs your harness over that digest with `prompts/manager.md` — and
 that prompt file *is* the supervision policy. Edit it to change how your
 manager behaves: how patient it is, when it escalates, how it words its
-pokes. Delete it to restore the default. Both prompt files are seeded by
-`quorum init`; after upgrading quorum, re-run `quorum init` — a prompt you
-never edited is refreshed to the new packaged default, while an edited one
-is left alone (init tells you when its default has moved on so you can
-merge or delete). The manager acts through the same
+pokes. Delete it to restore the default. For a few lines of house policy,
+though, prefer the overlay: [Prompt customization](#prompt-customization)
+below. The manager acts through the same
 CLI you use — launching tasks, nudging them, cancelling them, even creating
 follow-up tasks with `task add` — and every action lands in an auditable
 journal:
@@ -361,6 +360,52 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (`auto_pause = false`), so the first tick after service returns reads the
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
+
+## Prompt customization
+
+Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
+constitution (`manager.md`), the task preamble (`task-preamble.md`), the
+perpetual block (`task-perpetual.md`), and one per prompt-driven agent.
+`quorum init` seeds them, and deleting one restores the packaged default.
+Re-run `quorum init` after upgrading quorum: a prompt you never edited is
+refreshed to the new packaged default (quorum recognizes a pristine seed by
+hash), and one you did edit is left alone.
+
+There are two ways to change one, and the difference matters:
+
+- **An overlay — `prompts/<name>.local.md`.** Yours alone: never seeded,
+  never read by `quorum init`, never upgraded. Its text is merged into the
+  template at the `{local}` slot (the packaged `manager.md` puts the slot
+  right before "How to work", so house rules land above the general
+  guidance; `task-preamble.md` puts it after the delivery protocol). A
+  template without a slot — one you rewrote yourself — gets the overlay
+  prepended instead. No overlay file, or an empty one, renders to nothing.
+- **Editing `<name>.md` itself.** Still supported, still wins outright. But
+  an edited file is *yours* from then on: `quorum init` will never upgrade
+  it, so every later improvement to the packaged default stops reaching this
+  home. Init says so, and `quorum prompt diff <name>` shows you exactly what
+  you are missing.
+
+House rules ("run one task at a time", "always open draft PRs") belong in an
+overlay. Rewriting how supervision fundamentally works belongs in the file.
+
+```bash
+quorum prompt list                # each template: default, seeded, or edited (+ overlay)
+quorum prompt diff manager        # your copy vs the packaged default
+```
+
+**Migrating a home that already edited a prompt** — one step, and it is
+worth doing, because an edited `manager.md` from a few releases ago has no
+policy for whatever the digest has learned to report since:
+
+```bash
+quorum prompt diff manager                      # see what the upgrade brings
+$EDITOR ~/.quorum/prompts/manager.local.md      # paste ONLY your own lines here
+rm ~/.quorum/prompts/manager.md && quorum init  # take the current default back
+```
+
+After that, `quorum init` keeps `manager.md` current forever and your
+`manager.local.md` rides on top of every future version of it.
 
 ## Guiding tasks
 
@@ -798,6 +843,7 @@ def test_milestone(tmp_path):
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)
   messages/archive/YYYY-MM.jsonl.gz compacted history
   prompts/*.md                      editable prompt templates (incl. manager.md)
+  prompts/*.local.md                your overlays: house policy init never touches
   state/agents/<name>/              heartbeats + private agent state
   state/manager/journal.jsonl       the manager's auto-recorded actions
   state/manager/transcript.jsonl    the manager harness's own output

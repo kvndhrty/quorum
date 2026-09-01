@@ -684,3 +684,25 @@ def test_a_perpetual_run_survives_an_edited_preamble_without_the_placeholder(
     cycling = transcript_text(home, forever.id)
     assert "This is a PERPETUAL task" in cycling
     assert "Never report `done` or `cancelled`" in cycling
+
+
+# -- prompt overlay (#37) ----------------------------------------------------
+
+
+def test_a_task_run_picks_up_the_preamble_overlay(home: Path, project: str):
+    """House conventions belong in prompts/task-preamble.local.md — an
+    overlay `quorum init` never seeds and never upgrades over — so the
+    packaged preamble stays upgradable in a home that has policy."""
+    harness_config(home)
+    (home / "prompts" / "task-preamble.local.md").write_text(
+        "Conventions in this home: always open DRAFT pull requests.\n"
+    )
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "always open DRAFT pull requests" in text
+    assert "git push -u origin HEAD" in text  # the packaged preamble, unforked
+    assert "PROMPT| {local}" not in text
