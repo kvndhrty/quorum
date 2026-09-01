@@ -10,6 +10,13 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 ## [Unreleased]
 
 ### Added
+- TUI write affordances beyond the nudge: `m` sends the manager a directive
+  (`quorum manager tell`), `s` starts a detached run (refused on an attached
+  task or a live runner), `c` cancels a task behind a yes/no confirmation.
+  All four act on the *highlighted* row while the task table has focus —
+  `enter` opens a transcript, it does not arm the write keys — and all four
+  report an unwritable home as a notification rather than crashing the
+  dashboard. (#11, #44)
 - First-class perpetual tasks: `quorum task add --perpetual` marks work that
   is not meant to finish. The preamble's `{perpetual}` block (new packaged
   `task-perpetual.md`, appended even on homes with an edited preamble)

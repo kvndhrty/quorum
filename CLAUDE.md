@@ -189,12 +189,17 @@ so the record stays true.
   web app, and the TUI all read it and nothing else. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/store/config calls shared with
-  the CLI — never view-local write logic: the TUI's are nudge (`n`), manager
-  directive (`m`, the `manager` inbox, same as `quorum manager tell`), run (`s`,
-  `runner.launch_detached`, refused on an attached task or a live runner) and
-  cancel (`c`, a `cancelled` status update, the one destructive binding so it
-  confirms through `ConfirmScreen`); the web adds board posts, project edits, agent
-  create (via `config.create_agent`) and pause/resume/run-now/reload.
+  the CLI — never view-local write logic. The two surfaces overlap only on nudge;
+  neither is a superset of the other. **TUI**: nudge (`n`), manager directive (`m`,
+  the `manager` inbox, same as `quorum manager tell`), run (`s`,
+  `runner.launch_detached`, refused on an attached task or a live runner) and cancel
+  (`c`, a `cancelled` status update, the one destructive binding so it confirms
+  through `ConfirmScreen`) — all four target the *highlighted* row while the task
+  table has focus (`enter` opens a transcript, it does not arm the write keys),
+  falling back to the open task, and all four go through `_write`, so an unwritable
+  home notifies instead of taking the dashboard down. **Web**: nudge, board posts,
+  project edits, and agent create (via `config.create_agent`) /
+  pause / resume / run-now / reload.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`

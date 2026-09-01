@@ -1,10 +1,16 @@
 """Terminal dashboard (Textual). A file reader of QUORUM_HOME, refreshed on a
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
-web dashboard make: `n` sends guidance into the selected task's inbox, `m`
-sends a directive to the manager's inbox (`quorum manager tell`), `s` launches
-a detached run, and `c` cancels a task — the one destructive binding, so it
-confirms first."""
+web dashboard make: `n` sends guidance into a task's inbox, `m` sends a
+directive to the manager's inbox (`quorum manager tell`), `s` launches a
+detached run, and `c` cancels a task — the one destructive binding, so it
+confirms first.
+
+Two rules hold for all four. They act on the row the reader is *looking at* —
+the highlighted row while the task table has focus, the open task while
+reading its detail (`enter` opens a transcript; it does not arm the write
+keys) — and they all go through `_write`, because a keystroke on a dashboard
+must never take the dashboard down when QUORUM_HOME turns unwritable."""
 
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
@@ -43,6 +50,9 @@ TASK_STATUS_STYLE = {
     "blocked": "red",
     "cancelled": "dim",
 }
+
+#: what `_write` returns when the write raised instead of happening
+FAILED = object()
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -102,6 +112,8 @@ class QuorumTUI(App):
         self.selected_task: str | None = None
         # which inbox the shared input box writes to: "task" or "manager"
         self._input_target = "task"
+        # the task a "task" nudge is aimed at, pinned when the box was opened
+        self._input_task: str | None = None
         self._log_lines: list[str] | None = None  # last rendered log content
 
     def compose(self) -> ComposeResult:
@@ -147,10 +159,13 @@ class QuorumTUI(App):
         self.refresh_data()
 
     def action_nudge(self) -> None:
-        if self.selected_task is None:
-            self.notify("select a task first", severity="warning")
+        task = self._target_task()
+        if task is None:
             return
-        self._open_input("task", "guidance for the selected task — enter sends, esc cancels")
+        # pin the target now: the box takes focus, so "the row I was looking
+        # at when I pressed n" is the only answer that stays true at submit
+        self._input_task = task.id
+        self._open_input("task", f"guidance for {task.short_id} — enter sends, esc cancels")
 
     def action_directive(self) -> None:
         """`quorum manager tell`, from the dashboard: the manager's next run
@@ -158,7 +173,7 @@ class QuorumTUI(App):
         self._open_input("manager", "directive for the manager — enter sends, esc cancels")
 
     def action_run_task(self) -> None:
-        task = self._selected_task()
+        task = self._target_task()
         if task is None:
             return
         if task.attached:
@@ -172,16 +187,14 @@ class QuorumTUI(App):
             return
         from ..runner import launch_detached
 
-        try:
-            pid = launch_detached(self.home, task.id)
-        except OSError as e:  # a dashboard keystroke must never take the app down
-            self.notify(f"could not start run: {e}", severity="error")
+        pid = self._write("start the run", lambda: launch_detached(self.home, task.id))
+        if pid is FAILED:
             return
         self.notify(f"run started for {task.short_id} (pid {pid})")
         self.refresh_data()
 
     def action_cancel_task(self) -> None:
-        task = self._selected_task()
+        task = self._target_task()
         if task is None:
             return
         question = f"cancel task {task.short_id} ({task.status})?"
@@ -191,7 +204,12 @@ class QuorumTUI(App):
         def cancel(confirmed: bool | None) -> None:
             if not confirmed:
                 return
-            TaskStore(self.home).update(task.id, status="cancelled")
+            done = self._write(
+                f"cancel {task.short_id}",
+                lambda: TaskStore(self.home).update(task.id, status="cancelled"),
+            )
+            if done is FAILED:
+                return
             self.notify(f"task {task.short_id} cancelled")
             self.refresh_data()
 
@@ -200,22 +218,44 @@ class QuorumTUI(App):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         target = self._input_target
+        task_id = self._input_task
         self._close_input()
         if not text:
             return
         if target == "manager":
-            MessageBus(self.home).send("user", "manager", type="directive", text=text)
+            sent = self._write(
+                "queue the directive",
+                lambda: MessageBus(self.home).send("user", "manager", type="directive", text=text),
+            )
+            if sent is FAILED:
+                return
             self.notify("directive queued for the manager's next run")
             self.refresh_data()
             return
-        task = self._selected_task()
+        task = TaskStore(self.home).get(task_id) if task_id else None
         if task is None:
+            self.notify("that task is gone", severity="warning")
             return
-        nudge(self.home, task, text, sender="user")
+        sent = self._write(
+            f"nudge {task.short_id}", lambda: nudge(self.home, task, text, sender="user")
+        )
+        if sent is FAILED:
+            return
         self.notify(f"guidance queued for {task.short_id}")
         self.refresh_data()
 
     # -- write-affordance helpers -------------------------------------------
+
+    def _write(self, what: str, do):
+        """Run one write, or say why it did not happen. Every affordance goes
+        through here: QUORUM_HOME can be read-only, full, or on a dead mount,
+        and a dashboard that dies at the keystroke is the worst moment to lose
+        the view of what is going on."""
+        try:
+            return do()
+        except OSError as e:
+            self.notify(f"could not {what}: {e}", severity="error")
+            return FAILED
 
     def _open_input(self, target: str, placeholder: str) -> None:
         box = self.query_one("#nudge", Input)
@@ -230,11 +270,31 @@ class QuorumTUI(App):
         box.display = False
         self.query_one("#tasks", DataTable).focus()
 
-    def _selected_task(self) -> Task | None:
-        if self.selected_task is None:
-            self.notify("select a task first (enter on a row)", severity="warning")
+    def _highlighted_task(self) -> str | None:
+        """The task id under the table cursor, or None when the table is not
+        the focused widget (the reader is in the input box or a modal)."""
+        try:
+            table = self.query_one("#tasks", DataTable)
+        except NoMatches:
             return None
-        task = TaskStore(self.home).get(self.selected_task)
+        if self.focused is not table or not table.row_count:
+            return None
+        row = Coordinate(table.cursor_row, 0)
+        if not table.is_valid_coordinate(row):
+            return None  # cursor briefly past the end of a shrinking table
+        key = table.coordinate_to_cell_key(row).row_key
+        return key.value
+
+    def _target_task(self) -> Task | None:
+        """Which task a write acts on: the highlighted row while the table has
+        focus — what the reader is pointing at — falling back to the open task
+        when they are down in its detail. `enter` opens a transcript; it must
+        not quietly become the target of every later keystroke."""
+        task_id = self._highlighted_task() or self.selected_task
+        if task_id is None:
+            self.notify("no task to act on", severity="warning")
+            return None
+        task = TaskStore(self.home).get(task_id)
         if task is None:
             self.notify("that task is gone", severity="warning")
         return task
@@ -354,7 +414,8 @@ class QuorumTUI(App):
         else:
             mode.update(
                 "board — recent messages   "
-                "(enter on a task: transcript · m: tell manager · ⚭ attached · ▶ running)"
+                "(enter on a task: transcript · n/s/c act on the highlighted row · "
+                "m: tell manager · ⚭ attached · ▶ running)"
             )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"

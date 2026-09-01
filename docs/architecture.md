@@ -623,6 +623,14 @@ write logic that lives in a view:
   the runner's own substrate rails; `c` is the one destructive binding, so
   it goes through a yes/no `ConfirmScreen` and, like `quorum task cancel`
   without `--kill`, marks the status without signalling a live runner.
+  All four resolve their target the same way (`_target_task`): the
+  *highlighted* row while the task table has focus, falling back to the open
+  task when the reader is down in its detail. `enter` opens a transcript for
+  reading and nothing more — a selection made once must not silently become
+  the target of every later keystroke. And all four run through `_write`,
+  which turns an `OSError` into an error notification: an unwritable
+  QUORUM_HOME is exactly when a reader needs the dashboard most, so no
+  keystroke may take it down.
 - **Web** (`web/app.py`): the same task nudge, plus board posts, project
   deadline/notes edits, agent create and pause/resume/run-now/reload.
 

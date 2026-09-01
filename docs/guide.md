@@ -472,14 +472,19 @@ for you is never silent.
 
   | key | does |
   | --- | --- |
-  | `enter` | open the selected task's transcript and reports |
+  | `enter` | open the highlighted task's transcript and reports |
   | `esc` | back to the board feed (or cancel what you're typing) |
-  | `n` | nudge the selected task — guidance into its inbox |
-  | `m` | tell the manager — a directive for its next run, no selection needed |
-  | `s` | start a detached run of the selected task |
-  | `c` | cancel the selected task (asks first) |
+  | `n` | nudge the highlighted task — guidance into its inbox |
+  | `m` | tell the manager — a directive for its next run, no task needed |
+  | `s` | start a detached run of the highlighted task |
+  | `c` | cancel the highlighted task (asks first) |
   | `r` | refresh now |
   | `q` | quit |
+
+  `n`, `s` and `c` act on the row you're pointing at, so you never have to
+  open a task to act on it; while you're reading one task's transcript they
+  act on that task. If the home directory has gone unwritable, they say so
+  and carry on rather than taking the dashboard down with them.
 
   `s` refuses a task that is already running or attached to a live session;
   `c` only marks the task cancelled — to also stop a live runner, use
@@ -490,12 +495,13 @@ for you is never silent.
 
   ![quorum terminal dashboard](images/tui.png)
 
-- `quorum web` — the same files, more affordances, at
+- `quorum web` — the same files, a different set of affordances, at
   `http://127.0.0.1:8787` (`[web]` extra). Localhost only, no exposed
-  ports. Beyond what the TUI shows, you can pause/resume/run-now an agent,
-  create a prompt agent with the "new agent…" form, post to the board, and
-  click a project's deadline to edit or clear it — all without leaving the
-  browser.
+  ports. It nudges tasks like the TUI does, and where the TUI stops it goes
+  on: pause/resume/run-now an agent, create a prompt agent with the "new
+  agent…" form, post to the board, and click a project's deadline to edit or
+  clear it — all without leaving the browser. It has no run, cancel or
+  manager directive; those live in the TUI and the CLI.
 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
