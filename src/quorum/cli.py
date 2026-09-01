@@ -13,6 +13,7 @@ from pathlib import Path
 
 import typer
 
+from . import doctor as doctor_mod
 from . import fsio, usage
 from . import home as home_mod
 from . import prompts as prompts_mod
@@ -427,85 +428,56 @@ def down(home: Path | None = _HOME_OPT) -> None:
 
 
 @app.command()
-def doctor(home: Path | None = _HOME_OPT) -> None:
-    """Check the setup end to end: config, harnesses, projects, supervisor.
+def doctor(
+    harness: str = typer.Argument(
+        "",
+        metavar="[HARNESS]",
+        help="Which harness --smoke runs (default: the configured default harness). "
+        "Naming one implies --smoke.",
+    ),
+    home: Path | None = _HOME_OPT,
+    json_out: bool = typer.Option(False, "--json", help="Emit every check as JSON, for scripts."),
+    smoke: bool = typer.Option(
+        False,
+        "--smoke",
+        help="Also run the harness once for real, through the runner's own code "
+        "(spends tokens).",
+    ),
+    smoke_timeout: float = typer.Option(
+        doctor_mod.DEFAULT_SMOKE_TIMEOUT, "--smoke-timeout", help="Seconds to give the smoke run."
+    ),
+) -> None:
+    """Check everything that fails soft: config, harnesses, projects, state.
 
-    Read-only. Every failing line names the fix; exits 1 when something
-    would keep tasks from running.
+    One line per check — ✓ ok, ✗ problem, – not applicable — and exit 1 if
+    anything is ✗. Doctor diagnoses and never repairs: every ✗ names the fix.
+    It is a pure reader apart from the opt-in `quorum doctor --smoke [HARNESS]`
+    probe, which actually runs the harness in a scratch directory.
     """
-    import shutil
-
-    from .config import ConfigError, load_config
-
-    failed = False
-
-    def ok(text: str) -> None:
-        typer.secho(f"  ✓ {text}", fg="green")
-
-    def warn(text: str) -> None:
-        typer.secho(f"  ⚠ {text}", fg="yellow")
-
-    def bad(text: str) -> None:
-        nonlocal failed
-        failed = True
-        typer.secho(f"  ✗ {text}", fg="red")
-
     target = home_mod.resolve_home(home)
-    typer.echo(f"home: {target}")
-    if not (target / home_mod.CONFIG_NAME).exists():
-        bad(f"no quorum home at {target} — run `quorum init` first")
-        raise typer.Exit(1)
-    ok("home initialized")
-
-    try:
-        config = load_config(target)
-    except ConfigError as e:
-        bad(f"config.toml does not load: {e}")
-        raise typer.Exit(1) from None
-    ok("config.toml parses")
-
-    if not config.harness:
-        bad("no [harness.<name>] table — uncomment one in config.toml (see the comments there)")
+    smoke_arg = harness if (smoke or harness) else None
+    checks = doctor_mod.run_checks(target, smoke=smoke_arg, smoke_timeout=smoke_timeout)
+    counts = doctor_mod.tally(checks)
+    if json_out:
+        typer.echo(json.dumps(doctor_mod.report(target, checks), indent=2, ensure_ascii=False))
     else:
-        for name, h in sorted(config.harness.items()):
-            exe = h.start[0] if h.start else ""
-            if exe and shutil.which(exe):
-                ok(f"harness {name!r}: {exe} on PATH")
-            else:
-                bad(f"harness {name!r}: {exe or '<empty argv>'} not found on PATH")
-    default = config.tasks.default_harness
-    if not default:
-        bad("[tasks].default_harness is unset — tasks will need an explicit --harness")
-    elif default not in config.harness:
-        bad(f"[tasks].default_harness = {default!r} names no [harness.{default}] table")
-    else:
-        ok(f"default harness: {default}")
-
-    from .projects import ProjectRegistry
-
-    projects = ProjectRegistry(target).list()
-    if not projects:
-        warn("no projects registered — `quorum project add <dir>`")
-    for p in projects:
-        pdir = Path(p.path)
-        if not pdir.is_dir():
-            bad(f"project {p.slug}: {pdir} does not exist — `quorum project remove {p.slug}` or fix the path")
-        elif not (pdir / ".git").exists():
-            warn(f"project {p.slug}: {pdir} is not a git repository — tasks there need --no-worktree")
+        typer.echo(f"home: {target}")
+        colors = {doctor_mod.OK: "green", doctor_mod.PROBLEM: "red", doctor_mod.NA: "bright_black"}
+        for check in checks:
+            typer.secho(f"  {check.glyph} {check.summary}", fg=colors[check.status])
+            if check.fix and check.status != doctor_mod.OK:
+                typer.secho(f"      → {check.fix}", fg="bright_black")
+        if counts["problems"]:
+            typer.secho(
+                f"\n{counts['problems']} problem(s) — fix the ✗ lines above", fg="red", err=True
+            )
         else:
-            ok(f"project {p.slug}: {pdir}")
-
-    from . import views
-
-    sup = views.supervisor_status(target)
-    if sup.get("alive"):
-        ok(f"supervisor running (pid {sup.get('pid')})")
-    else:
-        warn("supervisor not running — `quorum up` (or `quorum up --detach`)")
-
-    if failed:
+            typer.secho(
+                f"\nall checks passed ({counts['ok']} ok, {counts['na']} not applicable)",
+                fg="green",
+            )
+    if counts["problems"]:
         raise typer.Exit(1)
-    typer.secho("all checks passed", fg="green")
 
 
 STATUS_LEGEND = """glyphs:
@@ -568,6 +540,11 @@ def status(
             if r["error"]:
                 line += f"  [{r['error']}]"
             typer.echo(line)
+        # A failing agent is almost never a quorum bug; it is a harness, an
+        # auth token or a config that went quietly wrong, which is exactly
+        # what doctor enumerates.
+        if any(r["status"] == "error" for r in rows):
+            typer.secho("  → an agent is failing: `quorum doctor`", fg="yellow")
 
     task_rows = views.task_rows(target)
     if task_rows:

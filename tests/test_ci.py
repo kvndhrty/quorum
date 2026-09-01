@@ -152,6 +152,39 @@ def test_a_hung_gh_is_bounded_by_the_timeout(
     assert ci.pr_state(home, make_task(home, make_repo(tmp_path))) is None
 
 
+def test_auth_status_answers_yes_no_or_nothing(
+    home: Path, path_without_gh: Path, monkeypatch
+):
+    """The doctor entry point. Three answers, and the third is not a failure:
+    a gh that never replied says nothing about whether it is logged in."""
+    assert ci.auth_status(home) is None  # no gh on PATH at all
+
+    install_gh(path_without_gh, monkeypatch, mode="pr")  # exits 0
+    assert ci.auth_status(home) is True
+
+    install_gh(path_without_gh, monkeypatch, mode="unauth")
+    assert ci.auth_status(home) is False
+
+    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
+    install_gh(path_without_gh, monkeypatch, mode="hang")
+    assert ci.auth_status(home) is None  # offline is not unauthenticated
+
+
+def test_auth_status_honours_the_same_ci_switches_as_the_probe(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    log = tmp_path / "gh.log"
+    install_gh(path_without_gh, monkeypatch, log=log)
+
+    (home / "config.toml").write_text("[ci]\nenabled = false\n")
+    assert ci.auth_status(home) is None
+    assert not log.exists()  # disabled means no subprocess, exactly like pr_state
+
+    (home / "config.toml").write_text("[ci]\nenabled = false\n[harness.broken\noops")
+    assert ci.auth_status(home) is None
+    assert not log.exists()  # and an unreadable config means off, never fail-open
+
+
 def test_no_gh_no_workdir_and_disabled_config_all_stay_quiet(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from quorum import fsio, views
+from quorum import fsio, installed_version, views
 from quorum.config import Config, load_config
 from quorum.messages import MessageBus
 from quorum.registry import AgentResolutionError, resolve
@@ -104,6 +104,26 @@ def test_startup_failure_propagates_and_releases_lock(home: Path):
     with pytest.raises(Boom):
         sup.run()
     assert not (home / "supervisor.lock").exists()
+
+
+def test_supervisor_lock_records_the_running_version(home: Path):
+    """`quorum doctor` compares this against the installed version, so "you
+    upgraded but never restarted" is a line rather than a memory. Read from
+    inside startup: the lock is released again on the way out."""
+    import json
+
+    seen: dict = {}
+
+    def capture(*args, **kwargs):
+        seen.update(json.loads((home / "supervisor.lock").read_text()))
+        raise RuntimeError("stop here")
+
+    sup = Supervisor(home, write_config(home, ""))
+    sup.scheduler.add_job = capture
+    with pytest.raises(RuntimeError):
+        sup.run()
+    assert seen["version"] == installed_version()
+    assert seen["role"] == "supervisor"
 
 
 def test_dead_pid_is_not_reported_alive(home: Path):

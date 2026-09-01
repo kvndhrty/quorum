@@ -119,6 +119,43 @@ def _gh(home: Path, workdir: Path, *args: str) -> object | None:
         return None
 
 
+def auth_status(home: Path) -> bool | None:
+    """Is `gh` authenticated? True / False / **None for "no answer"**.
+
+    The module's second and only other entry point, for `quorum doctor`:
+    nothing outside this file may shell out to gh, so the question "would a
+    probe actually get anywhere?" has to be asked here too.
+
+    None is not a failure — it is the probe declining to answer: `[ci]` off
+    (or an unreadable config, which means the same thing here), no gh on
+    PATH, or gh that did not reply within `[ci].timeout_seconds`. An
+    offline machine must not be reported as a broken one, so only an
+    explicit non-zero exit from a gh that *did* answer is False.
+    """
+    cfg = _config(home)
+    if cfg is None or not cfg.enabled:
+        return None
+    try:
+        if shutil.which("gh") is None:
+            return None
+    except OSError:
+        return None
+    try:
+        proc = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=cfg.timeout_seconds,
+            env={**os.environ, **GH_ENV},
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        # Same fail-soft bare except as `_gh`: a timeout, an exec error and a
+        # UnicodeDecodeError on non-UTF-8 output all mean "no answer".
+        return None
+    return proc.returncode == 0
+
+
 def _verdict(check: dict) -> str:
     """Classify one rollup entry as pass / fail / pending.
 

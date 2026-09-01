@@ -56,8 +56,8 @@ itself; and the manager has its own inbox for your directives.
 uv tool install quorum-orchestrator              # `quorum` command + TUI dashboard
 uv tool install "quorum-orchestrator[web]"       # add the localhost web dashboard
 quorum init                    # scaffolds ~/.quorum and a starter config.toml
-quorum doctor                  # after editing config.toml: checks config,
-                               # harness binaries, projects, supervisor
+quorum doctor                  # after editing config.toml: check it against
+                               # reality (see "Checking your setup" below)
 ```
 
 The supervisor runs however you prefer: `quorum up` in the foreground
@@ -177,6 +177,75 @@ Notes:
 - **Environment.** The run inherits your environment plus the harness's
   `env` table, with `QUORUM_HOME` set — that's how `quorum task report`
   inside the run finds the right home.
+
+## Checking your setup
+
+Nearly everything in quorum fails soft, on purpose: a `gh` that is installed
+but not logged in just stops producing CI observations, an unparseable
+`config.toml` quietly turns the optional probes off, a prompt left behind by
+an upgrade keeps rendering last release's policy, a crashed run leaves a
+`runner.lock` that skews how idle a task looks. Those are the right runtime
+behaviours, and they are precisely why none of them announce themselves.
+
+```bash
+quorum doctor                  # one line per check; exits 1 if anything is ✗
+quorum doctor --json           # the same checks, for scripts
+quorum doctor --smoke          # ...and run the default harness once, for real
+quorum doctor --smoke codex    # ...that one instead
+```
+
+```
+home: /Users/you/.quorum
+  ✓ config.toml parses (strict)
+  ✓ git 2.49 at /opt/homebrew/bin/git
+  ✓ harness 'claude': claude on PATH (/Users/you/.local/bin/claude)
+  ✓ harness 'claude': prompt injected over stdin (inject = 'stream-json')
+  ✓ default harness: claude
+  ✓ project my-api: /Users/you/work/my-api
+  ✗ gh is installed but not authenticated — every ci: line silently disappears
+      → run `gh auth login` (or export GH_TOKEN), or set [ci].enabled = false
+  – [sandbox].use_nono = false — task runs are not sandboxed
+  ✗ prompts/manager.md is an older packaged default, never edited — this home
+    is running last release's policy
+      → run `quorum init`: it upgrades unedited seeds in place
+  ✓ supervisor running (pid 40680, since 2026-08-31T23:40:50Z)
+```
+
+`✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
+something you switched off, never configured, or that could not answer
+(a `gh` that timed out is `–`, not a failure: offline says nothing about
+whether you are logged in). Only `✗` affects the exit code, so a `–` never
+trains you to ignore the output — a freshly `init`ed home with no harness
+chosen yet says so in one `–` line and exits 0. Doctor **diagnoses and
+never repairs**: every `✗` names the fix, and applying it stays your call.
+
+What it looks at: the home and a *strict* parse of `config.toml` (this is
+the one place a broken file is reported rather than papered over with
+defaults); every `[harness.*]` table — argv[0] on PATH, a template that can
+actually carry a prompt, `{session}` wherever a `resume` template promises
+one, and argv that speaks stream-json without `inject` set; `[tasks].default_harness`;
+git and each registered project directory; `gh` when `[ci]` is on, the herdr
+socket when `[herdr]` is, and nono-py when `[sandbox]` asks for it; each
+`prompts/` file against the packaged default (`default` / an unedited older
+seed `quorum init` would upgrade / your own edit over a default that has
+since moved); and the state earlier runs left behind — a supervisor lock
+whose pid is gone or whose heartbeat stopped, an installed version newer
+than the running supervisor's, orphaned `runner.lock`s, inbox messages
+claimed and never acked, agents with a failure streak.
+
+**`--smoke` is the one thing doctor does actively**, and the only one that
+spends tokens: it runs your harness once, in a scratch directory, through
+the runner's own code — the same argv building, the same stdin injection for
+an `inject` harness, the same transcript streaming — and asserts that it
+produced a `result` event and a session/thread id before a short timeout
+(`--smoke-timeout`, 60s by default). The run is walled off from your setup:
+a scratch working directory *and* a scratch `QUORUM_HOME`, so a harness with
+quorum's integration hooks installed cannot touch your real tasks, and the
+timeout kills the harness's whole process tree rather than leaving a wrapped
+CLI's children running. Everything static can be green while
+the harness still answers with nothing quorum can use; that is exactly the
+shape of the outage that motivated this command, where a stream-json CLI
+ignored its argv prompt and every run hung until it timed out.
 
 ## Tasks
 
@@ -1011,7 +1080,7 @@ def test_milestone(tmp_path):
 ```
 ~/.quorum/
   config.toml                       yours; quorum never rewrites it
-  supervisor.lock                   pid + start time; mtime = liveness
+  supervisor.lock                   pid + start time + quorum version; mtime = liveness
   projects/<slug>.json              registered projects
   tasks/<id>/task.json              spec, reported status, session, run history,
                                     dependencies (`--after`)

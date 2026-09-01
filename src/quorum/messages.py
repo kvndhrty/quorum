@@ -29,6 +29,12 @@ from . import fsio
 
 PROTOCOL_VERSION = 1
 
+# How long a claimed-but-never-acked message sits in cur/ before the
+# supervisor's hourly janitor decides its consumer crashed and returns it to
+# new/. `quorum doctor` reports claims older than this, so the two agree on
+# what "stuck" means.
+STALE_CLAIM_GRACE = timedelta(hours=1)
+
 
 class Message(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -212,7 +218,7 @@ class MessageBus:
 
     # -- janitor ----------------------------------------------------------
 
-    def recover_stale_claims(self, grace: timedelta = timedelta(hours=1)) -> int:
+    def recover_stale_claims(self, grace: timedelta = STALE_CLAIM_GRACE) -> int:
         """Move cur/ entries older than `grace` back to new/ (crashed consumer)."""
         recovered = 0
         cutoff = (self._now() - grace).timestamp()

@@ -48,6 +48,7 @@ manager ──(its harness runs `quorum task run --detach`)──► detached ru
 
 quorum web / quorum tui / quorum status ──► read QUORUM_HOME's files
                                      (writes: thin shared bus/store calls)
+quorum doctor ──────────────────────────► pure reader + one opt-in probe (--smoke)
 ```
 
 Two process shapes on purpose. Agent ticks are short, synchronous, and
@@ -69,7 +70,8 @@ config.toml                       user-owned; quorum never rewrites it
 agents/<name>.toml                file-defined agents (the one config location
                                   quorum may write: `agent create` and the web
                                   dashboard; merges over [agents.*], file wins)
-supervisor.lock                   pid + start time; mtime = liveness heartbeat
+supervisor.lock                   pid + start time + the version of quorum that
+                                  started it; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
@@ -664,6 +666,12 @@ and the manager digest share — which fills in defaults but is never allowed
 to *enable* something a user may have switched off. Those are the only
 knobs, and none of them changes what anything *does* about the result.
 
+The module has exactly one other entry point, and it exists to keep the
+"only module that shells out to `gh`" rule true rather than convenient:
+`auth_status(home)` answers `True` / `False` / `None` for `quorum doctor`'s
+gh line, under the same `[ci]` switches and the same fail-soft shape, so the
+diagnostic never has to grow a gh subprocess of its own.
+
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
 says how to read the line, and the shipped `prompts/babysitter.md` (below)
@@ -890,6 +898,68 @@ binary in mode 1.
 The asymmetry is the design: a sandboxed quorum can *see* the machine, but
 the only durable marks it can leave are `QUORUM_HOME`, the worktrees, and
 the grants you added explicitly.
+
+## Diagnostics: `quorum doctor`
+
+`doctor.py` is the counterweight to how much of quorum fails soft. Every
+degradation elsewhere in this document is deliberate — an unreadable
+config.toml disables the optional probes rather than killing a tick, an
+unauthenticated `gh` yields `None`, a stale seed in `prompts/` keeps
+rendering, a crashed run leaves a `runner.lock` nobody trips over — and each
+one is invisible by construction. Doctor is the single place that goes and
+looks.
+
+Three rails, and they are the whole design:
+
+1. **Diagnose, never repair.** Each line names its own fix (a config key, a
+   shell command); nothing in the module writes to QUORUM_HOME. `--fix` is
+   not a planned feature — an autofix would have to guess which of two
+   defensible states the user wanted.
+2. **A pure reader plus exactly one opt-in probe.** The static checks are
+   file reads and `shutil.which`, in the same family as `views.py`. The
+   exception is `--smoke`, which runs a harness for real, in a
+   `TemporaryDirectory`, through the runner's own `build_harness_argv` /
+   `guidance_pump` / `stream_transcript` — including `inject` stdin
+   delivery — and asserts a `result` event and a captured session id inside
+   a short timeout. It reuses the runner's code rather than a simplified
+   copy because a copy would drift away from the very bug it exists to
+   catch (#24: a stream-json CLI ignoring an argv prompt, so every run hung
+   until it timed out). Everything the probe touches is scratch: the
+   guidance pump's bus, the working directory, and the child's own
+   `QUORUM_HOME` — that last one because a harness with quorum's
+   integration hooks installed runs `quorum task hook-session-start` on
+   startup, and the probe must not let it write to the live home. The child
+   is spawned with `start_new_session=True` and the timeout `killpg`s the
+   group: harnesses wrap themselves, and killing only the process quorum
+   spawned leaves grandchildren holding the pipe well past the budget the
+   probe is there to measure.
+3. **Three states, no fourth.** `ok` / `problem` / `na` (✓ / ✗ / –), where
+   `na` covers "you turned this off" and "there is nothing configured to
+   check". Only `problem` sets a non-zero exit, which is what makes
+   `quorum doctor --json` usable in a script and keeps a `–` from training
+   anyone to ignore the output. Two consequences worth stating: a fresh
+   `quorum init` home — no `[harness.*]` table, no `default_harness` — is
+   one `–` line ("no harness configured yet") rather than two ✗ for one
+   unmade decision, and a `gh` that never answered is `–` too, because an
+   offline laptop says nothing about whether anyone is logged in.
+
+Doctor asks other modules rather than reimplementing them, which is what
+keeps its answers from drifting from the code it reports on: `gh` through
+`ci.auth_status` (the module that owns every gh subprocess), prompt
+staleness through `home.classify_prompt` (the classification `quorum init`
+seeds by), sandbox support through `sandbox.availability()`.
+
+One small function per check, each taking only what it needs (a `Config`, a
+`HarnessConfig`, a home path), so every check has both a passing and a
+failing test. `check_config` is the one caller in the codebase that uses
+strict `load_config` on purpose: everywhere else papers a broken file over
+with defaults so work can continue, and this is where the user finally
+hears about it.
+
+Two things elsewhere exist to feed it: `supervisor.lock` records the version
+of quorum that started the process (so "you upgraded but never restarted" is
+a line rather than a memory), and `home.classify_prompts` is the read-only
+half of the seeding logic `quorum init` acts on.
 
 ## Testing strategy
 

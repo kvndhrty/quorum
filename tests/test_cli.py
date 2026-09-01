@@ -606,17 +606,23 @@ def test_status_surfaces_attention_and_empty_state(home: Path):
 
 
 def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
-    # fresh scaffold: no harness uncommented yet
-    r = runner.invoke(app, ["doctor", "--home", str(home)])
-    assert r.exit_code == 1
-    assert "no [harness.<name>] table" in r.output
+    cfg = home / "config.toml"
+    # The CI probe is on by default and the machine running these tests may
+    # well have a gh that is installed but unauthenticated — which doctor is
+    # right to call a problem, and which has nothing to do with this test.
+    cfg.write_text(cfg.read_text().replace("[ci]\nenabled = true", "[ci]\nenabled = false"))
 
-    slug = setup_task_env(home, tmp_path)
+    # fresh scaffold: no harness uncommented yet. An unmade decision, not a
+    # fault — one `–` line about it, and a green exit.
+    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "no harness configured yet" in r.output
+
+    slug = setup_task_env(home, tmp_path)  # a [harness.fake] table, no default yet
     r = runner.invoke(app, ["doctor", "--home", str(home)])
     assert r.exit_code == 1
     assert "default_harness is unset" in r.output
 
-    cfg = home / "config.toml"
     cfg.write_text(cfg.read_text().replace('default_harness = ""', 'default_harness = "fake"'))
     r = runner.invoke(app, ["doctor", "--home", str(home)])
     assert r.exit_code == 0, r.output

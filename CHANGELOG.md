@@ -10,6 +10,15 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 ## [Unreleased]
 
 ### Added
+- `quorum doctor`: one pass over everything that fails soft — config (the one
+  strict parse), `[harness.*]` binaries and argv templates, git, projects, gh
+  auth, herdr, nono, prompt staleness, supervisor lock and version, orphaned
+  `runner.lock`s, stale inbox claims, agent failure streaks. One line per
+  check (✓ / ✗ / –, only ✗ exits non-zero), `--json` for scripts, and an
+  opt-in `--smoke [HARNESS]` that runs your harness for real through the
+  runner's own code — in a scratch directory *and* a scratch `QUORUM_HOME`,
+  killing the whole process tree on timeout. Diagnoses only; never repairs.
+  (#24)
 - TUI write affordances beyond the nudge: `m` sends the manager a directive
   (`quorum manager tell`), `s` starts a detached run (refused on an attached
   task or a live runner), `c` cancels a task behind a yes/no confirmation.
