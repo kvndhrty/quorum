@@ -323,6 +323,8 @@ when there is something to manage), the manager compiles a **digest**:
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
+- its **notebook** — standing notes it (or you) wrote for future runs, at
+  the top of the digest and under their own budget ([below](#the-notebook));
 - your directives.
 
 It then runs your harness over that digest with `prompts/manager.md` — and
@@ -340,6 +342,7 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
+quorum manager notes                      # its notebook: what it remembers
 ```
 
 A `tell` is normally read at the start of the next tick. If the manager's
@@ -361,6 +364,38 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (`auto_pause = false`), so the first tick after service returns reads the
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
+
+### The notebook
+
+Every tick is a fresh run with no memory: the digest is all the manager
+knows. Its action journal covers what it just did, but that window scrolls —
+a fact worth keeping ("that PR is waiting on you", "these tests need a
+running postgres") would be gone by tomorrow morning. So the manager has a
+notebook, and it is the first thing in every digest:
+
+```bash
+quorum manager remember "task a3f2k9's PR is waiting on my review"
+quorum manager remember "codex is rate-limited today" --ttl 2   # expires itself
+quorum manager notes                       # what it currently remembers
+quorum manager forget k7f2ab                # retire one (by the id `notes` prints)
+```
+
+You and the manager write to the same notebook — a note from you reads as
+standing guidance, which is the difference from `manager tell`: a `tell` is
+a one-shot directive, claimed and consumed by the next tick, while a note
+stays until it expires or someone retires it. Nothing else can write there:
+a task reaches the manager with `task report` and the board, never by
+writing into its memory, so no amount of task chatter can crowd your notes
+out. Neither can a busy home — the notebook has its own bounded slot in the
+digest, ahead of the task section, so ten noisy tasks cannot shrink it. When
+it overflows the digest says how many older notes it dropped, and the
+default prompt tells the manager to consolidate: one note that supersedes
+several, then `forget` the rest.
+
+The same file exists for every agent (`quorum manager remember --agent
+<name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
+own notebook wherever its template writes `{notes}`. Both dashboards show an
+agent's notebook when you select it.
 
 ## Guiding tasks
 
@@ -484,6 +519,7 @@ for you is never silent.
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
+- `quorum manager notes` — what it is carrying forward between runs.
 
 ## Controlling agents at runtime
 
@@ -800,6 +836,7 @@ def test_milestone(tmp_path):
   prompts/*.md                      editable prompt templates (incl. manager.md)
   state/agents/<name>/              heartbeats + private agent state
   state/manager/journal.jsonl       the manager's auto-recorded actions
+  state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
   state/manager/usage.jsonl         what each manager run cost (agents get
                                     the same file under state/agents/<name>/)

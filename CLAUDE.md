@@ -195,7 +195,19 @@ and `docs/architecture.md` in the same commit so the record stays true.
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
   for journaling and message attribution, and the runner `strip_actor_env`s
   spawned children so they act as themselves. Also owns `journal_path`/
-  `transcript_path` (manager at `state/manager/`, others at `state/agents/<name>/`).
+  `notes_path`/`transcript_path` (manager at `state/manager/`, others at
+  `state/agents/<name>/`).
+- `notes.py` — the notebook: an agent's *standing* memory, deliberately a
+  separate buffer from both the journal (a bounded tail of one run's actions,
+  which a busy tick scrolls) and the board (which anything may post to).
+  Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
+  through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
+  any actor that is not the notebook's own agent or an untagged human — tasks
+  reach the manager with `task report` and the board, never by writing into its
+  memory. `digest_section` renders it **before** the task section under its own
+  `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else spends that budget, so
+  noisy tasks can't shrink it), keeps the newest over the cap and says how many
+  it dropped. No Python summarization: consolidation is prompt policy.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small

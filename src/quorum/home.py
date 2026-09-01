@@ -133,6 +133,8 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
         # replaced by the perpetual-task + self-cost revision (#12, #32)
         "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
+        # replaced by the notebook revision (#35): note vs remember vs forget
+        "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
     },
 }
 

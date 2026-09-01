@@ -131,7 +131,9 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
 
 def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     """One agent's row plus its recent activity: the auto-recorded action
-    journal (harness-driven agents) and its `logs/actions.jsonl` entries."""
+    journal (harness-driven agents), the standing notes in its notebook, and
+    its `logs/actions.jsonl` entries."""
+    from . import notes
     from .actor import journal_path
 
     config = load_config_or_default(home)
@@ -141,6 +143,10 @@ def agent_detail(home: Path, name: str) -> dict[str, Any] | None:
     acfg = config.agents.get(name)
     row["settings"] = dict(acfg.settings) if acfg else {}
     row["journal"] = fsio.read_jsonl_tail(journal_path(home, name), limit=20)
+    # The notebook, straight off its file — what the agent's next run reads,
+    # rendered by the same code the digest uses so every reader agrees.
+    row["notes"] = notes.active(home, name)
+    row["notes_text"] = "\n".join(notes.render_section(row["notes"]))
     row["actions"] = [
         a
         for a in fsio.read_jsonl_tail(home / "logs" / "actions.jsonl", max_bytes=512 * 1024)
