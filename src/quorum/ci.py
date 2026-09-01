@@ -60,19 +60,24 @@ GH_ENV = {
 
 
 def _config(home: Path):
-    """The optional [ci] table, or None; never raises."""
-    try:
-        from .config import load_config
+    """The [ci] table, or None when there is no readable config; never raises.
 
-        return load_config(Path(home)).ci
-    except Exception:
-        return None
+    None means *disabled*, not "defaults". A config.toml quorum cannot parse
+    may well be the one carrying `[ci].enabled = false`, and this probe is
+    the kind that spends a subprocess and a network call: when in doubt it
+    must degrade toward doing less, never toward doing more behind the
+    user's back (`config.try_load_config` documents the policy).
+    """
+    from .config import try_load_config
+
+    config = try_load_config(Path(home))
+    return config.ci if config is not None else None
 
 
 def available(home: Path) -> bool:
     """True when a probe could plausibly work: enabled, and `gh` on PATH."""
     cfg = _config(home)
-    if cfg is not None and not cfg.enabled:
+    if cfg is None or not cfg.enabled:
         return False
     try:
         return shutil.which("gh") is not None

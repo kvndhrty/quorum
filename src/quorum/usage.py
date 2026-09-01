@@ -7,6 +7,12 @@ carries `total_cost_usd` plus a `usage` block, codex's `turn.completed` and
 parsed event; the result lands on the run's entry in `task.json` and is
 surfaced by views, `quorum status` and the manager digest.
 
+An *agent's* harness runs (the manager's tick, any prompt agent) have no
+task record to hang a number on, so they get a ledger instead: one line per
+run in `state/manager/usage.jsonl` / `state/agents/<name>/usage.jsonl`, read
+back over a bounded tail by `agent_usage`. That is how the cost of
+supervision itself becomes visible — to the views, and to the manager.
+
 Three properties this module is built around:
 
 - **Fail-soft.** A harness that reports nothing (the shipped opencode
@@ -33,6 +39,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Any
+
+from . import actor, fsio
 
 # The event shapes that report what a run spent. Matched against an event's
 # "type"/"item_type"; an event carrying a top-level cost key counts too, so a
@@ -192,6 +200,78 @@ def total(usages: Iterable[dict[str, float] | None]) -> dict[str, float] | None:
         return None
     out.pop("events", None)  # per-event multiplicity says nothing at task level
     return {**out, "runs": runs}
+
+
+# How many recorded agent runs a cumulative figure looks back over. An
+# agent's ledger is append-only and unbounded (the manager ticks every 5
+# minutes forever), so its "total" is honestly a *recent* total — the window
+# is reported alongside the number rather than implied.
+AGENT_USAGE_TAIL = 200
+
+
+def record_agent_run(
+    home: Any, name: str, run_id: str, usage: dict[str, float] | None, now: Any = None
+) -> None:
+    """Append one agent harness run to `state/.../usage.jsonl`.
+
+    Written for every run, including the ones that reported nothing (`usage:
+    null`) and the ones that failed — a timed-out run still spent what it
+    spent, and a run count only means something if every run is in it. Never
+    raises: a spend ledger must not be able to fail a tick.
+    """
+    try:
+        fsio.append_jsonl(
+            actor.usage_path(home, name),
+            {"at": fsio.iso(now or fsio.utc_now()), "run": run_id, "usage": usage},
+        )
+    except OSError:
+        pass
+
+
+def agent_usage(home: Any, name: str, limit: int = AGENT_USAGE_TAIL) -> dict[str, Any] | None:
+    """What an agent's recent runs spent, or None when the ledger says nothing.
+
+    `{"last": <the newest run that reported anything>, "total": <sum over the
+    window>, "runs": <runs in the window that reported>, "window": <runs
+    read>}`. None means no run in the window reported usage — the ordinary
+    case for a harness that says nothing about spend, and never zero.
+    """
+    entries = fsio.read_jsonl_tail(actor.usage_path(home, name), limit=limit)
+    # A hand-edited or truncated line may parse to anything; only dicts with
+    # a dict `usage` count, everything else is silence (never a raise out of
+    # status / the web / the digest).
+    reported = [
+        e["usage"] for e in entries if isinstance(e, dict) and isinstance(e.get("usage"), dict)
+    ]
+    if not reported:
+        return None
+    spent = total(reported)
+    if spent is None:
+        return None
+    return {
+        "last": reported[-1],
+        "total": spent,
+        "runs": int(spent["runs"]),
+        "window": len(entries),
+        # True when the ledger is longer than the tail read: the total is a
+        # recent-runs figure, not all-time, and readers must say so.
+        "truncated": len(entries) >= limit,
+    }
+
+
+def describe_agent(spent: dict[str, Any] | None) -> str:
+    """One compact line for an agent row: last run, then the window total."""
+    if not spent or not isinstance(spent, dict):
+        return ""
+    parts = []
+    last = describe(spent.get("last"))
+    if last:
+        parts.append(f"last {last}")
+    window = describe(spent.get("total"))
+    if window and int(spent.get("runs") or 0) > 1:
+        label = "recent runs" if spent.get("truncated") else "runs"
+        parts.append(f"{window} over {int(spent['runs'])} {label}")
+    return " · ".join(parts)
 
 
 def format_tokens(count: float) -> str:

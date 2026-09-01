@@ -29,13 +29,23 @@ TIMEOUT_SECONDS = 0.5
 
 
 def _config(home: Path):
-    """The optional [herdr] table, or None; never raises."""
-    try:
-        from .config import load_config
+    """The optional [herdr] table, or None; never raises.
 
-        return load_config(Path(home)).herdr
-    except Exception:
-        return None
+    Two different Nones, distinguished by `_readable_config`: no [herdr]
+    table at all (fine — the adapter auto-detects), and no readable
+    config.toml (the table quorum cannot read may be the one saying
+    `enabled = false`, so the adapter treats it as off — the same
+    degrade-toward-doing-less policy as `ci.py`; see
+    `config.try_load_config`).
+    """
+    config = _readable_config(home)
+    return config.herdr if config is not None else None
+
+
+def _readable_config(home: Path):
+    from .config import try_load_config
+
+    return try_load_config(Path(home))
 
 
 def socket_path(home: Path) -> Path:
@@ -45,7 +55,10 @@ def socket_path(home: Path) -> Path:
 
 
 def available(home: Path) -> bool:
-    cfg = _config(home)
+    config = _readable_config(home)
+    if config is None:
+        return False
+    cfg = config.herdr
     if cfg is not None and not cfg.enabled:
         return False
     try:

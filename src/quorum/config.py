@@ -301,3 +301,39 @@ def load_config(home: Path) -> Config:
     # the machine-writable channel, so on a name collision the file wins.
     config.agents.update(_load_agent_files(home))
     return config
+
+
+def try_load_config(home: Path) -> Config | None:
+    """The config, or None when there isn't a usable one.
+
+    The honest reading of config.toml for callers that must distinguish "the
+    user said nothing" from "the user said something quorum could not read":
+    a *missing* file is the former and yields plain defaults (the probes keep
+    auto-detecting, as their config docstrings promise); a syntax error, a
+    schema violation, or a file that cannot be decoded yields None, never a
+    fabricated default. Fail-soft *probes* (`ci.py`, `herdr.py`) use this so
+    an unreadable config means their optional feature is **off** — degrading
+    toward doing less, never toward doing more behind the user's back. Never
+    raises: `tomllib` surfaces bad bytes as `UnicodeDecodeError`, not
+    `ConfigError`, and a probe that raised on it would take the manager tick
+    down with it.
+    """
+    if not (Path(home) / CONFIG_NAME).exists():
+        return Config()
+    try:
+        return load_config(Path(home))
+    except Exception:
+        return None
+
+
+def load_config_or_default(home: Path) -> Config:
+    """The config, falling back to an all-defaults `Config()`.
+
+    The one helper for read-only callers — `quorum status` and the other
+    views, the manager's digest — that must render something whether or not
+    config.toml exists or parses. The policy, in one place: defaults stand in
+    for what could not be read, and nothing that consults it may use a
+    default to *enable* behavior the user may have switched off (that is what
+    `try_load_config` is for).
+    """
+    return try_load_config(home) or Config()

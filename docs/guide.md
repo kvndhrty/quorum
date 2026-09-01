@@ -219,6 +219,46 @@ and displays it. The conventional flow is `planning → executing → reviewing
 `cancelled` mean anything to quorum itself: they end the manager's
 attention.
 
+### Perpetual tasks
+
+Some jobs never finish: watch CI and fix what breaks, keep the changelog
+current, groom the backlog. Queue those with `--perpetual`:
+
+```bash
+quorum task add my-api "watch CI on open PRs; fix what breaks, one at a time" --perpetual
+```
+
+Nothing about the machinery changes — it is still a task, still runs in a
+worktree, still reports free-form statuses. What changes is how three things
+read it:
+
+- its prompt gets an extra block (`prompts/task-perpetual.md`, yours to
+  edit): work in **cycles**, commit and push at the end of *each* cycle
+  rather than "before finishing", report a changing word per cycle
+  (`cycle-4`, `idle`) so an unchanging one still means something, and never
+  report `done`;
+- the manager relaunches it whenever its runner dies — the same rule as any
+  unfinished task, which for this one is the loop itself — and its prompt
+  tells it not to read a long run count or a cycling status as stuck, and
+  never to cancel it;
+- quorum withholds the `possible-loop` note for it (repeating the same few
+  calls is the job), and every view badges it `∞`.
+
+You end it, with `quorum task cancel <id>`. Two things to expect:
+
+- **it reuses one worktree and one session forever**, so the harness's
+  context grows with every cycle. When that starts to bite, reset it:
+  clear `"session"` in `~/.quorum/tasks/<id>/task.json` and the next run
+  starts a fresh session in the same worktree, keeping the work;
+- **the manager's schedule is the floor on cycle latency** — with the
+  default `every 5m` tick, a cycle that ends waits up to five minutes for
+  the next one to start. Tighten the manager's schedule if you need a
+  tighter loop;
+- **it keeps the manager awake** — the manager skips its harness run on an
+  idle home, and a home with a perpetual task is never idle, so expect one
+  manager run per tick for as long as the task lives. `quorum status` shows
+  what those runs cost on the manager's row.
+
 **Watching.**
 
 ```bash
@@ -273,6 +313,13 @@ when there is something to manage), the manager compiles a **digest**:
 - what each task has spent, when its harness reports usage, and a
   `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
   observation, never a stop;
+- what the manager's **own** runs have cost, when its harness reports usage:
+  supervision is not free, and in a busy home it is the steadiest recurring
+  bill. The same figure shows up next to the agent in `quorum status`, the
+  TUI and the web dashboard;
+- `perpetual=true` on any task queued with `--perpetual`
+  ([above](#perpetual-tasks)), which the default prompt reads as "relaunch
+  forever, never call it stuck, never cancel";
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
@@ -414,8 +461,9 @@ for you is never silent.
   top; arrow around freely, press enter on a task to open its transcript
   and reports in the bottom pane (`esc` returns to the board feed, `n`
   nudges, `q` quits — the header above the pane always says which view
-  you're in). The agents table shows each agent's status, schedule, last
-  and next run (`~` marks an estimate computed from the schedule when the
+  you're in). The agents table shows each agent's status, schedule, what its
+  own harness runs have cost (when the harness reports it), and its last and
+  next run (`~` marks an estimate computed from the schedule when the
   supervisor isn't around to say for sure).
 
   ![quorum terminal dashboard](images/tui.png)
@@ -753,6 +801,8 @@ def test_milestone(tmp_path):
   state/agents/<name>/              heartbeats + private agent state
   state/manager/journal.jsonl       the manager's auto-recorded actions
   state/manager/transcript.jsonl    the manager harness's own output
+  state/manager/usage.jsonl         what each manager run cost (agents get
+                                    the same file under state/agents/<name>/)
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
 ```

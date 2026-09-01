@@ -174,6 +174,56 @@ def test_no_gh_no_workdir_and_disabled_config_all_stay_quiet(
     assert not log.exists()  # neither does a task with nowhere to probe
 
 
+def test_an_unreadable_config_disables_the_probe(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The fail-open bug (#33): `[ci].enabled = false` in a config.toml that
+    does not parse used to fall back to enabled, so the probe kept spawning
+    `gh` against the user's explicit switch. An unreadable config means off."""
+    task = make_task(home, make_repo(tmp_path))
+    log = tmp_path / "gh.log"
+    install_gh(path_without_gh, monkeypatch, log=log)
+
+    (home / "config.toml").write_text("[ci]\nenabled = false\n[harness.broken\noops")
+    assert ci.available(home) is False
+    assert ci.pr_state(home, task) is None
+    assert not log.exists()  # no subprocess, no network call
+
+    # a home with no config at all is the *other* case — the user said
+    # nothing, so the probe auto-detects exactly as its docstring promises
+    bare = tmp_path / "not-a-home"
+    bare.mkdir()
+    assert ci.available(bare) is True
+    assert not log.exists()  # available() only looks for gh; no probe yet
+
+    # bad bytes are not a ConfigError (tomllib raises UnicodeDecodeError) and
+    # must be just as silent: a probe that raised here would take the
+    # manager tick down with it
+    (home / "config.toml").write_bytes(b"[ci]\nenabled = false\n# caf\xe9\n")
+    assert ci.available(home) is False
+    assert ci.pr_state(home, task) is None
+    assert not log.exists()
+
+    # a config that parses is still trusted, defaults included
+    (home / "config.toml").write_text("")
+    assert ci.available(home) is True
+    assert ci.pr_state(home, task) is not None
+
+
+def test_herdr_is_off_under_an_unreadable_config_too(home: Path, tmp_path: Path):
+    """The sibling audit: same shape, same policy (an optional adapter must
+    never be switched *on* by a config quorum could not read)."""
+    from quorum import herdr
+
+    sock = tmp_path / "herdr.sock"
+    sock.write_text("")  # merely existing is what `available` looks for
+    (home / "config.toml").write_text(f'[herdr]\nsocket = "{sock}"\n')
+    assert herdr.available(home) is True
+
+    (home / "config.toml").write_text(f'[herdr]\nsocket = "{sock}"\nenabled = [[[')
+    assert herdr.available(home) is False
+
+
 # -- the digest line ---------------------------------------------------------
 
 
@@ -279,3 +329,10 @@ def test_no_probe_runs_at_all_without_a_working_gh(
 
     build_digest(home, TaskStore(home).list(), clock(), directives=[])
     assert not log.exists()
+
+
+def test_herdr_never_raises_on_undecodable_config(home: Path, tmp_path: Path):
+    from quorum import herdr
+
+    (home / "config.toml").write_bytes(b"[herdr]\nenabled = false\n# caf\xe9\n")
+    assert herdr.available(home) is False
