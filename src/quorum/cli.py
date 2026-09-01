@@ -1316,7 +1316,7 @@ def agent_run_once(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Construct an agent and run a single tick (no supervisor needed)."""
-    from .agent import AgentContext, tick_lock_path, write_heartbeat
+    from .agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from .registry import AgentResolutionError, resolve
 
     target = get_home(home)
@@ -1359,14 +1359,10 @@ def agent_run_once(
     finally:
         fsio.release_pid_lock(lock)
     ended = fsio.utc_now()
-    write_heartbeat(
-        target,
-        name,
-        status="idle",
-        last_start=fsio.iso(started),
-        last_end=fsio.iso(ended),
-        duration_ms=int((ended - started).total_seconds() * 1000),
-    )
+    # The same success heartbeat a scheduled tick writes, failure fields and
+    # escalation stamp cleared: a hand-run tick that demonstrably worked must
+    # end the streak, not leave the agent reading as broken.
+    write_heartbeat(target, name, **success_heartbeat_fields(started, ended))
     typer.secho(f"{name}: tick complete", fg="green")
 
 

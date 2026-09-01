@@ -66,6 +66,32 @@ def test_run_once_records_a_failing_tick(home: Path):
     assert "intentional explosion" in hb["error"]
 
 
+def test_run_once_clears_a_failure_streak(home: Path):
+    """A hand-run tick that demonstrably works ends the streak. Without this
+    the escalation stamp survives a proven-working run-once, and the next
+    outage would never reach the attention banner."""
+    from quorum.agent import write_heartbeat
+
+    write_plugin(home, "okplug", OK_PLUGIN)
+    write_heartbeat(
+        home,
+        "okplug",
+        status="error",
+        error="boom",
+        consecutive_failures=7,
+        escalated_at="2026-08-30T22:10:04Z",
+    )
+
+    result = runner.invoke(app, ["agent", "run-once", "okplug", "--home", str(home)])
+    assert result.exit_code == 0, result.output
+
+    hb = heartbeat(home, "okplug")
+    assert hb["status"] == "idle"
+    assert hb["error"] is None
+    assert hb["consecutive_failures"] == 0
+    assert hb["escalated_at"] is None
+
+
 def test_run_once_rejects_an_unknown_agent(home: Path):
     result = runner.invoke(app, ["agent", "run-once", "nope", "--home", str(home)])
     assert result.exit_code == 1
