@@ -246,9 +246,11 @@ and `docs/architecture.md` in the same commit so the record stays true.
   check that would have caught the stream-json hang (#24). `check_config` is
   the codebase's one deliberate strict `load_config` caller.
 - `config.py` — one place to load config: `load_config` raises,
-  `try_load_config` returns None for missing/malformed (what the fail-soft
-  probes use, so an unreadable config means their feature is **off** — never
-  fail-open), `load_config_or_default` fills in defaults (cli/views/digest).
+  `try_load_config` returns defaults for a *missing* file (the user said
+  nothing) and None for a malformed/undecodable one — what the fail-soft
+  probes use, so an unreadable config means their feature is **off**, never
+  fail-open, and it never raises — `load_config_or_default` fills in defaults
+  for everything (cli/views/digest).
   `config.toml` is user-owned and **quorum never writes it back**; machine
   state goes to JSON. The one config location quorum may write is `agents/<name>.toml`
   (file-defined agents, atomic whole-file writes via `write_agent_file`/`create_agent`;
