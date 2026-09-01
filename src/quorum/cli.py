@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import typer
@@ -17,6 +17,7 @@ from . import doctor as doctor_mod
 from . import fsio, usage
 from . import home as home_mod
 from . import prompts as prompts_mod
+from . import prune as prune_mod
 from .actor import (
     ACTOR_CAP_ENV,
     ACTOR_RUN_ENV,
@@ -1082,6 +1083,9 @@ def task_report(
 def task_inbox(
     task_id: str,
     claim: bool = typer.Option(False, "--claim", help="Consume the messages (what a harness should do)."),
+    clear: bool = typer.Option(
+        False, "--clear", help="Archive the pending guidance instead of delivering it."
+    ),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Read guidance sent to a task. Without --claim, messages are only peeked."""
@@ -1091,6 +1095,22 @@ def task_inbox(
     target = get_home(home)
     task = _resolve_task(target, task_id)
     bus = MessageBus(target)
+    if clear:
+        if claim:
+            raise _fail("--claim delivers guidance and --clear discards it — pick one")
+        pending = bus.clear_inbox(inbox_name(task.id), dry_run=True)
+        if not pending:
+            typer.echo("no guidance waiting")
+            return
+        _actor_guard(
+            target, "task.inbox.clear", target=task.short_id, target_status=task.status,
+            args=f"{len(pending)} message(s)",
+        )
+        cleared = bus.clear_inbox(inbox_name(task.id))
+        typer.secho(
+            f"archived {len(cleared)} pending message(s) for task {task.short_id}", fg="green"
+        )
+        return
     if claim:
         found = False
         for claimed in bus.claim(inbox_name(task.id)):
@@ -1158,6 +1178,84 @@ def task_cancel(
             typer.echo(f"sent SIGTERM to runner pid {pid}")
 
 
+@task_app.command("prune")
+def task_prune(
+    status: str = typer.Option(
+        ",".join(prune_mod.DEFAULT_STATUSES), "--status",
+        help="Comma-separated statuses to archive (default: the terminal ones).",
+    ),
+    older_than: str | None = typer.Option(
+        None, "--older-than", help="Only tasks untouched for longer than this (e.g. 24h, 7d)."
+    ),
+    worktrees: bool = typer.Option(
+        False, "--worktrees", help="Also `git worktree remove` and delete the task branch when merged."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen; change nothing."),
+    force: bool = typer.Option(
+        False, "--force", help="Archive despite stranded work, and delete an unmerged branch."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Archive finished tasks into `tasks/.archive/<id>/` so they leave every view.
+
+    Nothing is deleted: the task directory is *moved*, and moving it back
+    restores it. Refuses a task with a live runner, an attached task, one
+    another task still depends on, and (without --force) one whose worktree
+    holds uncommitted or unpushed work.
+    """
+    target = get_home(home)
+    window = _parse_window(older_than) if older_than else None
+    statuses = [s for s in status.split(",") if s.strip()]
+    candidates = prune_mod.plan(target, statuses=statuses, older_than=window, force=force)
+    prunable = [c for c in candidates if c.prunable]
+    for c in candidates:
+        if c.refusal:
+            typer.secho(f"  skip {c.task.short_id}  {c.refusal}", fg="yellow")
+    if not prunable:
+        typer.echo("nothing to prune" + ("" if candidates else f" matching {status}"))
+        return
+    verb = "would archive" if dry_run else "archiving"
+    typer.echo(f"{verb} {len(prunable)} task(s):")
+    for c in prunable:
+        typer.echo(f"  {c.task.short_id}  {c.task.status:<10} {c.task.prompt[:60]}")
+    if dry_run:
+        typer.echo("(dry run — nothing changed)")
+        return
+    _confirm(
+        yes,
+        f"archive {len(prunable)} task(s) into tasks/.archive"
+        + (" and remove their worktrees?" if worktrees else "?"),
+    )
+    # One journal entry for the command, not one per task: a prune is a
+    # single decision, and per-task entries would burn an agent's action cap
+    # mid-sweep and leave the tidy half-finished.
+    _actor_guard(
+        target, "task.prune",
+        args=f"{len(prunable)} task(s): {', '.join(c.task.short_id for c in prunable)}"
+             + (" +worktrees" if worktrees else ""),
+    )
+    archived = 0
+    for c in prunable:
+        if worktrees:
+            removed, notes = prune_mod.remove_task_worktree(target, c.task, force=force)
+            for note in notes:
+                typer.echo(f"  {c.task.short_id}  {note}")
+            if not removed:
+                typer.secho(
+                    f"  skip {c.task.short_id}  worktree kept, task not archived", fg="yellow"
+                )
+                continue
+        try:
+            prune_mod.archive_task(target, c.task.id)
+        except OSError as e:
+            typer.secho(f"  skip {c.task.short_id}  {e}", fg="yellow")
+            continue
+        archived += 1
+    typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")
+
+
+
 # -- board -----------------------------------------------------------------
 
 
@@ -1201,6 +1299,42 @@ def board_read(
                 typer.echo(f"[{created}] {t} <{msg.sender}> {msg.type}: {msg.payload.get('text', '')}")
     if empty and not as_json:
         typer.echo(f"no messages in the last {since}")
+
+
+@board_app.command("clear")
+def board_clear(
+    topic: str,
+    before: str | None = typer.Option(
+        None, "--before",
+        help="Only messages older than this: a window (7d) or a timestamp (2026-09-01).",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Archive a board topic, emptying it.
+
+    The messages land in the same `messages/archive/YYYY-MM.jsonl.gz` the
+    hourly janitor writes — nothing is lost, it just stops being live.
+    `quorum board clear attention` is the one that empties the banner.
+    """
+    target = get_home(home)
+    floor = _parse_before(before) if before else None
+    bus = MessageBus(target)
+    doomed = bus.archive_topic(topic, before=floor, dry_run=True)
+    if not doomed:
+        typer.echo(f"nothing to clear on {topic}")
+        return
+    if dry_run:
+        typer.echo(f"would archive {len(doomed)} message(s) from {topic}:")
+        for msg in doomed:
+            typer.echo(f"  [{msg.created_at}] <{msg.sender}> {msg.payload.get('text', '')[:70]}")
+        return
+    _confirm(yes, f"archive {len(doomed)} message(s) from {topic}?")
+    _actor_guard(target, "board.clear", args=f"{topic}: {len(doomed)} message(s)")
+    archived = bus.archive_topic(topic, before=floor)
+    typer.secho(f"archived {len(archived)} message(s) from {topic}", fg="green")
+
 
 
 # -- projects --------------------------------------------------------------
@@ -1806,6 +1940,22 @@ def _parse_window(text: str) -> timedelta:
     if text and text[-1] in units and text[:-1].isdigit():
         return timedelta(**{units[text[-1]]: int(text[:-1])})
     raise typer.BadParameter(f"invalid window {text!r} (use e.g. 90m, 24h, 7d)")
+
+
+def _parse_before(text: str) -> datetime:
+    """A cutoff instant, written either way round: a window back from now
+    (`7d`) or an absolute timestamp (`2026-09-01`, `2026-09-01T12:00:00Z`)."""
+    text = text.strip()
+    try:
+        return fsio.utc_now() - _parse_window(text)
+    except typer.BadParameter:
+        pass
+    try:
+        return fsio.parse_iso(text)
+    except ValueError:
+        raise typer.BadParameter(
+            f"invalid cutoff {text!r} (use a window like 7d, or a date like 2026-09-01)"
+        ) from None
 
 
 if __name__ == "__main__":

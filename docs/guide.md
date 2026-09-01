@@ -639,6 +639,59 @@ nudge box on each task. The manager takes direction the same way, through
 its own inbox — `quorum manager tell "prioritise the release tasks"`, or `m`
 in the TUI.
 
+## Cleaning up
+
+Quorum accumulates on purpose — a finished task keeps its record, its
+worktree, and its `quorum/<short-id>` branch — but a long-lived home turns
+into a wall of `done` rows. Three commands tidy it, and **none of them
+delete anything**: a pruned task moves to `~/.quorum/tasks/.archive/<id>/`,
+and cleared messages join the same `messages/archive/YYYY-MM.jsonl.gz` the
+supervisor's janitor writes.
+
+```bash
+quorum task prune --dry-run              # what would go (always start here)
+quorum task prune                        # archive done/blocked/cancelled tasks
+quorum task prune --older-than 7d        # ...only those untouched for a week
+quorum task prune --status done          # ...only the ones that finished well
+quorum task prune --worktrees            # also remove worktrees + merged branches
+```
+
+Getting a task back is one move in the other direction:
+
+```bash
+mv ~/.quorum/tasks/.archive/01J5R3…  ~/.quorum/tasks/
+```
+
+**What prune refuses.** It skips a task (and says why) when a runner still
+holds its lock, when it's attached to a live session, when another task
+still lists it under `--after`, and — the one that catches people — when its
+worktree holds uncommitted or unpushed work. That last one is the same
+stranded-work probe `quorum status` shows, and archiving the record would be
+the only thing that hid it. Commit and push, or pass `--force`.
+
+**Worktrees and branches.** `--worktrees` runs `git worktree remove` and then
+deletes the task branch *only if git agrees it is merged*. An unmerged branch
+is kept, with a note telling you the `git branch -D` to run; `--force` does
+it for you. A worktree git won't remove (uncommitted files in it) leaves that
+task unarchived — the record is what would have told you the work was there.
+
+**The board.** Escalations sit in the `attention` banner for seven days
+because the board has no read-state. When you've dealt with them:
+
+```bash
+quorum board clear attention             # archive the topic, empty the banner
+quorum board clear tasks --before 30d    # or just the old part of one
+```
+
+And guidance queued for a task you've changed your mind about:
+
+```bash
+quorum task inbox a3f2k9 --clear         # archive what's waiting, undelivered
+```
+
+Both take `--dry-run`, and `--clear` only touches unclaimed mail — a message
+some run is already holding is left alone.
+
 ## Adopting a live session
 
 Sometimes the work is already underway — you're deep in a problem inside an
@@ -715,7 +768,9 @@ same call the CLI makes.
 Escalations are surfaced everywhere: recent posts on the `attention` topic
 (the manager's ask-a-human channel) show up as a warning line in `status`,
 in the TUI banner, and as a badge in the web header, so a manager asking
-for you is never silent.
+for you is never silent. The banner is a seven-day window with no
+read-state, so once you have dealt with what it says, empty it with
+`quorum board clear attention` (see [Cleaning up](#cleaning-up)).
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something
@@ -1087,6 +1142,7 @@ def test_milestone(tmp_path):
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
   tasks/<id>/runner.lock            pid of a live run
+  tasks/.archive/<id>/              pruned tasks (moved here whole, never deleted)
   worktrees/<id>/                   the task's git worktree
   messages/board/<topic>/*.json     public board (task lifecycle on `tasks`)
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)

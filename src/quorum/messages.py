@@ -216,6 +216,73 @@ class MessageBus:
                 continue
             yield ClaimedMessage(msg, target, self.archive_dir)
 
+    # -- on-demand archival ----------------------------------------------
+    #
+    # The janitor's per-message path, exposed for `quorum board clear` and
+    # `quorum task inbox --clear`. Same destination file, same "archive,
+    # never delete" rule: a cleared message keeps its created_at in
+    # messages/archive/, it just stops being live.
+
+    def archive_board_message(self, path: Path) -> Message | None:
+        """Archive one board message file and remove it from its topic.
+
+        The reusable unit: `archive_topic` loops over it, and a future
+        per-message ack (#56) resolves an id to a path and calls it. A file
+        that will not parse is removed as the janitor removes it — it can be
+        read by nobody, so keeping it live only makes every scan trip on it.
+        """
+        msg = _load(path)
+        if msg is None:
+            path.unlink(missing_ok=True)
+            return None
+        _archive_one(self.archive_dir, msg.dump(), when=msg.created)
+        path.unlink(missing_ok=True)
+        return msg
+
+    def archive_topic(
+        self, topic: str, before: datetime | None = None, dry_run: bool = False
+    ) -> list[Message]:
+        """Archive a whole board topic (optionally only what predates
+        `before`), returning the messages archived — or, under `dry_run`,
+        the ones that would be."""
+        archived: list[Message] = []
+        for path in fsio.sorted_entries(self.board_dir / topic):
+            msg = _load(path)
+            if msg is None:
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                continue
+            if before is not None and msg.created >= before:
+                continue
+            if dry_run:
+                archived.append(msg)
+                continue
+            moved = self.archive_board_message(path)
+            if moved is not None:
+                archived.append(moved)
+        return archived
+
+    def clear_inbox(self, agent: str, dry_run: bool = False) -> list[Message]:
+        """Archive everything waiting unclaimed in `agent`'s inbox.
+
+        Only `new/` — a message in `cur/` is being processed by someone, and
+        pulling it out from under them is the one way this could lose work.
+        """
+        cleared: list[Message] = []
+        for path in fsio.sorted_entries(self.inbox_dir / agent / "new"):
+            msg = _load(path)
+            if msg is None:
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                continue
+            if dry_run:
+                cleared.append(msg)
+                continue
+            _archive_one(self.archive_dir, msg.dump(), when=msg.created)
+            path.unlink(missing_ok=True)
+            cleared.append(msg)
+        return cleared
+
     # -- janitor ----------------------------------------------------------
 
     def recover_stale_claims(self, grace: timedelta = STALE_CLAIM_GRACE) -> int:

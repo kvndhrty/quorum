@@ -83,6 +83,8 @@ tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
 tasks/<id>/runner.lock            pid of the active run
 tasks/<id>/runner.log             detached-run bootstrap output
+tasks/.archive/<id>/              pruned tasks, moved here whole; dot-prefixed
+                                  so every scan skips them (see "Pruning")
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
 prompts/<name>.md                 user-editable prompt templates (re-running
                                   `quorum init` upgrades never-edited seeds)
@@ -486,6 +488,56 @@ a digest. The inbox remains the single transport: the doorbell never
 carries the payload, so delivery stays exactly-once across all delivery
 points.
 
+### Pruning: on-demand cleanup
+
+Quorum accumulates: a finished task keeps its directory, its worktree, and
+its `quorum/<short-id>` branch forever, and the board grows until the hourly
+janitor's retention window catches up with it. `quorum task prune`,
+`quorum board clear <topic>` and `quorum task inbox <id> --clear` are the
+three hand-driven tidies, and all of them follow the bus's rule: **archive,
+never delete.**
+
+- A pruned task's `tasks/<id>/` directory is *moved* to `tasks/.archive/<id>/`
+  by one `os.rename`. The name is dot-prefixed on purpose: `TaskStore.list`
+  already skips dot-entries (`fsio.is_tmp`), and every reader in the codebase
+  — `quorum status`, `task list`, the TUI, the web dashboard, the manager
+  digest, `doctor` — goes through it, so an archived task leaves all of them
+  with no code change anywhere. Restoring one is `mv` in the other direction.
+- Cleared board and inbox messages go into the same
+  `messages/archive/YYYY-MM.jsonl.gz` the janitor writes, keeping their
+  `created_at`. `board clear` is `archive_old`'s per-message path run
+  immediately for one topic; `inbox --clear` touches `new/` only, because a
+  message in `cur/` has a claimant.
+
+`prune.py` splits into three total readers and two doers — `select()` (pure,
+over an already-loaded task list), `refusal()`, `plan()`, then
+`remove_task_worktree()` and `archive_task()` — so the selection is reusable
+rather than tangled into the command.
+
+The refusals are substrate rails of the same class as the runner's, not
+manager policy: a **live runner** would keep writing into a directory that
+moved out from under it; an **attached** task's workdir is the user's own
+checkout; a task **something else still depends on** would leave a dangling
+`depends_on` (a dependent pruned in the same pass is not a reason to keep
+it); and **stranded work** — uncommitted or unpushed commits in the
+worktree, read with the same `workdir_git_state` probe the digest uses — is
+exactly what the rest of quorum works to keep visible, so archiving the one
+record that surfaces it would hide it. Only the last is overridable, with
+`--force`; the other three name an action the user can take instead (wait,
+detach, prune the dependent too).
+
+`--worktrees` adds `git worktree remove` plus branch deletion, and treats the
+two asymmetrically because git does: a worktree can be recreated from a
+branch, so a removal git refuses (uncommitted or untracked files) leaves the
+task unarchived; an unmerged branch that is deleted is gone, so `git branch
+-d` is used and a refusal is reported as a note (`--force` upgrades it to
+`-D`) while the task is archived anyway — the commits are safe in the repo.
+
+`--dry-run` prints the same plan and touches nothing. A prune journals one
+entry through `_actor_guard`, not one per task: it is a single decision, and
+per-task entries would burn an agent's action cap mid-sweep and leave the
+tidy half-finished.
+
 ## The manager
 
 (User-facing how-to: [guide.md](guide.md#the-manager).)
@@ -751,6 +803,12 @@ One `Message` schema serves two channels:
 - The janitor also compacts board messages older than
   `[quorum].retention_days` (per-message `ttl_days` overrides) into
   `messages/archive/YYYY-MM.jsonl.gz`.
+- The same archive is where **on-demand** clearing goes: `MessageBus`
+  exposes the janitor's per-message path as `archive_board_message`, with
+  `archive_topic` (behind `quorum board clear`) and `clear_inbox` (behind
+  `quorum task inbox --clear`) on top of it. Clearing is archival, not a
+  flag on the message, so the board keeps carrying no read-state and any
+  number of readers still coexist.
 
 The **control channel** rides the same machinery: `quorum agent
 pause|resume|run-now|reload` sends to the `supervisor` inbox, which the
