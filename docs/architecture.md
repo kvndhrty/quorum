@@ -121,14 +121,23 @@ is user-owned, never seeded, never read by `init`, never upgraded. `render`
 merges it into the resolved template:
 
 - at the first unescaped `{local}` slot, which the packaged `manager.md`
-  (before "How to work", so house rules outrank the general guidance) and
-  `task-preamble.md` (after the delivery protocol) carry — `{{local}}` in a
-  header comment is documentation, not a slot;
+  (before "How to work", so house rules outrank the general guidance),
+  `task-preamble.md` (after the delivery protocol) and `task-perpetual.md`
+  (after the cycle conventions) carry — `{{local}}` in a header comment is
+  documentation, not a slot;
 - prepended, when the template has no slot — the case of a home that
   rewrote `<name>.md` before the slot existed, where a silently dropped
   overlay would be the worse failure;
 - as nothing at all when the overlay is absent or blank, taking the slot's
   own line with it so an unused slot leaves no hole.
+
+Reading the overlay is **fail-soft** (`load_local`): an overlay that cannot
+be read or decoded renders as no overlay, because `render` is on the manager
+tick and every task run, and one stray byte in a user-owned file must not
+fail supervision forever. Reading the *template* stays loud — it is the
+prompt itself, and silently falling back to the packaged default would hide
+the fork. `quorum prompt list` is where either problem is reported: it marks
+an unreadable file `?` and keeps listing the rest.
 
 `local` is otherwise an ordinary placeholder key: pass it explicitly and it
 wins over the file. Overriding a whole template by rewriting `<name>.md`

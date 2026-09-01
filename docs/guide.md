@@ -377,9 +377,12 @@ There are two ways to change one, and the difference matters:
   never read by `quorum init`, never upgraded. Its text is merged into the
   template at the `{local}` slot (the packaged `manager.md` puts the slot
   right before "How to work", so house rules land above the general
-  guidance; `task-preamble.md` puts it after the delivery protocol). A
-  template without a slot — one you rewrote yourself — gets the overlay
-  prepended instead. No overlay file, or an empty one, renders to nothing.
+  guidance; `task-preamble.md` puts it after the delivery protocol, and
+  `task-perpetual.md` after the cycle conventions). A template without a
+  slot — one you rewrote yourself — gets the overlay prepended instead. No
+  overlay file, or an empty one, renders to nothing; so does one quorum
+  cannot read (a bad overlay never breaks a run — `quorum prompt list`
+  flags it instead).
 - **Editing `<name>.md` itself.** Still supported, still wins outright. But
   an edited file is *yours* from then on: `quorum init` will never upgrade
   it, so every later improvement to the packaged default stops reaching this

@@ -10,9 +10,10 @@ Placeholders use str.format-style {names}; unknown braces are left intact.
 
 Alongside each template sits an optional *overlay*: prompts/<name>.local.md,
 user-owned, never seeded and never touched by `quorum init`. It is merged
-into the resolved template at its `{local}` slot (the packaged manager and
-task preamble carry one where home policy belongs), or prepended when the
-template has no slot. An absent or empty overlay renders to nothing. The
+into the resolved template at its `{local}` slot (the packaged manager,
+task preamble and perpetual block each carry one where home policy
+belongs), or prepended when the template has no slot. An absent, empty or
+unreadable overlay renders to nothing. The
 overlay exists so that adding a few lines of home policy does not fork the
 whole template — a forked `<name>.md` stops receiving packaged upgrades,
 which is how a home silently falls behind. Rewriting `<name>.md` outright
@@ -79,11 +80,21 @@ def has_slot(template: str) -> bool:
 
 
 def load_local(home: Path, name: str) -> str:
-    """The overlay text for `name` — "" when there is no overlay file."""
+    """The overlay text for `name` — "" when there is no usable overlay file.
+
+    Fail-soft, unlike `load`: an overlay that cannot be read or decoded
+    renders as no overlay at all. `render` sits on the manager tick and on
+    every task run, so one stray non-UTF-8 byte in a user-owned file must
+    not fail every tick forever. `quorum prompt list` is where an unreadable
+    overlay is reported.
+    """
     overlay = local_path(home, name)
-    if not overlay.is_file():
+    try:
+        if not overlay.is_file():
+            return ""
+        return overlay.read_text(encoding="utf-8").strip()
+    except (UnicodeDecodeError, OSError):
         return ""
-    return overlay.read_text(encoding="utf-8").strip()
 
 
 def render(home: Path, name: str, **placeholders: str) -> str:

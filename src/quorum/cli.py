@@ -233,6 +233,17 @@ def _prompt_names(home: Path) -> list[str]:
     return sorted(names)
 
 
+def _read_prompt_file(target: Path) -> str | None:
+    """A prompt file's text, or None when it cannot be read or decoded.
+
+    One unreadable file must not take the whole listing down with it — see
+    `prompt_list`, which marks it `?` and carries on."""
+    try:
+        return target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
 @prompt_app.command("list")
 def prompt_list(home: Path | None = _HOME_OPT) -> None:
     """Show each prompt template: home copy vs packaged default, and overlay."""
@@ -241,18 +252,30 @@ def prompt_list(home: Path | None = _HOME_OPT) -> None:
     for name in names:
         default = prompts_mod.packaged(name)
         home_copy = prompts_mod.path(target, name)
+        text = default
         if not home_copy.is_file():
             state = "packaged default (no home copy)"
-        elif default is None:
-            state = "yours (quorum packages no default)"
-        elif home_copy.read_text(encoding="utf-8") == default:
-            state = "seeded, matches the packaged default"
         else:
-            state = f"edited — `quorum prompt diff {name}` vs the packaged default"
+            text = _read_prompt_file(home_copy)
+            if text is None:
+                state = "? unreadable (not UTF-8, or no permission) — every render of it fails"
+            elif default is None:
+                state = "yours (quorum packages no default)"
+            elif text == default:
+                state = "seeded, matches the packaged default"
+            else:
+                state = f"edited — `quorum prompt diff {name}` vs the packaged default"
         overlay = prompts_mod.local_path(target, name)
         if overlay.is_file():
-            slotted = prompts_mod.has_slot(prompts_mod.load(target, name))
-            state += f" + {overlay.name} ({'{local} slot' if slotted else 'prepended'})"
+            if _read_prompt_file(overlay) is None:
+                # render() ignores an overlay it cannot decode; say so here,
+                # because silently dead policy is the failure that hurts.
+                note = "? unreadable — ignored when rendering"
+            elif text is None:
+                note = "merged where the template says, once it is readable"
+            else:
+                note = "{local} slot" if prompts_mod.has_slot(text) else "prepended"
+            state += f" + {overlay.name} ({note})"
         typer.echo(f"  {name:<16} {state}")
     # an overlay for a template that does not exist is silently dead policy
     for entry in fsio.sorted_entries(target / "prompts", suffix=prompts_mod.LOCAL_SUFFIX):
@@ -286,7 +309,12 @@ def prompt_diff(
     if not home_copy.is_file():
         typer.echo(f"no prompts/{name}.md — this home uses the packaged default unchanged")
         return
-    text = home_copy.read_text(encoding="utf-8")
+    text = _read_prompt_file(home_copy)
+    if text is None:
+        raise _fail(
+            f"prompts/{name}.md cannot be read (not UTF-8, or no permission) — "
+            f"nothing to diff; fix or delete it to fall back to the packaged default"
+        )
     if text == default:
         typer.echo(f"prompts/{name}.md is identical to the packaged default")
         return

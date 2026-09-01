@@ -416,6 +416,25 @@ def test_prompt_diff_and_list_show_home_vs_packaged(home: Path):
     assert r.exit_code == 0 and "packaged default unchanged" in r.output
 
 
+def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
+    """One prompt quorum cannot decode must not take the whole listing down
+    with it — mark that file and keep going (review of #37)."""
+    (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
+    (home / "prompts" / "task-preamble.local.md").write_bytes(b"\xff\xfe policy\n")
+
+    r = runner.invoke(app, ["prompt", "list"])
+    assert r.exit_code == 0, r.output
+    out = _plain(r.output)
+    assert "manager" in out and "unreadable" in out
+    assert "task-preamble.local.md (? unreadable — ignored when rendering)" in out
+    assert "task-perpetual" in out and "matches the packaged default" in out
+
+    r = runner.invoke(app, ["prompt", "diff", "manager"])
+    assert r.exit_code == 1
+    assert "cannot be read" in _plain(r.output)
+    assert "Traceback" not in r.output
+
+
 def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     """The babysitter example ships as a packaged prompt; creating an agent
     over it must not require pasting the prompt back in."""

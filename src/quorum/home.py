@@ -125,6 +125,11 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # replaced by the {local} overlay-slot revision (#37)
         "f564262f9fa66c42301e211c64e77433e981003f0df138964aa78174898845f0",
     },
+    "task-perpetual.md": {
+        # the original (#12) block, replaced by the {local} overlay-slot
+        # revision (#37)
+        "5023261d8d55f456570cba3df7c1212de7f7fd4c7fedd11a8c86f77330743934",
+    },
     "manager.md": {
         "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
         "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",

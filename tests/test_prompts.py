@@ -95,8 +95,32 @@ def test_an_explicit_local_placeholder_beats_the_overlay_file(home: Path):
     assert prompts.render(home, "policy", local="passed in") == "passed in\n"
 
 
+def test_an_undecodable_overlay_renders_as_no_overlay(home: Path):
+    """render() is on the manager tick and every task run: one stray byte in
+    a user-owned overlay must not fail supervision forever (review of #37)."""
+    write(home, "policy.md", "before\n\n{local}\n\nafter\n")
+    (home / "prompts" / "policy.local.md").write_bytes(b"house \xff\xfe rules\n")
+
+    assert prompts.load_local(home, "policy") == ""
+    assert prompts.render(home, "policy") == "before\n\nafter\n"
+
+    # the same for the prompts that actually run
+    (home / "prompts" / "manager.local.md").write_bytes(b"\xff\xfe\x00 policy")
+    rendered = prompts.render(home, "manager", digest="DIGEST")
+    assert "DIGEST" in rendered
+    assert "You are the manager of a quorum home" in rendered
+
+
+def test_an_unreadable_template_still_raises(home: Path):
+    """The overlay fails soft; the template itself does not — falling back to
+    the packaged default would silently hide the home's own prompt."""
+    (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
+    with pytest.raises(UnicodeDecodeError):
+        prompts.render(home, "manager", digest="DIGEST")
+
+
 def test_packaged_manager_and_preamble_carry_the_slot():
-    for name in ("manager", "task-preamble"):
+    for name in ("manager", "task-preamble", "task-perpetual"):
         text = prompts.packaged(name)
         assert text is not None
         assert prompts.has_slot(text), f"{name}.md lost its {{local}} slot"
