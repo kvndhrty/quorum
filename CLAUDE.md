@@ -231,7 +231,10 @@ and `docs/architecture.md` in the same commit so the record stays true.
   materialize probe results to disk to feed a view without revisiting that.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
-  `timeout_seconds`).
+  `timeout_seconds`). The second (and only other) entry point is
+  `auth_status(home) -> bool | None` for `quorum doctor` — same `[ci]`
+  switches, same fail-soft shape, `None` for "no answer" (off, no gh,
+  timeout), so no module outside this one ever grows a `gh` subprocess.
 - `doctor.py` — `quorum doctor`: the one place that looks at everything that
   fails soft (config, `[harness.*]` binaries/templates, git, projects, gh
   auth, herdr, nono, prompt staleness, supervisor lock + version, orphaned
@@ -243,7 +246,14 @@ and `docs/architecture.md` in the same commit so the record stays true.
   opt-in `--smoke [harness]` probe, which runs a harness for real in a
   `TemporaryDirectory` through the runner's own argv/pump/transcript code
   (inject included) and asserts a `result` event plus a session id — the
-  check that would have caught the stream-json hang (#24). `check_config` is
+  check that would have caught the stream-json hang (#24). The smoke child
+  gets its own session (`start_new_session=True`, so a timeout `killpg`s the
+  wrapper's whole tree) and a *scratch* `QUORUM_HOME` (an installed
+  integration hook firing mid-probe must never touch the live home).
+  It borrows rather than duplicates: gh through `ci.auth_status`, prompt
+  staleness through `home.classify_prompt`. A `✗` is reserved for something
+  actually wrong — an offline gh and a fresh home with no harness yet are
+  both `–`, so `quorum init && quorum doctor` exits 0. `check_config` is
   the codebase's one deliberate strict `load_config` caller.
 - `config.py` — one place to load config: `load_config` raises,
   `try_load_config` returns defaults for a *missing* file (the user said

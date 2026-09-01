@@ -510,6 +510,12 @@ and the manager digest share — which fills in defaults but is never allowed
 to *enable* something a user may have switched off. Those are the only
 knobs, and none of them changes what anything *does* about the result.
 
+The module has exactly one other entry point, and it exists to keep the
+"only module that shells out to `gh`" rule true rather than convenient:
+`auth_status(home)` answers `True` / `False` / `None` for `quorum doctor`'s
+gh line, under the same `[ci]` switches and the same fail-soft shape, so the
+diagnostic never has to grow a gh subprocess of its own.
+
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
 says how to read the line, and the shipped `prompts/babysitter.md` (below)
@@ -693,13 +699,30 @@ Three rails, and they are the whole design:
    a short timeout. It reuses the runner's code rather than a simplified
    copy because a copy would drift away from the very bug it exists to
    catch (#24: a stream-json CLI ignoring an argv prompt, so every run hung
-   until it timed out). Its guidance pump is pointed at the scratch
-   directory, so the probe creates no inbox and writes nothing to the home.
+   until it timed out). Everything the probe touches is scratch: the
+   guidance pump's bus, the working directory, and the child's own
+   `QUORUM_HOME` — that last one because a harness with quorum's
+   integration hooks installed runs `quorum task hook-session-start` on
+   startup, and the probe must not let it write to the live home. The child
+   is spawned with `start_new_session=True` and the timeout `killpg`s the
+   group: harnesses wrap themselves, and killing only the process quorum
+   spawned leaves grandchildren holding the pipe well past the budget the
+   probe is there to measure.
 3. **Three states, no fourth.** `ok` / `problem` / `na` (✓ / ✗ / –), where
    `na` covers "you turned this off" and "there is nothing configured to
    check". Only `problem` sets a non-zero exit, which is what makes
    `quorum doctor --json` usable in a script and keeps a `–` from training
-   anyone to ignore the output.
+   anyone to ignore the output. Two consequences worth stating: a fresh
+   `quorum init` home — no `[harness.*]` table, no `default_harness` — is
+   one `–` line ("no harness configured yet") rather than two ✗ for one
+   unmade decision, and a `gh` that never answered is `–` too, because an
+   offline laptop says nothing about whether anyone is logged in.
+
+Doctor asks other modules rather than reimplementing them, which is what
+keeps its answers from drifting from the code it reports on: `gh` through
+`ci.auth_status` (the module that owns every gh subprocess), prompt
+staleness through `home.classify_prompt` (the classification `quorum init`
+seeds by), sandbox support through `sandbox.availability()`.
 
 One small function per check, each taking only what it needs (a `Config`, a
 `HarnessConfig`, a home path), so every check has both a passing and a

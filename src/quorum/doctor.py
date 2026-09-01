@@ -37,6 +37,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -70,8 +71,8 @@ SMOKE_PROMPT = (
 )
 DEFAULT_SMOKE_TIMEOUT = 60.0
 # The pump needs an inbox name; nothing ever posts to this one. Its bus is
-# pointed at the probe's scratch directory, so no inbox is created in the
-# user's home either.
+# pointed at the probe's throwaway scratch home, so no inbox is created in
+# the user's home either.
 SMOKE_INBOX = "doctor-smoke"
 
 
@@ -213,12 +214,32 @@ def check_harness_template(name: str, harness: HarnessConfig) -> Check:
 
 
 def check_harnesses(config: Config) -> list[Check]:
+    """Every `[harness.*]` table — or the one line that says there are none.
+
+    "No harness yet" is a `–`, not a `✗`: it is the state `quorum init`
+    leaves behind, and a fresh home reporting two failures for one unmade
+    decision teaches the user to ignore the output. It is a `✗` only when
+    the config contradicts itself — a `default_harness` naming a table that
+    was never written. When there *are* tables, `check_default_harness`
+    speaks for the default; when there are none, this line already did.
+    """
     if not config.harness:
+        default = config.tasks.default_harness
+        if default:
+            return [
+                problem(
+                    "harness",
+                    f"[tasks].default_harness = {default!r} but config.toml has no "
+                    "[harness.<name>] table at all — nothing can run a task",
+                    f"add a [harness.{default}] table (or clear default_harness)",
+                )
+            ]
         return [
-            problem(
+            na(
                 "harness",
-                "no [harness.<name>] table in config.toml — nothing can run a task",
-                "uncomment one of the examples in config.toml and set [tasks].default_harness",
+                "no harness configured yet — nothing can run a task until there is one",
+                "uncomment one of the [harness.*] examples in config.toml and set "
+                "[tasks].default_harness, then `quorum doctor --smoke`",
             )
         ]
     checks: list[Check] = []
@@ -325,7 +346,7 @@ def check_projects(home: Path) -> list[Check]:
 # -- optional integrations ---------------------------------------------------
 
 
-def check_gh(config: Config) -> Check:
+def check_gh(home: Path, config: Config) -> Check:
     """`gh` for the CI probe: on PATH *and* authenticated.
 
     The interesting failure is the middle one. No gh at all is a `–`: the
@@ -333,8 +354,14 @@ def check_gh(config: Config) -> Check:
     wanted it. A gh that is installed but unauthenticated is a `✗`, because
     it looks configured and produces nothing — every `ci:` line disappears
     from the digest with no trace anywhere.
+
+    The gh call itself goes through `ci.auth_status` — `ci.py` is the only
+    module that shells out to gh, and asking it means doctor asks with the
+    probe's own `[ci]` settings rather than a second opinion. Its `None`
+    ("no answer": gh timed out, or the probe declined) is a `–`, not a `✗`:
+    a laptop on a plane is not a misconfigured home.
     """
-    from .ci import GH_ENV
+    from .ci import auth_status
 
     if not config.ci.enabled:
         return na("ci.gh", "[ci].enabled = false — the manager sees no PR/check state")
@@ -345,23 +372,15 @@ def check_gh(config: Config) -> Check:
             "[ci] is on but gh is not on PATH — the manager's ci: lines are silently absent",
             "install gh, or set [ci].enabled = false to say so on purpose",
         )
-    try:
-        result = subprocess.run(
-            [exe, "auth", "status"],
-            capture_output=True,
-            text=True,
-            timeout=config.ci.timeout_seconds,
-            env={**os.environ, **GH_ENV},
-        )
-    except subprocess.TimeoutExpired:
-        return problem(
+    authenticated = auth_status(Path(home))
+    if authenticated is None:
+        return na(
             "ci.gh",
-            f"`gh auth status` did not answer within {config.ci.timeout_seconds:g}s",
-            "run it by hand; raise [ci].timeout_seconds or set [ci].enabled = false",
+            f"gh auth state unknown ({exe} did not answer within "
+            "[ci].timeout_seconds) — ci: lines may or may not appear",
+            "run `gh auth status` by hand; raise [ci].timeout_seconds if it is just slow",
         )
-    except (OSError, subprocess.SubprocessError) as e:
-        return problem("ci.gh", f"`gh auth status` failed: {_oneline(e)}", "check the gh install")
-    if result.returncode != 0:
+    if not authenticated:
         return problem(
             "ci.gh",
             "gh is installed but not authenticated — every ci: line silently disappears",
@@ -414,11 +433,40 @@ def check_sandbox(config: Config) -> Check:
 # -- prompts -----------------------------------------------------------------
 
 
+def _prompt_overlays(home: Path) -> list[Check]:
+    """`prompts/<name>.local.md` files: reported, never judged.
+
+    An overlay is additive by construction — the user's own words layered on
+    top of whatever default ships — so there is no such thing as a stale one
+    and nothing here can be a `✗`. It is listed because a prompt that does
+    not read the way the file on disk does is otherwise a genuinely baffling
+    half hour.
+    """
+    directory = Path(home) / "prompts"
+    try:
+        overlays = sorted(p.name for p in directory.glob("*.local.md") if p.is_file())
+    except OSError:
+        return []
+    return [
+        na(
+            f"prompts.{name.removesuffix('.local.md')}.local",
+            f"prompts/{name} overlays the packaged {name.removesuffix('.local.md')}.md",
+        )
+        for name in overlays
+    ]
+
+
 def check_prompts(home: Path) -> list[Check]:
-    """Home prompt copies against the packaged defaults (home.py's hashes)."""
+    """Home prompt copies against the packaged defaults.
+
+    Classification is `home.classify_prompts` — a loop over the same
+    `home.classify_prompt` that `quorum init` seeds by and `quorum prompt
+    list` displays, hashes and all — so doctor can never disagree with
+    either about what "edited" means.
+    """
     states = home_mod.classify_prompts(Path(home))
     if not states:
-        return [na("prompts", "no packaged prompt defaults found")]
+        return [na("prompts", "no packaged prompt defaults found"), *_prompt_overlays(home)]
     checks: list[Check] = []
     for filename, state in sorted(states.items()):
         name = f"prompts.{filename.removesuffix('.md')}"
@@ -450,7 +498,7 @@ def check_prompts(home: Path) -> list[Check]:
                     "to adopt the new one",
                 )
             )
-    return checks
+    return checks + _prompt_overlays(home)
 
 
 # -- state hygiene -----------------------------------------------------------
@@ -657,9 +705,13 @@ def smoke_checks(
     asserts the two things a run is worthless without: a `result` event, and
     a session/thread id to resume from.
 
-    The probe runs in a scratch directory and gives the guidance pump a bus
-    rooted there too, so it neither writes to QUORUM_HOME nor touches a real
-    inbox.
+    The probe runs in a scratch directory, gives the guidance pump a bus
+    rooted there, and points the harness's own `QUORUM_HOME` at a scratch
+    home — so it neither writes to the user's home nor touches a real inbox,
+    and an installed integration hook (claude-code's SessionStart, say) that
+    fires inside the probe acts on the throwaway home instead of the live
+    one. `home` names the home whose config is being checked and is
+    deliberately never handed to the child.
     """
     name = harness_name or config.tasks.default_harness
     if not name:
@@ -680,21 +732,52 @@ def smoke_checks(
             )
         ]
     with tempfile.TemporaryDirectory(prefix="quorum-doctor-") as scratch:
-        return _smoke_run(Path(scratch), Path(home), name, harness, timeout)
+        return _smoke_run(Path(scratch), name, harness, timeout)
 
 
-def _smoke_run(
-    scratch: Path, home: Path, name: str, harness: HarnessConfig, timeout: float
-) -> list[Check]:
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """SIGKILL everything the smoke child started, not just the child.
+
+    Harnesses wrap themselves — a node shim, a shell that execs the real
+    binary, a CLI that forks a server. `proc.kill()` reaches only the
+    process quorum spawned, and its orphaned children keep running (holding
+    the stdout pipe) long past `--smoke-timeout`, which is exactly the
+    overshoot this probe exists to measure. The child is spawned with
+    `start_new_session=True` so its pid is also its process-group id, and
+    one `killpg` takes the lot.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        return
+    except Exception:
+        # No killpg (Windows), a group already gone, or a pid we may not
+        # signal — fall back to the direct child and take what we can get.
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _smoke_run(scratch: Path, name: str, harness: HarnessConfig, timeout: float) -> list[Check]:
     from .actor import strip_actor_env
     from .runner import _find_session_id, build_harness_argv, guidance_pump, stream_transcript
 
+    workdir = scratch / "run"
+    workdir.mkdir(parents=True, exist_ok=True)
+    # A real but throwaway QUORUM_HOME for the child: a harness carrying
+    # quorum's own integration hooks *will* run `quorum task
+    # hook-session-start` during the probe, and it must land here rather
+    # than in the user's live home.
+    scratch_home = scratch / "home"
+    home_mod.scaffold(scratch_home)
+
     argv = build_harness_argv(harness, SMOKE_PROMPT)
-    env = strip_actor_env({**os.environ, **harness.env, "QUORUM_HOME": str(home)})
+    env = strip_actor_env({**os.environ, **harness.env, "QUORUM_HOME": str(scratch_home)})
     try:
         proc = subprocess.Popen(
             argv,
-            cwd=str(scratch),
+            cwd=str(workdir),
             # DEVNULL for a non-inject harness is the production shape: a real
             # run is a detached child whose stdin is already /dev/null. An
             # inject harness gets the pipe the pump writes its turns to.
@@ -705,6 +788,9 @@ def _smoke_run(
             errors="replace",
             bufsize=1,
             env=env,
+            # Its own session, so a timeout can kill the whole tree
+            # (`_kill_process_group`) instead of one wrapper process.
+            start_new_session=True,
         )
     except OSError as e:
         return [
@@ -733,7 +819,7 @@ def _smoke_run(
 
     started = time.monotonic()
     timed_out = False
-    with guidance_pump(scratch, SMOKE_INBOX, harness, proc, SMOKE_PROMPT) as active:
+    with guidance_pump(scratch_home, SMOKE_INBOX, harness, proc, SMOKE_PROMPT) as active:
         pump = active
         # stream_transcript blocks on stdout, and an inject harness only ends
         # when the pump closes stdin — so the timeout has to live out here,
@@ -748,7 +834,7 @@ def _smoke_run(
         reader.join(timeout)
         if reader.is_alive():
             timed_out = True
-            proc.kill()
+            _kill_process_group(proc)
             reader.join(5)
     elapsed = time.monotonic() - started
     try:
@@ -846,12 +932,27 @@ def run_checks(
     checks = [home_check, config_check, check_git()]
     if config is None:
         # Nothing below can be trusted: every reader of an unloadable config
-        # is looking at defaults, so reporting on those would be fiction.
+        # is looking at defaults, so reporting on those would be fiction —
+        # the smoke run included, since there is no harness table to run.
+        # Say so out loud: a `--smoke` that silently never ran reads exactly
+        # like one that passed.
+        if smoke is not None:
+            checks.append(
+                na(
+                    "smoke",
+                    "smoke skipped: config failed to load, so there is no harness to run",
+                    "fix config.toml (above), then re-run with --smoke",
+                )
+            )
         return checks
     checks += check_harnesses(config)
-    checks.append(check_default_harness(config))
+    if config.harness:
+        # With no [harness.*] table at all, check_harnesses already said the
+        # whole of it — a second line about default_harness is the same news
+        # twice.
+        checks.append(check_default_harness(config))
     checks += check_projects(home)
-    checks.append(check_gh(config))
+    checks.append(check_gh(home, config))
     checks.append(check_herdr(config))
     checks.append(check_sandbox(config))
     checks += check_prompts(home)

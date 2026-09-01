@@ -211,8 +211,11 @@ home: /Users/you/.quorum
 ```
 
 `✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
-something you switched off, or never configured. Only `✗` affects the exit
-code, so a `–` never trains you to ignore the output. Doctor **diagnoses and
+something you switched off, never configured, or that could not answer
+(a `gh` that timed out is `–`, not a failure: offline says nothing about
+whether you are logged in). Only `✗` affects the exit code, so a `–` never
+trains you to ignore the output — a freshly `init`ed home with no harness
+chosen yet says so in one `–` line and exits 0. Doctor **diagnoses and
 never repairs**: every `✗` names the fix, and applying it stays your call.
 
 What it looks at: the home and a *strict* parse of `config.toml` (this is
@@ -234,7 +237,11 @@ spends tokens: it runs your harness once, in a scratch directory, through
 the runner's own code — the same argv building, the same stdin injection for
 an `inject` harness, the same transcript streaming — and asserts that it
 produced a `result` event and a session/thread id before a short timeout
-(`--smoke-timeout`, 60s by default). Everything static can be green while
+(`--smoke-timeout`, 60s by default). The run is walled off from your setup:
+a scratch working directory *and* a scratch `QUORUM_HOME`, so a harness with
+quorum's integration hooks installed cannot touch your real tasks, and the
+timeout kills the harness's whole process tree rather than leaving a wrapped
+CLI's children running. Everything static can be green while
 the harness still answers with nothing quorum can use; that is exactly the
 shape of the outage that motivated this command, where a stream-json CLI
 ignored its argv prompt and every run hung until it timed out.

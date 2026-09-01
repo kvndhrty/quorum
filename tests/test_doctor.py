@@ -176,10 +176,20 @@ def test_harness_template_check_is_neutral_about_an_appended_prompt():
     assert "appends the prompt" in check.summary
 
 
-def test_harnesses_check_flags_an_empty_config():
+def test_harnesses_check_reads_a_fresh_home_as_undecided_not_broken():
+    """One unmade decision must not read as two failures: `quorum init`
+    leaves exactly this state, and a fresh home has nothing wrong with it."""
     checks = doctor.check_harnesses(Config())
+    assert [c.status for c in checks] == [NA]
+    assert "no harness configured yet" in checks[0].summary
+
+
+def test_harnesses_check_flags_a_default_naming_a_table_that_is_not_there():
+    """The same emptiness *is* a fault once the config contradicts itself."""
+    config = Config(tasks=TasksConfig(default_harness="claude"))
+    checks = doctor.check_harnesses(config)
     assert checks[0].status == PROBLEM
-    assert "no [harness.<name>] table" in checks[0].summary
+    assert "no [harness.<name>] table at all" in checks[0].summary
 
 
 def test_default_harness_check_covers_unset_unknown_and_good():
@@ -243,38 +253,58 @@ def test_projects_check_notes_a_non_git_directory(home: Path, tmp_path: Path):
 # -- optional integrations ---------------------------------------------------
 
 
-def test_gh_check_is_quiet_when_ci_is_off():
-    check = doctor.check_gh(Config(ci=CIConfig(enabled=False)))
+def test_gh_check_is_quiet_when_ci_is_off(home: Path):
+    check = doctor.check_gh(home, Config(ci=CIConfig(enabled=False)))
     assert check.status == NA
 
 
-def test_gh_check_is_quiet_when_gh_is_absent(bin_without_gh: Path):
+def test_gh_check_is_quiet_when_gh_is_absent(home: Path, bin_without_gh: Path):
     """No gh is a choice, not a fault — the probe advertises that it silently
     does nothing."""
-    check = doctor.check_gh(Config())
+    check = doctor.check_gh(home, Config())
     assert check.status == NA
     assert "not on PATH" in check.summary
 
 
-def test_gh_check_passes_when_authenticated(bin_without_gh: Path, monkeypatch):
+def test_gh_check_passes_when_authenticated(home: Path, bin_without_gh: Path, monkeypatch):
     install_gh(bin_without_gh, monkeypatch)
-    assert doctor.check_gh(Config()).status == OK
+    assert doctor.check_gh(home, Config()).status == OK
 
 
-def test_gh_check_flags_an_unauthenticated_gh(bin_without_gh: Path, monkeypatch):
+def test_gh_check_flags_an_unauthenticated_gh(home: Path, bin_without_gh: Path, monkeypatch):
     """The trap: gh looks configured, and every `ci:` line silently vanishes."""
     install_gh(bin_without_gh, monkeypatch, mode="unauth")
-    check = doctor.check_gh(Config())
+    check = doctor.check_gh(home, Config())
     assert check.status == PROBLEM
     assert "not authenticated" in check.summary
     assert "gh auth login" in check.fix
 
 
-def test_gh_check_flags_a_hung_gh(bin_without_gh: Path, monkeypatch):
+def test_gh_check_calls_gh_only_through_the_ci_module(home: Path, monkeypatch):
+    """ci.py is the one module that shells out to gh; doctor asks it, so the
+    probe's own [ci] settings decide how the question is put."""
+    calls: list[Path] = []
+
+    def fake_auth_status(target: Path) -> bool:
+        calls.append(Path(target))
+        return True
+
+    monkeypatch.setattr("quorum.ci.auth_status", fake_auth_status)
+    monkeypatch.setattr(shutil, "which", lambda exe: f"/usr/bin/{exe}")
+    assert doctor.check_gh(home, Config()).status == OK
+    assert calls == [home]
+
+
+def test_gh_check_reads_an_offline_gh_as_unknown_not_broken(
+    home: Path, bin_without_gh: Path, monkeypatch
+):
+    """A laptop on a plane is not a misconfigured home: gh that never
+    answered says nothing about auth, so it is a `–` and exits 0."""
+    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n", encoding="utf-8")
     install_gh(bin_without_gh, monkeypatch, mode="hang")
-    check = doctor.check_gh(Config(ci=CIConfig(timeout_seconds=0.5)))
-    assert check.status == PROBLEM
-    assert "did not answer" in check.summary
+    check = doctor.check_gh(home, Config(ci=CIConfig(timeout_seconds=0.5)))
+    assert check.status == NA
+    assert "unknown" in check.summary
 
 
 def test_herdr_check_is_quiet_without_the_table():
@@ -356,6 +386,28 @@ def test_prompts_check_leaves_an_edited_prompt_alone(home: Path):
     check = find(doctor.check_prompts(home), "prompts.manager")
     assert check.status == NA
     assert "edited" in check.summary
+
+
+def test_prompts_check_lists_a_local_overlay_without_judging_it(home: Path):
+    """An overlay is additive by construction: reported so a prompt that does
+    not read like the file on disk is explicable, never a ✗."""
+    (home / "prompts" / "manager.local.md").write_text("also: be terse\n", encoding="utf-8")
+    checks = doctor.check_prompts(home)
+    overlay = find(checks, "prompts.manager.local")
+    assert overlay.status == NA
+    assert "overlays" in overlay.summary
+    # and the base prompt is still classified exactly as home.py sees it
+    assert find(checks, "prompts.manager").status == OK
+    assert all(c.status != PROBLEM for c in checks)
+
+
+def test_prompts_check_agrees_with_home_classification(home: Path):
+    """Doctor and `quorum init`/`prompt list` must never disagree about what
+    'edited' means — same function, so they cannot."""
+    (home / "prompts" / "manager.md").write_text("mine\n", encoding="utf-8")
+    states = home_mod.classify_prompts(home)
+    assert states["manager.md"] == "edited"
+    assert "edited" in find(doctor.check_prompts(home), "prompts.manager").summary
 
 
 def test_prompts_check_notes_an_unseeded_prompt(home: Path):
@@ -559,6 +611,65 @@ def test_smoke_kills_and_reports_a_hanging_harness(home: Path):
     assert find(checks, "smoke.fake.result").status == PROBLEM
 
 
+def test_smoke_kills_the_whole_process_tree_not_just_the_wrapper(home: Path, tmp_path: Path):
+    """Harnesses wrap themselves (a node shim, a shell that execs the real
+    binary). Killing only the process we spawned leaves the grandchild
+    running and holding the stdout pipe, so the probe overshoots its own
+    budget — the child gets its own session and the timeout kills the group."""
+    import time
+
+    from quorum import fsio
+
+    pidfile = tmp_path / "grandchild.pid"
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    config = Config(
+        harness={"wrap": HarnessConfig(start=[sys.executable, str(wrapper), str(pidfile)])},
+        tasks=TasksConfig(default_harness="wrap"),
+    )
+    started = time.monotonic()
+    checks = doctor.smoke_checks(home, config, timeout=2.0)
+    assert find(checks, "smoke.wrap.run").status == PROBLEM
+    assert time.monotonic() - started < 20  # not the grandchild's 120s
+
+    grandchild = int(pidfile.read_text())
+    for _ in range(40):  # the kill is a signal, so give the exit a moment
+        if not fsio.pid_alive(grandchild):
+            break
+        time.sleep(0.1)
+    assert not fsio.pid_alive(grandchild), "the orphaned grandchild outlived the smoke run"
+
+
+def test_smoke_never_points_the_harness_at_the_real_home(home: Path, tmp_path: Path):
+    """The child inherits the environment, and a harness with quorum's own
+    integration hooks installed runs `quorum task hook-session-start` on
+    startup. It must land in a throwaway home, never the live one."""
+    seen = tmp_path / "seen-home"
+    reporter = tmp_path / "reporter.py"
+    reporter.write_text(
+        "import os, sys\n"
+        "open(sys.argv[1], 'w').write(os.environ.get('QUORUM_HOME', ''))\n",
+        encoding="utf-8",
+    )
+    config = Config(
+        harness={"env": HarnessConfig(start=[sys.executable, str(reporter), str(seen)])},
+        tasks=TasksConfig(default_harness="env"),
+    )
+    doctor.smoke_checks(home, config, timeout=30.0)
+    child_home = Path(seen.read_text())
+    assert child_home != home
+    assert home not in child_home.parents
+    assert child_home.parent.name.startswith("quorum-doctor-")  # the probe's own scratch
+    assert not child_home.exists()  # and it went away with the TemporaryDirectory
+
+
 def test_smoke_flags_a_failing_harness(home: Path):
     config = fake_harness_config(mode="fail")
     check = find(doctor.smoke_checks(home, config, timeout=30.0), "smoke.fake.run")
@@ -624,11 +735,43 @@ def test_doctor_command_is_green_and_silent_about_the_inapplicable(home: Path):
     assert "✗" not in result.output
 
 
+def disable_ci(home: Path) -> None:
+    """The machine running the tests may well have an unauthenticated gh."""
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[ci]\nenabled = true", "[ci]\nenabled = false"))
+
+
+def test_doctor_command_is_green_on_a_freshly_initialized_home(home: Path):
+    """`quorum init` then `quorum doctor` must not greet a new user with red:
+    there is no harness yet, which is a decision they have not made, not a
+    fault. One line says so, and the command exits 0."""
+    disable_ci(home)
+    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert result.exit_code == 0, result.output
+    assert "no harness configured yet" in result.output
+    assert "✗" not in result.output
+    # one line about it, not two: the default_harness line is the same news
+    assert "default_harness is unset" not in result.output
+
+
 def test_doctor_command_exits_nonzero_on_any_problem(home: Path):
-    result = runner.invoke(app, ["doctor", "--home", str(home)])  # no harness configured
+    disable_ci(home)
+    (home / "config.toml").write_text(
+        (home / "config.toml").read_text().replace('default_harness = ""', 'default_harness = "x"')
+    )
+    result = runner.invoke(app, ["doctor", "--home", str(home)])
     assert result.exit_code == 1
-    assert "no [harness.<name>] table" in result.output
+    assert "no [harness.<name>] table at all" in result.output
     assert "problem(s)" in result.output
+
+
+def test_doctor_command_says_so_when_a_broken_config_skips_the_smoke(home: Path):
+    """A `--smoke` that silently never ran reads exactly like one that
+    passed."""
+    (home / "config.toml").write_text("[tasks\nbroken = ", encoding="utf-8")
+    result = runner.invoke(app, ["doctor", "--smoke", "--home", str(home)])
+    assert result.exit_code == 1
+    assert "smoke skipped" in result.output
 
 
 def test_doctor_command_emits_json(home: Path):
