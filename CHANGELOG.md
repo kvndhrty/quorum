@@ -11,6 +11,23 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [0.2.0] - 2026-09-01
 
+### Upgrading from 0.1.0
+
+After installing the new version, in each `QUORUM_HOME`:
+
+1. `quorum init` — refreshes every prompt you never edited to the new
+   packaged default (recognized by hash) and seeds the new
+   `task-perpetual.md` and `babysitter.md`. Config is left untouched.
+2. If you edited `prompts/manager.md`, move your house rules into
+   `prompts/manager.local.md` and delete the edited copy, then run
+   `quorum init` again — an edited template is never upgraded, so it would
+   otherwise miss every 0.2.0 policy change (`quorum prompt diff manager`
+   shows the gap).
+3. `quorum down && quorum up` — the manager tick runs inside the supervisor
+   process, which keeps the old code until restarted. Detached task runs
+   are unaffected.
+4. `quorum doctor` — confirms the result.
+
 ### Added
 - `quorum doctor`: one pass over everything that fails soft — config (the one
   strict parse), `[harness.*]` binaries and argv templates, git, projects, gh
