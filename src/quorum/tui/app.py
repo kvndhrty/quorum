@@ -1,7 +1,10 @@
-"""Terminal dashboard (Textual). A pure reader of QUORUM_HOME, refreshed on a
+"""Terminal dashboard (Textual). A file reader of QUORUM_HOME, refreshed on a
 timer — works whether or not the supervisor is running, including over SSH.
-Its single write affordance is steering: `n` sends guidance into the selected
-task's inbox, the same channel the manager's pokes use."""
+Its write affordances stay thin bus/store calls, the same ones the CLI and the
+web dashboard make: `n` sends guidance into the selected task's inbox, `m`
+sends a directive to the manager's inbox (`quorum manager tell`), `s` launches
+a detached run, and `c` cancels a task — the one destructive binding, so it
+confirms first."""
 
 from __future__ import annotations
 
@@ -12,10 +15,19 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 from .. import views
-from ..tasks import read_reports, read_transcript_tail
+from ..messages import MessageBus
+from ..tasks import (
+    Task,
+    TaskStore,
+    nudge,
+    read_reports,
+    read_transcript_tail,
+    runner_alive,
+)
 
 STATUS_STYLE = {
     "idle": "green",
@@ -33,12 +45,42 @@ TASK_STATUS_STYLE = {
 }
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    """A yes/no gate in front of the one destructive binding."""
+
+    BINDINGS = [
+        ("y", "confirm", "yes"),
+        ("n", "refuse", "no"),
+        ("escape", "refuse", "no"),
+    ]
+    CSS = """
+    ConfirmScreen { align: center middle; }
+    #question { width: 70; height: auto; border: round $warning; padding: 1 2; background: $surface; }
+    """
+
+    def __init__(self, question: str):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"{self.question}\n\ny: yes    n / esc: no", id="question")
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_refuse(self) -> None:
+        self.dismiss(False)
+
+
 class QuorumTUI(App):
     TITLE = "quorum"
     BINDINGS = [
         ("q", "quit", "quit"),
         ("r", "refresh", "refresh"),
         ("n", "nudge", "nudge task"),
+        ("m", "directive", "tell manager"),
+        ("s", "run_task", "run task"),
+        ("c", "cancel_task", "cancel task"),
         ("escape", "show_board", "board"),
     ]
     CSS = """
@@ -58,6 +100,8 @@ class QuorumTUI(App):
         super().__init__()
         self.home = Path(home)
         self.selected_task: str | None = None
+        # which inbox the shared input box writes to: "task" or "manager"
+        self._input_target = "task"
         self._log_lines: list[str] | None = None  # last rendered log content
 
     def compose(self) -> ComposeResult:
@@ -93,33 +137,107 @@ class QuorumTUI(App):
         self.refresh_data()
 
     def action_show_board(self) -> None:
+        box = self.query_one("#nudge", Input)
+        if box.display:
+            # escape means "cancel what I am typing", exactly as the
+            # placeholder promises — not "throw away my task selection"
+            self._close_input()
+            return
         self.selected_task = None
-        self.query_one("#nudge", Input).display = False
         self.refresh_data()
 
     def action_nudge(self) -> None:
         if self.selected_task is None:
             self.notify("select a task first", severity="warning")
             return
-        box = self.query_one("#nudge", Input)
-        box.display = True
-        box.focus()
+        self._open_input("task", "guidance for the selected task — enter sends, esc cancels")
+
+    def action_directive(self) -> None:
+        """`quorum manager tell`, from the dashboard: the manager's next run
+        starts with the directive in its digest. No task selection needed."""
+        self._open_input("manager", "directive for the manager — enter sends, esc cancels")
+
+    def action_run_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        if task.attached:
+            self.notify(
+                f"task {task.short_id} is attached to a live session — nudge it instead",
+                severity="warning",
+            )
+            return
+        if runner_alive(self.home, task.id):
+            self.notify(f"task {task.short_id} is already running", severity="warning")
+            return
+        from ..runner import launch_detached
+
+        try:
+            pid = launch_detached(self.home, task.id)
+        except OSError as e:  # a dashboard keystroke must never take the app down
+            self.notify(f"could not start run: {e}", severity="error")
+            return
+        self.notify(f"run started for {task.short_id} (pid {pid})")
+        self.refresh_data()
+
+    def action_cancel_task(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        question = f"cancel task {task.short_id} ({task.status})?"
+        if runner_alive(self.home, task.id):
+            question += "\nits live runner keeps going — `quorum task cancel --kill` SIGTERMs it"
+
+        def cancel(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            TaskStore(self.home).update(task.id, status="cancelled")
+            self.notify(f"task {task.short_id} cancelled")
+            self.refresh_data()
+
+        self.push_screen(ConfirmScreen(question), cancel)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        box = self.query_one("#nudge", Input)
-        box.value = ""
-        box.display = False
-        if not text or self.selected_task is None:
+        target = self._input_target
+        self._close_input()
+        if not text:
             return
-        from ..tasks import TaskStore, nudge
-
-        task = TaskStore(self.home).get(self.selected_task)
+        if target == "manager":
+            MessageBus(self.home).send("user", "manager", type="directive", text=text)
+            self.notify("directive queued for the manager's next run")
+            self.refresh_data()
+            return
+        task = self._selected_task()
         if task is None:
             return
         nudge(self.home, task, text, sender="user")
         self.notify(f"guidance queued for {task.short_id}")
         self.refresh_data()
+
+    # -- write-affordance helpers -------------------------------------------
+
+    def _open_input(self, target: str, placeholder: str) -> None:
+        box = self.query_one("#nudge", Input)
+        self._input_target = target
+        box.placeholder = placeholder
+        box.display = True
+        box.focus()
+
+    def _close_input(self) -> None:
+        box = self.query_one("#nudge", Input)
+        box.value = ""
+        box.display = False
+        self.query_one("#tasks", DataTable).focus()
+
+    def _selected_task(self) -> Task | None:
+        if self.selected_task is None:
+            self.notify("select a task first (enter on a row)", severity="warning")
+            return None
+        task = TaskStore(self.home).get(self.selected_task)
+        if task is None:
+            self.notify("that task is gone", severity="warning")
+        return task
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # selection is deliberate (enter/click) — merely arrowing through the
@@ -224,10 +342,16 @@ class QuorumTUI(App):
         mode = self.query_one("#logmode", Static)
         if self.selected_task:
             short = self.selected_task[-6:].lower()
-            mode.update(f"task {short} — transcript tail   (esc: board · n: nudge)")
+            mode.update(
+                f"task {short} — transcript tail   "
+                "(esc: board · n: nudge · m: manager · s: run · c: cancel)"
+            )
             lines = self._task_log_lines(self.selected_task)
         else:
-            mode.update("board — recent messages   (enter on a task: transcript · ⚭ attached · ▶ running)")
+            mode.update(
+                "board — recent messages   "
+                "(enter on a task: transcript · m: tell manager · ⚭ attached · ▶ running)"
+            )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
                 for m in views.board_tail(self.home, limit=30)
