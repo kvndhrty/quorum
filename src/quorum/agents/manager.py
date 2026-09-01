@@ -217,6 +217,8 @@ def _dependency_marks(state: dict | None) -> str:
         marks += f" waiting-on={','.join(state['waiting_on'])}"
     if state["failed"]:
         marks += " DEP-FAILED"
+    if state["missing"]:
+        marks += " DEP-MISSING"
     if state["cycle"]:
         marks += " DEP-CYCLE"
     return marks
@@ -244,7 +246,10 @@ def _dependency_lines(state: dict | None) -> list[str]:
     if state["missing"]:
         lines.append(
             f"  DEP-MISSING: dependency {', '.join(state['missing'])} has no task "
-            "record — its directory is gone; this task can never start"
+            "record — its directory is gone, so it can never reach `done`. Like "
+            "DEP-FAILED this does NOT hold the task back (nothing waits on an "
+            "upstream that cannot finish): decide whether its premise still "
+            "holds, then launch it or cancel it, and journal which"
         )
     if state["cycle"]:
         lines.append(

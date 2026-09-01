@@ -134,6 +134,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the ci-probe revision, replaced by the perpetual-task + self-cost
         # revision (#12, #32)
         "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
+        # the perpetual-task + self-cost revision, replaced by the #31
+        # task-dependency rule
+        "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
     },
 }
 

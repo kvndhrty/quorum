@@ -284,12 +284,10 @@ def resolve_dependencies(
             raise ValueError(str(e)) from None
         if self_id is not None and dep.id == self_id:
             raise ValueError(f"task {dep.short_id} cannot depend on itself")
-        # TODO(#12 perpetual tasks): a perpetual task never reaches a
-        # terminal status, so a dependent would wait on it forever. The
-        # field is being added on a parallel branch; this getattr guard
-        # starts refusing the moment `Task.perpetual` exists, and the
-        # skipped test in tests/test_tasks.py turns live with it.
-        if getattr(dep, "perpetual", False):
+        # A perpetual task never reaches a terminal status, so a dependent
+        # would wait on it forever — refuse the chain at the one validated
+        # entry point rather than queue work that can never start.
+        if dep.perpetual:
             raise ValueError(
                 f"task {dep.short_id} is perpetual — it never finishes, so nothing "
                 "may depend on it"
@@ -330,17 +328,24 @@ def dependency_state(task: Task, by_id: Mapping[str, Task]) -> dict[str, Any]:
     lookup of every task (so views, the digest and the runner all read
     dependencies the same way, from one listing).
 
-    Total by design — a hand-edited `depends_on` never raises here:
+    Total by design — a hand-edited `depends_on` never raises here.
 
-      waiting_on  short ids of everything unsatisfied: a dependency that has
-                  not reached a terminal status, or one whose record is gone.
-                  This is what the digest renders and what `task run` refuses
-                  on.
+    The policy in one line: **only a dependency that still might finish
+    blocks.** Everything that never will — ended `blocked`/`cancelled`, or
+    gone from disk — is reported as what it is and left for the manager to
+    judge, because "waiting" on something unsatisfiable hides the decision
+    instead of surfacing it.
+
+      waiting_on  short ids of dependencies that have not reached a terminal
+                  status. This is what the digest renders and what `task run`
+                  refuses on.
       failed      short ids of dependencies that ended `blocked`/`cancelled`
                   — satisfied they never will be. An observation for the
                   manager to judge (nudge, cancel, escalate), never a rail:
                   they are *not* in `waiting_on`, so nothing is blocked by one.
-      missing     handles named by `depends_on` with no task record.
+      missing     handles named by `depends_on` with no task record — the
+                  same class as `failed` (an upstream that can never reach
+                  `done`), and treated identically: reported, never waited on.
       cycle       True when the dependency chain loops (it would wait forever).
     """
     waiting_on: list[str] = []
@@ -350,7 +355,6 @@ def dependency_state(task: Task, by_id: Mapping[str, Task]) -> dict[str, Any]:
         dep = by_id.get(dep_id)
         if dep is None:
             missing.append(short_handle(dep_id))
-            waiting_on.append(short_handle(dep_id))
         elif dep.status not in TERMINAL_STATUSES:
             waiting_on.append(dep.short_id)
         elif dep.status != "done":

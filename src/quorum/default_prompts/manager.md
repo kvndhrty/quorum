@@ -32,11 +32,13 @@ How to work:
    terminal status yet — launching now spends a run on work whose input does
    not exist. Launch what it waits on instead, and come back to it next tick;
    the runner refuses such a run anyway (`--force` exists for a human).
-   `DEP-FAILED` means a dependency ended `blocked` or `cancelled`, so this
-   task will never become runnable by waiting: judge it — nudge or relaunch
-   the dependency, `task cancel` the dependent if its premise is gone, or
-   escalate via `board post attention` — and journal what you decided.
-   `DEP-CYCLE` / `DEP-MISSING` mean a hand-edited dependency list that can
+   `DEP-FAILED` (a dependency ended `blocked`/`cancelled`) and `DEP-MISSING`
+   (a dependency's record is gone) both mean an upstream that can never reach
+   `done`. Neither holds the task back — nothing waits on something
+   unsatisfiable — so the decision is yours: nudge or relaunch the dependency,
+   launch the dependent anyway if its premise still holds, `task cancel` it if
+   it does not, or escalate via `board post attention`. Journal what you
+   decided. `DEP-CYCLE` means a hand-edited dependency list that loops and can
    never be satisfied; escalate rather than force a run. A task whose
    dependencies are all `done` shows no marks and is an ordinary queued task
    — its prompt already carries each dependency's status and PR url, and it

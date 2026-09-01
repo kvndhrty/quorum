@@ -334,22 +334,28 @@ Cross-project chains work by construction, since ids are global.
 - **Validation happens once, at `task add`** (`tasks.resolve_dependencies`):
   handles resolve through the same prefix/suffix `resolve()` as everything
   else and are stored expanded, an unknown or ambiguous handle fails the
-  command (nothing is queued), and a task cannot depend on itself. A
-  dependency must already exist, so a cycle is only reachable by hand-editing
-  `task.json`.
+  command (nothing is queued), and a task cannot depend on itself. Depending
+  on a **perpetual** task is refused too: it never reaches a terminal status,
+  so the dependent would wait forever. A dependency must already exist, so a
+  cycle is only reachable by hand-editing `task.json`.
 - **Reading is total** (`tasks.dependency_state`, pure over an
   already-loaded task listing, so every reader stays a file reader):
-  `waiting_on` = dependencies that have not reached a terminal status, plus
-  any whose record is gone; `failed` = dependencies that ended `blocked` or
-  `cancelled`; `missing`; and `cycle`, detected rather than recursed into.
-  A hand-edited `depends_on` never raises.
+  `waiting_on` = dependencies that have not reached a terminal status;
+  `failed` = dependencies that ended `blocked` or `cancelled`; `missing` =
+  dependencies whose task record is gone; and `cycle`, detected rather than
+  recursed into. A hand-edited `depends_on` never raises.
+- **Only a dependency that still might finish blocks.** `failed` and
+  `missing` are both upstreams that can never reach `done`, and both are
+  deliberately kept *out* of `waiting_on`: continuing to call an
+  unsatisfiable dependency "waiting" would hide the decision behind a task
+  that silently never runs. They are reported instead, and the manager (or
+  the user) decides — launch it anyway, cancel it, escalate.
 - **The digest observes** (`waiting-on=<short ids>` on the task line while a
   dependency is unfinished; `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE` flags
   with a line of explanation). These are observations of the same class as
   `possible-loop` and `BUDGET-EXCEEDED` — the manager judges them (nudge the
   dependency, cancel the dependent, escalate) and quorum does nothing on its
-  own. Note that a `failed` dependency does **not** block: it can never be
-  satisfied, so continuing to call it "waiting" would hide the decision.
+  own.
 - **One narrow substrate refusal**: `run_task` (and `quorum task run`, so
   `--detach` fails in the parent too) refuses a task with unfinished
   dependencies unless `--force`. This is the third rail of that class, next
@@ -359,8 +365,8 @@ Cross-project chains work by construction, since ids are global.
   manager is the only caller that would ever do it by accident. It refuses
   the launch; it never cancels, re-queues or reorders anything.
 - **Views** (`quorum status` / `task list` / `task show`, TUI, web) render
-  `waiting_on` / `dep_failed` / `dep_cycle` straight off `views.task_rows`.
-  Nothing is materialized to disk for them.
+  `waiting_on` / `dep_failed` / `dep_missing` / `dep_cycle` straight off
+  `views.task_rows`. Nothing is materialized to disk for them.
 - **Reading the upstream outcome**: the dependent task's composed prompt
   gains a *Tasks this one depends on* block listing each dependency's short
   id, status and `pr_url` (`runner.dependency_note` — fields already in

@@ -213,11 +213,17 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                     t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
                 ),
                 "pr_url": t.pr_url,
-                # Dependencies as the views render them: full ids for anyone
-                # who needs to link, short ids for anyone who displays.
+                # Dependencies as the views render them: short ids
+                # throughout, since every consumer here displays rather than
+                # links. `t.depends_on` holds the full ids for anyone who
+                # needs one.
                 "depends_on": [short_handle(d) for d in t.depends_on],
+                # Only `waiting_on` blocks. `dep_failed`/`dep_missing` name
+                # dependencies that can never be satisfied — shown so the
+                # decision is visible, not waited on.
                 "waiting_on": deps.get(t.id, {}).get("waiting_on", []),
                 "dep_failed": deps.get(t.id, {}).get("failed", []),
+                "dep_missing": deps.get(t.id, {}).get("missing", []),
                 "dep_cycle": deps.get(t.id, {}).get("cycle", False),
                 "git": git_state,
                 "created_at": t.created_at,

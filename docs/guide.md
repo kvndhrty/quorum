@@ -258,6 +258,7 @@ You end it, with `quorum task cancel <id>`. Two things to expect:
   idle home, and a home with a perpetual task is never idle, so expect one
   manager run per tick for as long as the task lives. `quorum status` shows
   what those runs cost on the manager's row.
+
 ### Chaining tasks with `--after`
 
 Some work only makes sense once other work has landed. `--after` says so:
@@ -275,7 +276,9 @@ quorum task add my-api "review the rate-limiting PR and fix what you find" \
 `--after` is repeatable (`--after a3f2k9 --after d4e5f6` waits for both) and
 takes the same short handles as everything else; the ids are global, so a
 task in one project may wait on a task in another. An unknown handle fails
-the command — nothing is queued.
+the command — nothing is queued — and so does `--after` a
+[perpetual task](#perpetual-tasks): it never finishes, so anything waiting
+on it would wait forever.
 
 What this *does*: while a dependency has not reached a terminal status, the
 dependent shows `waiting-on a3f2k9` in `quorum status`, `task list`,
@@ -287,10 +290,16 @@ on its next tick.
 
 What this is **not**: a workflow engine. Nothing schedules on dependencies,
 nothing runs automatically the instant an upstream finishes, and quorum
-never cancels or reorders anything for you. If a dependency ends `blocked`
-or `cancelled` it can never be satisfied, so the digest flags `DEP-FAILED`
-and the manager decides what to do — nudge the dependency, cancel the
-dependent, or escalate to you.
+never cancels or reorders anything for you.
+
+**Only a dependency that still might finish holds a task back.** If one ends
+`blocked` or `cancelled`, or its task record is deleted outright, it can
+never be satisfied — so quorum stops calling the dependent "waiting" and
+flags `DEP-FAILED` / `DEP-MISSING` instead, in the digest and in every view.
+The task becomes runnable again and the decision is a visible one, for the
+manager or for you: nudge the dependency, launch the dependent anyway if its
+premise still holds, or cancel it. A dependency that silently blocked forever
+would have hidden exactly that choice.
 
 **How the dependent reads the upstream's result.** Its prompt gains a block
 naming each dependency with its status and PR url:
@@ -389,9 +398,10 @@ when there is something to manage), the manager compiles a **digest**:
   forever, never call it stuck, never cancel";
 - `waiting-on=<ids>` on a task queued with [`--after`](#chaining-tasks-with---after)
   whose dependencies have not finished — the prompt tells the manager not to
-  launch it yet (the runner refuses anyway) — and `DEP-FAILED` when a
-  dependency ended `blocked`/`cancelled`, which is a decision for the
-  manager, not a rule quorum acts on;
+  launch it yet (the runner refuses anyway) — and `DEP-FAILED` /
+  `DEP-MISSING` when a dependency ended `blocked`/`cancelled` or lost its
+  record, neither of which blocks anything: they are decisions for the
+  manager, not rules quorum acts on;
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;

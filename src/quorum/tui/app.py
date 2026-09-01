@@ -171,6 +171,8 @@ class QuorumTUI(App):
                     status += " ⏳" + ",".join(t["waiting_on"])
                 if t.get("dep_failed"):
                     status += " DEP-FAILED"
+                if t.get("dep_missing"):
+                    status += " DEP-MISSING"
                 style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
                 table.add_row(
                     t["id_short"],

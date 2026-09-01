@@ -368,6 +368,10 @@ def doctor(home: Path | None = _HOME_OPT) -> None:
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ⏳ waiting on unfinished dependencies (`task add --after`); the
+             runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
+             name dependencies that can never finish — nothing waits on those,
+             they are yours (or the manager's) to decide about
           ⚠ uncommitted/unpushed work in the task's workdir
           $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
           cost/tokens are shown when the harness reported them, summed over runs
@@ -467,6 +471,8 @@ def _echo_task_row(t: dict) -> None:
         line += f"  waiting-on {','.join(t['waiting_on'])}"
     if t.get("dep_failed"):
         line += f"  DEP-FAILED {','.join(t['dep_failed'])}"
+    if t.get("dep_missing"):
+        line += f"  DEP-MISSING {','.join(t['dep_missing'])}"
     if t.get("dep_cycle"):
         line += "  DEP-CYCLE"
     if t.get("usage_text"):
@@ -823,6 +829,8 @@ def task_show(
             line += f"  (waiting on {', '.join(deps['waiting_on'])})"
         if deps["failed"]:
             line += f"  DEP-FAILED: {', '.join(deps['failed'])}"
+        if deps["missing"]:
+            line += f"  DEP-MISSING: {', '.join(deps['missing'])}"
         if deps["cycle"]:
             line += "  DEP-CYCLE"
         typer.echo(f"  after:    {line}")

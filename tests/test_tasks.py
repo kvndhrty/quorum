@@ -4,6 +4,7 @@ injection, session capture/resume, and the cooperative report channel."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -644,34 +645,9 @@ def test_resolve_dependencies_rejects_unknown_and_self(home: Path):
         tasks.resolve_dependencies(store, [existing.short_id], self_id=existing.id)
 
 
-class _PerpetualStandIn:
-    """A task that already carries #12's `perpetual` field."""
-
-    id = "01PERPETUALPERPETUALPETUAL"
-    short_id = "petual"
-    perpetual = True
-
-
-class _PerpetualStore:
-    def resolve(self, handle):
-        return _PerpetualStandIn()
-
-
-def test_cannot_depend_on_a_perpetual_task():
-    """A perpetual task (#12) never reaches a terminal status, so a dependent
-    would wait on it forever. `Task.perpetual` is being added on another
-    branch; the guard is a getattr, so it starts refusing the moment the
-    field lands — here it is driven against a stand-in that already has it."""
-    with pytest.raises(ValueError, match="perpetual"):
-        tasks.resolve_dependencies(_PerpetualStore(), ["petual"])
-
-
-@pytest.mark.skipif(
-    "perpetual" not in tasks.Task.model_fields,
-    reason="#12 (perpetual tasks) has not landed on this branch yet",
-)
-def test_cannot_depend_on_a_real_perpetual_task(home: Path):
-    """The same guard against the real field, once #12 is merged."""
+def test_cannot_depend_on_a_perpetual_task(home: Path):
+    """A perpetual task never reaches a terminal status, so a dependent would
+    wait on it forever — `task add --after` refuses the chain outright."""
     store = TaskStore(home)
     upstream = store.add("proj", "forever", "fake")
     store.update(upstream.id, perpetual=True)
@@ -689,17 +665,19 @@ def test_dependency_state_reads_waiting_failed_and_missing(home: Path):
         depends_on=[running.id, finished.id, dead.id, "01GHOSTGHOSTGHOSTGHOSTGH0ST"],
     )
     state = tasks.dependency_state(dependent, {t.id: t for t in store.list()})
-    assert state["waiting_on"] == [running.short_id, "tgh0st"]
+    # only a dependency that still might finish blocks
+    assert state["waiting_on"] == [running.short_id]
     assert state["failed"] == [dead.short_id]  # never blocks: the manager judges it
-    assert state["missing"] == ["tgh0st"]
+    assert state["missing"] == ["tgh0st"]  # same class as failed, same treatment
     assert state["cycle"] is False
 
-    # once the upstream reports done, nothing is waiting
+    # once the upstream reports done, nothing is waiting — a pruned dependency
+    # is reported, not waited on, so it can never strand the dependent
     tasks.report(home, running.id, "done", "shipped it")
     state = tasks.dependency_state(
         store.get(dependent.id), {t.id: t for t in store.list()}
     )
-    assert state["waiting_on"] == ["tgh0st"]
+    assert state["waiting_on"] == [] and state["missing"] == ["tgh0st"]
 
 
 def test_dependency_state_flags_a_hand_edited_cycle_instead_of_crashing(home: Path):
@@ -769,6 +747,27 @@ def test_task_rows_surface_waiting_on(home: Path):
     rows = {r["id"]: r for r in views.task_rows(home)}
     assert rows[dependent.id]["waiting_on"] == []
     assert rows[dependent.id]["dep_failed"] == [upstream.short_id]
+
+
+def test_a_pruned_dependency_is_reported_not_waited_on(home: Path, project: str):
+    """A dependency whose task directory is gone can never reach `done`, so it
+    is treated exactly like a `blocked`/`cancelled` one: `DEP-MISSING` in the
+    views, out of `waiting_on`, and no runner refusal. Waiting forever on it
+    would strand the dependent with nothing on screen saying why."""
+    from quorum import views
+
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    shutil.rmtree(tasks.task_dir(home, upstream.id))
+
+    row = {r["id"]: r for r in views.task_rows(home)}[dependent.id]
+    assert row["waiting_on"] == [] and row["dep_missing"] == [upstream.short_id]
+    assert run_task(home, config, dependent.id) == 0  # not refused
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 

@@ -86,8 +86,11 @@ and `docs/architecture.md` in the same commit so the record stays true.
   must not start before — validated once at `add` (`resolve_dependencies`:
   unknown/ambiguous/self rejected, and a perpetual upstream refused because it
   never finishes) and read back by the total, pure `dependency_state`
-  (waiting/failed/missing/cycle) that the digest, views and runner share. Not a
-  DAG engine: the manager still decides every launch.
+  (waiting/failed/missing/cycle) that the digest, views and runner share. Only
+  a dependency that still *might* finish blocks: `failed` and `missing` are
+  both unsatisfiable upstreams, so both are reported and neither is waited on
+  — a task that silently never runs would hide the decision. Not a DAG engine:
+  the manager still decides every launch.
   `perpetual = true` (`task add --perpetual`) marks a task that is not meant to
   finish: the substrate is unchanged, but the preamble's `{perpetual}` block
   softens delivery into commit+push per cycle, the digest renders
