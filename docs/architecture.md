@@ -34,6 +34,7 @@ quorum up ──► Supervisor
               ├─ APScheduler (BackgroundScheduler, thread pool)
               │   ├─ job: manager  (every 5m)  ── crash-isolated wrapper:
               │   ├─ job: <user plugins…>         heartbeats, error posts,
+              │   │                               auto-pause or escalation,
               │   ├─ job: _control (15s: claims supervisor inbox —
               │   │        agent.pause / agent.resume / agent.run-now /
               │   │        agent.reload)
@@ -82,20 +83,74 @@ tasks/<id>/runner.log             detached-run bootstrap output
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
 prompts/<name>.md                 user-editable prompt templates (re-running
                                   `quorum init` upgrades never-edited seeds)
+prompts/<name>.local.md           per-prompt overlay: user-owned, never
+                                  seeded, merged at the template's {local}
+                                  slot (else prepended) — see "Prompts"
 messages/board/<topic>/*.json     public append-only board
 messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
-                                  (+ journal.jsonl, transcript.jsonl and
-                                  usage.jsonl for harness-driven agents other
-                                  than the manager)
+                                  (+ journal.jsonl, notes.jsonl,
+                                  transcript.jsonl and usage.jsonl for
+                                  harness-driven agents other than the
+                                  manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
+state/manager/notes.jsonl         the notebook: standing notes a future run
+                                  reads, plus retirement tombstones
 state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent ({at, run, usage|null})
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
+
+## Prompts
+
+`quorum.prompts` resolves a template name three ways, in order: the home
+copy `prompts/<name>.md`, else the packaged `default_prompts/<name>.md`,
+else `KeyError`. Rendering is `str.format_map` over a missing-key-preserving
+dict, so a template may contain braces quorum knows nothing about
+(`{{escaped}}` documentation in the header comments, JSON shapes in
+examples) without any escaping discipline at the call sites.
+
+`quorum init` seeds the packaged defaults and, on re-run, upgrades any copy
+whose sha256 is in `home.SUPERSEDED_PROMPT_HASHES` — i.e. a pristine seed
+from an older quorum. Anything else is a user edit and is never touched.
+That rule has a cliff: the first edit to `<name>.md`, however small, opts
+the home out of every future upgrade to that prompt, silently. A home that
+prepended five lines of house policy to `manager.md` kept running the
+manager prompt from the release it edited, with no policy for any digest
+observation added since.
+
+The **overlay** removes the reason to take the cliff. `prompts/<name>.local.md`
+is user-owned, never seeded, never read by `init`, never upgraded. `render`
+merges it into the resolved template:
+
+- at the first unescaped `{local}` slot, which the packaged `manager.md`
+  (before "How to work", so house rules outrank the general guidance),
+  `task-preamble.md` (after the delivery protocol) and `task-perpetual.md`
+  (after the cycle conventions) carry — `{{local}}` in a header comment is
+  documentation, not a slot;
+- prepended, when the template has no slot — the case of a home that
+  rewrote `<name>.md` before the slot existed, where a silently dropped
+  overlay would be the worse failure;
+- as nothing at all when the overlay is absent or blank, taking the slot's
+  own line with it so an unused slot leaves no hole.
+
+Reading the overlay is **fail-soft** (`load_local`): an overlay that cannot
+be read or decoded renders as no overlay, because `render` is on the manager
+tick and every task run, and one stray byte in a user-owned file must not
+fail supervision forever. Reading the *template* stays loud — it is the
+prompt itself, and silently falling back to the packaged default would hide
+the fork. `quorum prompt list` is where either problem is reported: it marks
+an unreadable file `?` and keeps listing the rest.
+
+`local` is otherwise an ordinary placeholder key: pass it explicitly and it
+wins over the file. Overriding a whole template by rewriting `<name>.md`
+keeps working exactly as before — the overlay is a second, cheaper lever,
+not a replacement. `quorum prompt list` and `quorum prompt diff <name>`
+(home copy vs packaged default) make the state of both levers visible, and
+`init`'s `edited` line points at them.
 
 ## Tasks and the runner
 
@@ -403,7 +458,7 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
    configured `[tasks]` budget (both observations — see *Token/cost usage*
    above); a header line with what the manager's *own* recent runs have
-   cost, read from its usage ledger; the manager's own
+   cost, read from its usage ledger; its **notebook** (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -432,6 +487,48 @@ avoid degenerate loops (its prompt forbids repeating an intervention marked
 UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
 (`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
 without ever second-guessing a choice.
+
+**The notebook (`notes.py`).** The journal is what the manager *did* this
+run, read back as a bounded tail; a note meant for next week is pushed out
+of that window by the next busy tick. The notebook is the other memory:
+`state/manager/notes.jsonl` (per-agent `state/agents/<name>/notes.jsonl`,
+via `actor.notes_path`), append-only, one entry per line —
+`{id, ts, run_id, sender, text, ttl_days?}` for a note and
+`{id, ts, run_id, sender, retired: true}` for the tombstone `quorum manager
+forget` appends. Written with `quorum manager remember "…" [--ttl N]`,
+which goes through `_actor_guard` like every other mutating command, so a
+note is journaled, attributed via `current_actor()` and counted against the
+run's action cap.
+
+It is a **separate buffer** on both sides, and that is the whole design:
+
+- *Write side.* Not a board topic, so no reporting task or chatty agent
+  posts into it in the ordinary course of things. Only the notebook's own
+  agent and an untagged human may write (`notes.may_write`); a call tagged
+  as a task or another agent is refused with a pointer to `task report` and
+  `board post attention`. Be honest about what that fence is: `may_write`
+  reads `QUORUM_ACTOR` from the environment, and any process that can run
+  the quorum CLI can set it. The runner stripping the actor tag from task
+  runs, and this check, are **conventions that keep honest callers out of
+  each other's memory** — they stop accidental crowding, not a harness that
+  decides to impersonate the manager. The real boundary around a notebook
+  is the filesystem the run is given (`sandbox.py`), not this check.
+- *Read side.* `notes.digest_section` renders the notebook **before** the
+  task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
+  else in the digest spends. Ten live tasks with long report tails cannot
+  shrink it. Over the cap the newest notes are kept and the digest says how
+  many older ones it dropped; when the file itself has outgrown
+  `NOTES_SCAN_BYTES` the section also says how many bytes went unscanned, so
+  a truncated memory is visible rather than silent; a single very long note
+  is truncated
+  (`NOTE_MAX_CHARS`) rather than allowed to evict the rest.
+
+Nothing is compacted or summarized in Python: expiry is the only automatic
+retirement (`ttl_days`), and consolidation — one superseding note, then
+`forget` the ones it replaced — is policy in `prompts/manager.md`. Readers
+are pure file readers (`quorum manager notes`, `views.agent_detail` →
+the TUI's agent pane and the web agent detail), and a prompt agent's
+template gets the same rendering wherever it writes `{notes}`.
 
 **Loop observation (`possible-loop`).** The action journal remembers what the
 *manager* did; nothing else sees the other loop class — a task harness
@@ -520,7 +617,13 @@ its result to disk, so `views.py` never acquires a network call.
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
 `auto_pause = false` config keeps the schedule firing so recovery needs no
-human intervention.
+human intervention. Every other supervisor announcement — tick errors,
+auto-pause — lands on `system`, which no banner reads; a normally-pausing
+agent at least *stops*, but the manager keeps firing, so a *sustained*
+streak escalates on its own: at `MAX_CONSECUTIVE_FAILURES` the supervisor
+posts one `agent.failing` to `attention` (the banner `quorum status`, the
+TUI and the web header all read). Recovery is announced on `system`, not
+`attention`. See [Messaging protocol](#messaging-protocol) for the dedupe.
 
 ### Prompt agents
 
@@ -595,6 +698,32 @@ command covers create, edit, and delete. A pause is durable: it lands in
 the agent's heartbeat, and a restarting supervisor schedules any agent whose
 heartbeat says `paused` with its job paused rather than silently resuming
 it.
+
+**Failure escalation** rides the board rather than the control channel. Every
+failed tick posts `agent.error` to `system` and records the streak on the
+heartbeat (`consecutive_failures`, `error`); at `MAX_CONSECUTIVE_FAILURES`
+(5) the agent is auto-paused with an `agent.paused` post — also on `system`.
+Nothing in that story reaches a banner: `views.attention_summary` reads the
+`attention` topic alone. For an ordinary agent the pause is itself the loud
+signal (it stops, and `quorum agent list` says `paused`), but an agent whose
+config sets `auto_pause = false` — the manager, which must keep firing so it
+self-recovers — is exempt from the pause and would just fail all night in a
+channel nobody watches. So the supervisor posts one `agent.failing` to
+`attention` for such an agent instead. **That post is the only failure path
+in quorum that reaches `attention`**; everything else the supervisor says,
+recovery included, stays on `system`.
+
+The dedupe is a third heartbeat field, `escalated_at`: written *after* the
+post lands (a stamp-first escalation whose post threw would suppress the
+banner for the rest of the streak), checked before posting (so a ten-hour
+outage is one post, not one per tick), and cleared by every success path —
+a scheduled tick, `quorum agent run-once`, and `quorum agent resume` all
+clear it alongside `error` and `consecutive_failures`, which is also what
+makes the closing `agent.recovered` post (on `system` — a self-healed
+outage is informational, and the time-windowed banner has no read-state to
+dismiss) fire exactly once. Nothing here pauses, retries or throttles the
+agent; the post is an observation, in the same class as `possible-loop`
+and `ci:`.
 
 ### Design seam: outboxes and a router
 

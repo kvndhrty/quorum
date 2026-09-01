@@ -39,6 +39,19 @@ def transcript_path(home: Path, name: str = "manager") -> Path:
     return Path(home) / "state" / "agents" / name / "transcript.jsonl"
 
 
+def notes_path(home: Path, name: str = "manager") -> Path:
+    """An agent's notebook: standing notes a *future* run needs (same split as
+    `journal_path`).
+
+    Deliberately its own file, next to the journal rather than inside it: the
+    journal is a bounded tail of what an agent *did* this run, so a note meant
+    for next week is pushed out of it by the next busy tick. See `notes.py`.
+    """
+    if name == "manager":
+        return Path(home) / "state" / "manager" / "notes.jsonl"
+    return Path(home) / "state" / "agents" / name / "notes.jsonl"
+
+
 def usage_path(home: Path, name: str = "manager") -> Path:
     """An agent's per-run spend ledger (same split as `journal_path`).
 

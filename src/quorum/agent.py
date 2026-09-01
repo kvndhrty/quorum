@@ -107,11 +107,37 @@ def write_heartbeat(home: Path, name: str, **fields: Any) -> None:
     path = Path(home) / "state" / "agents" / name / "heartbeat.json"
     current: dict[str, Any] = {}
     try:
-        current = fsio.read_json(path)
+        loaded = fsio.read_json(path)
     except (OSError, ValueError):
-        pass
+        loaded = None
+    # A heartbeat file holding valid-but-not-object JSON (hand-edited, or a
+    # truncated-then-refilled file) must read as "no heartbeat", not crash the
+    # writer: heartbeats are a bookkeeping side channel, never a rail.
+    if isinstance(loaded, dict):
+        current = loaded
     current.update(fields)
     fsio.atomic_write_json(path, current)
+
+
+def success_heartbeat_fields(started: datetime, ended: datetime) -> dict[str, Any]:
+    """The heartbeat a *successful* tick writes, wherever the tick was run.
+
+    Heartbeat writes are merges, so success has to clear the failure fields
+    explicitly, or a long-fixed agent reads as broken in every dashboard —
+    and a stale `escalated_at` would suppress the next escalation forever.
+    The supervisor's wrapper and `quorum agent run-once` share this so a
+    proven-working hand-run tick closes a streak exactly as a scheduled one
+    does.
+    """
+    return {
+        "status": "idle",
+        "last_start": fsio.iso(started),
+        "last_end": fsio.iso(ended),
+        "duration_ms": int((ended - started).total_seconds() * 1000),
+        "error": None,
+        "consecutive_failures": 0,
+        "escalated_at": None,
+    }
 
 
 class Agent:

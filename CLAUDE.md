@@ -205,7 +205,25 @@ so the record stays true.
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
   for journaling and message attribution, and the runner `strip_actor_env`s
   spawned children so they act as themselves. Also owns `journal_path`/
-  `transcript_path` (manager at `state/manager/`, others at `state/agents/<name>/`).
+  `notes_path`/`transcript_path` (manager at `state/manager/`, others at
+  `state/agents/<name>/`).
+- `notes.py` — the notebook: an agent's *standing* memory, deliberately a
+  separate buffer from both the journal (a bounded tail of one run's actions,
+  which a busy tick scrolls) and the board (which anything may post to).
+  Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
+  through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
+  any actor that is not the notebook's own agent or an untagged human — tasks
+  reach the manager with `task report` and the board. That fence reads
+  `QUORUM_ACTOR`, so it is a **convention against accidental crowding, not a
+  security boundary** (the sandbox is); say so in docs rather than overselling
+  it. Reads are owner-checked too (`check_owner`, `--agent` is a path
+  component), and a malformed line is skipped, never raised, so one bad line
+  can't fail every tick. `digest_section` renders it **before** the task
+  section under its own `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else
+  spends that budget, so noisy tasks can't shrink it), keeps the newest over
+  the cap and says how many it dropped — plus how many bytes fell outside
+  `NOTES_SCAN_BYTES`, so a truncated memory is visible. No Python
+  summarization: consolidation is prompt policy.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small
@@ -266,6 +284,16 @@ so the record stays true.
   init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
   change a file in `default_prompts/`, append the replaced version's sha256 to
   `home.py::SUPERSEDED_PROMPT_HASHES`** (`git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256`).
+  `prompts/<name>.local.md` is the *overlay* (#37): user-owned, never seeded,
+  never touched by `init`, merged by `render` at the template's first unescaped
+  `{local}` slot (packaged `manager.md`, `task-preamble.md` and
+  `task-perpetual.md` carry one) or prepended when there is none;
+  absent/blank/unreadable renders to nothing (the slot's own line goes with it) —
+  `load_local` is fail-soft because `render` is on the manager tick and every task
+  run, while `load` of the template itself stays loud. It exists so adding house
+  policy does not fork the whole template and strand the home on an old default —
+  a rewritten `<name>.md` still wins. `quorum prompt list|diff <name>` shows
+  home-copy-vs-packaged-default and degrades per file (`?`) over an unreadable one.
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
   true. Not a builtin; users copy it into `plugins/`.

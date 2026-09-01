@@ -314,3 +314,26 @@ def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
         assert statuses[0].endswith("∞") and "∞" not in statuses[1]
 
     drive(home, script)
+
+
+def test_selecting_an_agent_shows_its_notebook(home: Path):
+    """The notebook is read-only here, like everything else in the TUI: a
+    file reader, working with the supervisor stopped."""
+    from quorum import notes
+
+    notes.remember(home, "the user wants at most two tasks running")
+    populate(home)
+
+    async def script(app, pilot):
+        app.query_one("#agents", DataTable).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.selected_agent == "manager"
+        assert mode_text(app).startswith("agent manager")
+        assert any("at most two tasks" in line for line in app._log_lines)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.selected_agent is None
+        assert mode_text(app).startswith("board")
+
+    drive(home, script)

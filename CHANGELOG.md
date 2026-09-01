@@ -17,6 +17,13 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   `enter` opens a transcript, it does not arm the write keys — and all four
   report an unwritable home as a notification rather than crashing the
   dashboard. (#11, #44)
+- Sustained-failure escalation for agents exempt from auto-pause: after
+  `MAX_CONSECUTIVE_FAILURES` the supervisor posts one `agent.failing` to
+  `attention` (the banner `quorum status`, the TUI and the web header read) —
+  the only failure path that reaches `attention`; auto-pause, tick errors and
+  the closing `agent.recovered` all stay on `system`. Deduped by an
+  `escalated_at` heartbeat stamp written after the post lands, and cleared by
+  every success path (scheduled tick, `agent run-once`, `agent resume`). (#38)
 - First-class perpetual tasks: `quorum task add --perpetual` marks work that
   is not meant to finish. The preamble's `{perpetual}` block (new packaged
   `task-perpetual.md`, appended even on homes with an edited preamble)

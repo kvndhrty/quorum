@@ -684,3 +684,45 @@ def test_a_perpetual_run_survives_an_edited_preamble_without_the_placeholder(
     cycling = transcript_text(home, forever.id)
     assert "This is a PERPETUAL task" in cycling
     assert "Never report `done` or `cancelled`" in cycling
+
+
+# -- prompt overlay (#37) ----------------------------------------------------
+
+
+def test_a_task_run_picks_up_the_preamble_overlay(home: Path, project: str):
+    """House conventions belong in prompts/task-preamble.local.md — an
+    overlay `quorum init` never seeds and never upgrades over — so the
+    packaged preamble stays upgradable in a home that has policy."""
+    harness_config(home)
+    (home / "prompts" / "task-preamble.local.md").write_text(
+        "Conventions in this home: always open DRAFT pull requests.\n"
+    )
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "always open DRAFT pull requests" in text
+    assert "git push -u origin HEAD" in text  # the packaged preamble, unforked
+    assert "PROMPT| {local}" not in text
+
+
+def test_the_perpetual_block_carries_its_own_overlay(home: Path, project: str):
+    """task-perpetual.md has a {local} slot too, so cycle conventions land
+    where they belong instead of being prepended by the fallback path."""
+    harness_config(home)
+    (home / "prompts" / "task-perpetual.local.md").write_text(
+        "In this home, a cycle ends with `just check`.\n"
+    )
+
+    store = TaskStore(home)
+    forever = store.add(project, "watch the build", "fake", perpetual=True)
+    assert run_task(home, load_config(home), forever.id) == 0
+
+    text = transcript_text(home, forever.id)
+    assert "In this home, a cycle ends with `just check`." in text
+    assert "This is a PERPETUAL task" in text  # the packaged block, unforked
+    assert "PROMPT| {local}" not in text
+    # the overlay lands inside the perpetual block, not ahead of the preamble
+    assert text.index("You are an autonomous coding agent") < text.index("`just check`")

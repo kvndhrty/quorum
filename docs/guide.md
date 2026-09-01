@@ -10,6 +10,7 @@ writing your own agents. (Internals and design rationale live in
 - [Harnesses](#harnesses)
 - [Tasks](#tasks)
 - [The manager](#the-manager)
+- [Prompt customization](#prompt-customization)
 - [Guiding tasks](#guiding-tasks)
 - [Dashboards](#dashboards)
 - [Controlling agents at runtime](#controlling-agents-at-runtime)
@@ -323,16 +324,16 @@ when there is something to manage), the manager compiles a **digest**:
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
+- its **notebook** — standing notes it (or you) wrote for future runs, at
+  the top of the digest and under their own budget ([below](#the-notebook));
 - your directives.
 
 It then runs your harness over that digest with `prompts/manager.md` — and
 that prompt file *is* the supervision policy. Edit it to change how your
 manager behaves: how patient it is, when it escalates, how it words its
-pokes. Delete it to restore the default. Both prompt files are seeded by
-`quorum init`; after upgrading quorum, re-run `quorum init` — a prompt you
-never edited is refreshed to the new packaged default, while an edited one
-is left alone (init tells you when its default has moved on so you can
-merge or delete). The manager acts through the same
+pokes. Delete it to restore the default. For a few lines of house policy,
+though, prefer the overlay: [Prompt customization](#prompt-customization)
+below. The manager acts through the same
 CLI you use — launching tasks, nudging them, cancelling them, even creating
 follow-up tasks with `task add` — and every action lands in an auditable
 journal:
@@ -340,6 +341,7 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
+quorum manager notes                      # its notebook: what it remembers
 ```
 
 A `tell` is normally read at the start of the next tick. If the manager's
@@ -361,6 +363,113 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (`auto_pause = false`), so the first tick after service returns reads the
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
+
+You do, however, get told. Individual failures go to the **system** board,
+which nothing nags you about — but after five consecutive failed ticks the
+supervisor posts `agent.failing` to the **attention** board, the banner
+`quorum status`, the TUI and the web dashboard all show. An agent that is
+never paused would otherwise fail all night in a channel nobody watches;
+this is the one failure quorum will interrupt you about. It is one post per
+outage, not per tick, and when the manager ticks again a matching
+`agent.recovered` lands on **system** — the outage is over and there is
+nothing for you to do, so it does not add to the banner:
+
+```
+$ quorum status
+supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
+⚠ 1 on #attention in the last 7d — `quorum board read attention`
+
+$ quorum board read attention
+[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
+has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
+so it keeps retrying — last error: manager harness run 01K2… exited 1
+```
+
+### The notebook
+
+Every tick is a fresh run with no memory: the digest is all the manager
+knows. Its action journal covers what it just did, but that window scrolls —
+a fact worth keeping ("that PR is waiting on you", "these tests need a
+running postgres") would be gone by tomorrow morning. So the manager has a
+notebook, and it is the first thing in every digest:
+
+```bash
+quorum manager remember "task a3f2k9's PR is waiting on my review"
+quorum manager remember "codex is rate-limited today" --ttl 2   # expires itself
+quorum manager notes                       # what it currently remembers
+quorum manager forget k7f2ab                # retire one (by the id `notes` prints)
+```
+
+You and the manager write to the same notebook — a note from you reads as
+standing guidance, which is the difference from `manager tell`: a `tell` is
+a one-shot directive, claimed and consumed by the next tick, while a note
+stays until it expires or someone retires it. Nothing else writes there: a
+task reaches the manager with `task report` and the board, and quorum
+refuses a `remember` that comes in tagged as a task or another agent, so no
+amount of task chatter crowds your notes out. (That refusal is a
+convention, not a security boundary — quorum decides who is calling from an
+environment variable, and a determined harness could set it. What actually
+confines a task run is the sandbox, if you use one.) A busy home cannot
+crowd the notebook either — it has its own bounded slot in the digest, ahead
+of the task section, so ten noisy tasks cannot shrink it. When it overflows
+the digest says how many older notes it dropped (and, if the file has grown
+past the window readers scan, how many bytes it did not read), and the
+default prompt tells the manager to consolidate: one note that supersedes
+several, then `forget` the rest.
+
+The same file exists for every agent (`quorum manager remember --agent
+<name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
+own notebook wherever its template writes `{notes}`. Both dashboards show an
+agent's notebook when you select it.
+
+## Prompt customization
+
+Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
+constitution (`manager.md`), the task preamble (`task-preamble.md`), the
+perpetual block (`task-perpetual.md`), and one per prompt-driven agent.
+`quorum init` seeds them, and deleting one restores the packaged default.
+Re-run `quorum init` after upgrading quorum: a prompt you never edited is
+refreshed to the new packaged default (quorum recognizes a pristine seed by
+hash), and one you did edit is left alone.
+
+There are two ways to change one, and the difference matters:
+
+- **An overlay — `prompts/<name>.local.md`.** Yours alone: never seeded,
+  never read by `quorum init`, never upgraded. Its text is merged into the
+  template at the `{local}` slot (the packaged `manager.md` puts the slot
+  right before "How to work", so house rules land above the general
+  guidance; `task-preamble.md` puts it after the delivery protocol, and
+  `task-perpetual.md` after the cycle conventions). A template without a
+  slot — one you rewrote yourself — gets the overlay prepended instead. No
+  overlay file, or an empty one, renders to nothing; so does one quorum
+  cannot read (a bad overlay never breaks a run — `quorum prompt list`
+  flags it instead).
+- **Editing `<name>.md` itself.** Still supported, still wins outright. But
+  an edited file is *yours* from then on: `quorum init` will never upgrade
+  it, so every later improvement to the packaged default stops reaching this
+  home. Init says so, and `quorum prompt diff <name>` shows you exactly what
+  you are missing.
+
+House rules ("run one task at a time", "always open draft PRs") belong in an
+overlay. Rewriting how supervision fundamentally works belongs in the file.
+
+```bash
+quorum prompt list                # each template: default, seeded, or edited (+ overlay)
+quorum prompt diff manager        # your copy vs the packaged default
+```
+
+**Migrating a home that already edited a prompt** — one step, and it is
+worth doing, because an edited `manager.md` from a few releases ago has no
+policy for whatever the digest has learned to report since:
+
+```bash
+quorum prompt diff manager                      # see what the upgrade brings
+$EDITOR ~/.quorum/prompts/manager.local.md      # paste ONLY your own lines here
+rm ~/.quorum/prompts/manager.md && quorum init  # take the current default back
+```
+
+After that, `quorum init` keeps `manager.md` current forever and your
+`manager.local.md` rides on top of every future version of it.
 
 ## Guiding tasks
 
@@ -512,6 +621,7 @@ for you is never silent.
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
+- `quorum manager notes` — what it is carrying forward between runs.
 
 ## Controlling agents at runtime
 
@@ -521,15 +631,19 @@ config or restarting:
 ```bash
 quorum agent run-now manager      # tick immediately
 quorum agent pause manager        # stop scheduling it
-quorum agent resume manager       # resume (also clears the auto-pause counter)
+quorum agent resume manager       # resume (also clears the failure streak)
 quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
 
 Commands are delivered through the supervisor's inbox and applied within
-~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
-its config sets `auto_pause = false`, as the manager's does, in which case
-it keeps retrying (loud failures, automatic recovery);
-`agent resume` is the recovery lever. A pause survives supervisor restarts.
+~15 seconds. An agent that fails 5 ticks in a row is auto-paused, announced
+on the system board — unless its config sets `auto_pause = false`, as the
+manager's does, in which case it keeps retrying (loud failures, automatic
+recovery) and its streak is escalated once to the attention board instead
+of being paused; `agent resume` is the recovery lever. Either lever ends
+the streak: a successful `run-once` and a `resume` both clear the failure
+counter and the escalation, so the *next* outage escalates afresh. A pause
+survives supervisor restarts.
 
 ## Prompt-driven agents
 
@@ -826,8 +940,10 @@ def test_milestone(tmp_path):
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)
   messages/archive/YYYY-MM.jsonl.gz compacted history
   prompts/*.md                      editable prompt templates (incl. manager.md)
+  prompts/*.local.md                your overlays: house policy init never touches
   state/agents/<name>/              heartbeats + private agent state
   state/manager/journal.jsonl       the manager's auto-recorded actions
+  state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
   state/manager/usage.jsonl         what each manager run cost (agents get
                                     the same file under state/agents/<name>/)
