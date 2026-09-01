@@ -264,8 +264,12 @@ async function renderAgentDetail() {
   const acts = (a.actions || []).map(x => `${fmtTs(x.at)} ${x.type}: ${x.text}`);
   const journal = (a.journal || []).map(x =>
     `${fmtTs(x.at)} ${x.action}${x.target ? " -> " + x.target : ""}${x.args ? "  " + x.args : ""}`);
+  // the notebook first, the way the agent's own digest reads it
+  const notes = (a.notes || []).map(x =>
+    `(${x.id.slice(-6).toLowerCase()}) [${(x.ts || "").slice(0, 10)}] ${x.sender}: ${x.text}`);
   $("agent-tail").textContent =
-    [...(journal.length ? ["— action journal —", ...journal] : []),
+    [...(notes.length ? ["— notebook (standing notes) —", ...notes] : []),
+     ...(journal.length ? ["— action journal —", ...journal] : []),
      ...(acts.length ? ["— activity —", ...acts] : [])].join("\n") || "no activity yet";
 }
 

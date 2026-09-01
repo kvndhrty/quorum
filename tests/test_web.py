@@ -78,7 +78,16 @@ def test_agent_create_detail_and_control(client: TestClient, home: Path):
     detail = client.get("/api/agents/standup").json()
     assert detail["schedule"] == "every 30m"
     assert detail["journal"] == [] and detail["actions"] == []
+    assert detail["notes"] == []  # an empty notebook is still an answer
     assert client.get("/api/agents/ghost").status_code == 404
+
+    # the notebook rides along with the detail, read straight off its file
+    from quorum import notes
+
+    notes.remember(home, "the standup skips weekends", owner="standup")
+    detail = client.get("/api/agents/standup").json()
+    assert [n["text"] for n in detail["notes"]] == ["the standup skips weekends"]
+    assert "skips weekends" in detail["notes_text"]
 
     # duplicate creation is refused, loudly
     r = client.post("/api/agents", json={"name": "standup", "prompt_text": "again"})
