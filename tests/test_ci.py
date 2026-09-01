@@ -189,10 +189,19 @@ def test_an_unreadable_config_disables_the_probe(
     assert ci.pr_state(home, task) is None
     assert not log.exists()  # no subprocess, no network call
 
-    # and a home with no config at all is the same answer, for the same reason
+    # a home with no config at all is the *other* case — the user said
+    # nothing, so the probe auto-detects exactly as its docstring promises
     bare = tmp_path / "not-a-home"
     bare.mkdir()
-    assert ci.available(bare) is False
+    assert ci.available(bare) is True
+    assert not log.exists()  # available() only looks for gh; no probe yet
+
+    # bad bytes are not a ConfigError (tomllib raises UnicodeDecodeError) and
+    # must be just as silent: a probe that raised here would take the
+    # manager tick down with it
+    (home / "config.toml").write_bytes(b"[ci]\nenabled = false\n# caf\xe9\n")
+    assert ci.available(home) is False
+    assert ci.pr_state(home, task) is None
     assert not log.exists()
 
     # a config that parses is still trusted, defaults included
@@ -320,3 +329,10 @@ def test_no_probe_runs_at_all_without_a_working_gh(
 
     build_digest(home, TaskStore(home).list(), clock(), directives=[])
     assert not log.exists()
+
+
+def test_herdr_never_raises_on_undecodable_config(home: Path, tmp_path: Path):
+    from quorum import herdr
+
+    (home / "config.toml").write_bytes(b"[herdr]\nenabled = false\n# caf\xe9\n")
+    assert herdr.available(home) is False

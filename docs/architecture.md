@@ -213,7 +213,8 @@ transcript. So capture is one more look at each parsed event
   run count only means something if it counts every run. Writing it can
   never fail a tick (`usage.record_agent_run` swallows `OSError`). The file
   is append-only and unbounded, so readers take a bounded tail
-  (`usage.agent_usage`, `AGENT_USAGE_TAIL` = 200 runs) and report the window
+  (`usage.agent_usage`, `AGENT_USAGE_TAIL` = 200 runs; a total over a full
+  tail is labelled "recent runs", never presented as all-time) and report the window
   alongside the figure: `views.agent_rows` carries `usage` (`last` / `total`
   / `runs` / `window`) and a rendered `usage_text`, which `quorum status`,
   the TUI's agent table and the web agent row show when it is known. The

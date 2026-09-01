@@ -256,6 +256,22 @@ def build_digest(
         ci_budget -= 1
         return ci.pr_state(home, task)
 
+    # A perpetual task is never supposed to finish, so one that reported a
+    # terminal status is either the user ending it (cancelled — fine) or a
+    # harness that ignored its cycle instructions. The digest lists only
+    # live tasks, so without this line the failure would be invisible.
+    ended = [
+        t for t in all_tasks
+        if t.perpetual and t.status in tasks.TERMINAL_STATUSES and t.status != "cancelled"
+    ]
+    for t in ended:
+        lines.append(
+            f"PERPETUAL-ENDED {t.short_id}: reported {t.status!r} — a perpetual task never "
+            "finishes; relaunch it with a nudge about its cycle instructions unless the user "
+            "ended it"
+        )
+    if ended:
+        lines.append("")
     lines.append("## Active tasks")
     if not active:
         lines.append("(none)")

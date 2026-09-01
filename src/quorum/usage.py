@@ -237,13 +237,26 @@ def agent_usage(home: Any, name: str, limit: int = AGENT_USAGE_TAIL) -> dict[str
     case for a harness that says nothing about spend, and never zero.
     """
     entries = fsio.read_jsonl_tail(actor.usage_path(home, name), limit=limit)
-    reported = [e["usage"] for e in entries if isinstance(e.get("usage"), dict)]
+    # A hand-edited or truncated line may parse to anything; only dicts with
+    # a dict `usage` count, everything else is silence (never a raise out of
+    # status / the web / the digest).
+    reported = [
+        e["usage"] for e in entries if isinstance(e, dict) and isinstance(e.get("usage"), dict)
+    ]
     if not reported:
         return None
     spent = total(reported)
     if spent is None:
         return None
-    return {"last": reported[-1], "total": spent, "runs": int(spent["runs"]), "window": len(entries)}
+    return {
+        "last": reported[-1],
+        "total": spent,
+        "runs": int(spent["runs"]),
+        "window": len(entries),
+        # True when the ledger is longer than the tail read: the total is a
+        # recent-runs figure, not all-time, and readers must say so.
+        "truncated": len(entries) >= limit,
+    }
 
 
 def describe_agent(spent: dict[str, Any] | None) -> str:
@@ -256,7 +269,8 @@ def describe_agent(spent: dict[str, Any] | None) -> str:
         parts.append(f"last {last}")
     window = describe(spent.get("total"))
     if window and int(spent.get("runs") or 0) > 1:
-        parts.append(f"{window} over {int(spent['runs'])} runs")
+        label = "recent runs" if spent.get("truncated") else "runs"
+        parts.append(f"{window} over {int(spent['runs'])} {label}")
     return " · ".join(parts)
 
 

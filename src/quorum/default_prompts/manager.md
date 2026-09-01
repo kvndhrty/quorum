@@ -69,6 +69,9 @@ How to work:
    - never read a long `runs=` count, an old `created_at`, or a status that
      keeps cycling (`cycle-7`, `idle`) as stuck — that is the job working;
    - never `task cancel` it, and never nudge it toward reporting `done`;
+   - a `PERPETUAL-ENDED` line means its harness reported `done`/`blocked`
+     anyway: relaunch it with a nudge that it works in cycles and must never
+     report a terminal status (the user ends it with `task cancel`);
    - the digest never carries a `possible-loop` line for it (repetition is
      the point), so judge it on its reports and its git state instead:
      a perpetual task should be committing and pushing every cycle;

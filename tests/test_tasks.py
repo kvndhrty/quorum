@@ -660,3 +660,27 @@ def test_perpetual_survives_a_round_trip_and_defaults_off(home: Path):
     assert store.get(forever.id).perpetual is True
     # nothing about it changes what quorum treats as terminal
     assert store.update(forever.id, status="cycle-2").status not in tasks.TERMINAL_STATUSES
+
+
+def test_a_perpetual_run_survives_an_edited_preamble_without_the_placeholder(
+    home: Path, project: str
+):
+    """A home that customized task-preamble.md before {perpetual} existed
+    never substitutes it — and a perpetual task that silently got the
+    ordinary "report done" instructions would end on its first cycle."""
+    from quorum import prompts
+
+    harness_config(home)
+    # drop the placeholder line only — the header's escaped `{{perpetual}}`
+    # documentation stays, exactly as it would in a real edited copy
+    edited = prompts.load(home, "task-preamble").replace("\n{perpetual}\n", "\n")
+    assert "\n{perpetual}\n" not in edited and "{{perpetual}}" in edited
+    (home / "prompts").mkdir(exist_ok=True)
+    (home / "prompts" / "task-preamble.md").write_text(edited)
+
+    store = TaskStore(home)
+    forever = store.add(project, "watch the build", "fake", perpetual=True)
+    assert run_task(home, load_config(home), forever.id) == 0
+    cycling = transcript_text(home, forever.id)
+    assert "This is a PERPETUAL task" in cycling
+    assert "Never report `done` or `cancelled`" in cycling

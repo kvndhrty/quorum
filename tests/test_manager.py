@@ -544,3 +544,23 @@ def test_a_perpetual_task_is_marked_and_never_flagged_as_looping(
     assert "possible-loop" not in marked.split("- [")[0]
     # the identical transcript on an ordinary task is still flagged
     assert "possible-loop" in digest.split(f"[executing] {ordinary.short_id}")[1]
+
+
+def test_a_perpetual_task_that_reported_done_is_observed_not_forgotten(
+    home: Path, clock, project: str
+):
+    """Terminal tasks drop out of the active list, so the one thing a
+    perpetual task must never do would otherwise be invisible."""
+    store = TaskStore(home)
+    ended = store.add(project, "watch CI", "tasktool", perpetual=True)
+    stopped = store.add(project, "watch builds", "tasktool", perpetual=True)
+    ordinary = store.add(project, "one-off", "tasktool")
+    store.update(ended.id, status="done")
+    store.update(stopped.id, status="cancelled")
+    store.update(ordinary.id, status="done")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    assert f"PERPETUAL-ENDED {ended.short_id}: reported 'done'" in digest
+    assert stopped.short_id not in digest.split("## Active tasks")[0]
+    assert ordinary.short_id not in digest.split("## Active tasks")[0]

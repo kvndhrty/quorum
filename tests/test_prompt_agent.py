@@ -203,3 +203,35 @@ def test_a_failed_run_still_lands_in_the_ledger(home: Path, clock):
 
     entries = fsio.read_jsonl(usage_path(home, "standup"))
     assert len(entries) == 1 and entries[0]["usage"] is None
+
+
+def test_a_corrupt_ledger_line_is_silence_not_a_raise(home: Path):
+    """The ledger is read by status, the TUI, the web and the digest — a
+    hand-edited or truncated line must degrade to nothing, never propagate."""
+    from quorum import usage
+    from quorum.actor import usage_path
+
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('"just a string"\n[1, 2]\n{"usage": 5}\n{"at": "x", "run": "r", "usage": null}\n')
+    assert usage.agent_usage(home, "manager") is None
+    assert usage.describe_agent(usage.agent_usage(home, "manager")) == ""
+
+    fsio.append_jsonl(path, {"at": "y", "run": "s", "usage": {"input_tokens": 10, "cost_usd": 0.5}})
+    fsio.append_jsonl(path, {"at": "z", "run": "t", "usage": {"input_tokens": 10, "cost_usd": 0.5}})
+    spent = usage.agent_usage(home, "manager")
+    assert spent["runs"] == 2 and spent["truncated"] is False
+    assert usage.describe_agent(spent).endswith("over 2 runs")
+
+
+def test_a_full_tail_is_labelled_recent_not_all_time(home: Path):
+    from quorum import usage
+    from quorum.actor import usage_path
+
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for i in range(usage.AGENT_USAGE_TAIL + 5):
+        fsio.append_jsonl(path, {"at": str(i), "run": str(i), "usage": {"cost_usd": 0.01}})
+    spent = usage.agent_usage(home, "manager")
+    assert spent["truncated"] is True and spent["window"] == usage.AGENT_USAGE_TAIL
+    assert "recent runs" in usage.describe_agent(spent)

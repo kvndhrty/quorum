@@ -713,13 +713,16 @@ def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path)
 
 def test_load_config_or_default_is_the_one_fallback(home: Path, tmp_path: Path):
     """Missing and malformed config.toml both degrade to defaults for the
-    read-only callers — and `try_load_config` tells the two apart from a
-    config that actually parsed, which is what the fail-soft probes need."""
+    read-only callers — and `try_load_config` tells a malformed one apart
+    from a config that parsed (or was never written), which is what the
+    fail-soft probes need."""
     from quorum.config import load_config_or_default, try_load_config
 
     empty = tmp_path / "no-home"
     empty.mkdir()
-    assert try_load_config(empty) is None
+    # no file = the user said nothing: plain defaults, so the fail-soft
+    # probes keep auto-detecting (only an *unreadable* file is None)
+    assert try_load_config(empty).ci.enabled is True
     assert load_config_or_default(empty).tasks.default_harness == ""
 
     (home / "config.toml").write_text("[tasks\nthis is not toml")

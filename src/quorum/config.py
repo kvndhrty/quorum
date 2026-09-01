@@ -308,15 +308,21 @@ def try_load_config(home: Path) -> Config | None:
 
     The honest reading of config.toml for callers that must distinguish "the
     user said nothing" from "the user said something quorum could not read":
-    a missing file, a syntax error, or a schema violation all yield None,
-    never a fabricated default. Fail-soft *probes* (`ci.py`, `herdr.py`) use
-    this so an unreadable config means their optional feature is **off** —
-    degrading toward doing less, never toward doing more behind the user's
-    back.
+    a *missing* file is the former and yields plain defaults (the probes keep
+    auto-detecting, as their config docstrings promise); a syntax error, a
+    schema violation, or a file that cannot be decoded yields None, never a
+    fabricated default. Fail-soft *probes* (`ci.py`, `herdr.py`) use this so
+    an unreadable config means their optional feature is **off** — degrading
+    toward doing less, never toward doing more behind the user's back. Never
+    raises: `tomllib` surfaces bad bytes as `UnicodeDecodeError`, not
+    `ConfigError`, and a probe that raised on it would take the manager tick
+    down with it.
     """
+    if not (Path(home) / CONFIG_NAME).exists():
+        return Config()
     try:
         return load_config(Path(home))
-    except (ConfigError, OSError):
+    except Exception:
         return None
 
 

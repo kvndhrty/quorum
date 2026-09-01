@@ -253,7 +253,11 @@ You end it, with `quorum task cancel <id>`. Two things to expect:
 - **the manager's schedule is the floor on cycle latency** — with the
   default `every 5m` tick, a cycle that ends waits up to five minutes for
   the next one to start. Tighten the manager's schedule if you need a
-  tighter loop.
+  tighter loop;
+- **it keeps the manager awake** — the manager skips its harness run on an
+  idle home, and a home with a perpetual task is never idle, so expect one
+  manager run per tick for as long as the task lives. `quorum status` shows
+  what those runs cost on the manager's row.
 
 **Watching.**
 
