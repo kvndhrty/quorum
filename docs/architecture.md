@@ -33,6 +33,7 @@ quorum up ──► Supervisor
               ├─ APScheduler (BackgroundScheduler, thread pool)
               │   ├─ job: manager  (every 5m)  ── crash-isolated wrapper:
               │   ├─ job: <user plugins…>         heartbeats, error posts,
+              │   │                               auto-pause or escalation,
               │   ├─ job: _control (15s: claims supervisor inbox —
               │   │        agent.pause / agent.resume / agent.run-now /
               │   │        agent.reload)
@@ -614,7 +615,13 @@ its result to disk, so `views.py` never acquires a network call.
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
 `auto_pause = false` config keeps the schedule firing so recovery needs no
-human intervention.
+human intervention. Every other supervisor announcement — tick errors,
+auto-pause — lands on `system`, which no banner reads; a normally-pausing
+agent at least *stops*, but the manager keeps firing, so a *sustained*
+streak escalates on its own: at `MAX_CONSECUTIVE_FAILURES` the supervisor
+posts one `agent.failing` to `attention` (the banner `quorum status`, the
+TUI and the web header all read). Recovery is announced on `system`, not
+`attention`. See [Messaging protocol](#messaging-protocol) for the dedupe.
 
 ### Prompt agents
 
@@ -689,6 +696,32 @@ command covers create, edit, and delete. A pause is durable: it lands in
 the agent's heartbeat, and a restarting supervisor schedules any agent whose
 heartbeat says `paused` with its job paused rather than silently resuming
 it.
+
+**Failure escalation** rides the board rather than the control channel. Every
+failed tick posts `agent.error` to `system` and records the streak on the
+heartbeat (`consecutive_failures`, `error`); at `MAX_CONSECUTIVE_FAILURES`
+(5) the agent is auto-paused with an `agent.paused` post — also on `system`.
+Nothing in that story reaches a banner: `views.attention_summary` reads the
+`attention` topic alone. For an ordinary agent the pause is itself the loud
+signal (it stops, and `quorum agent list` says `paused`), but an agent whose
+config sets `auto_pause = false` — the manager, which must keep firing so it
+self-recovers — is exempt from the pause and would just fail all night in a
+channel nobody watches. So the supervisor posts one `agent.failing` to
+`attention` for such an agent instead. **That post is the only failure path
+in quorum that reaches `attention`**; everything else the supervisor says,
+recovery included, stays on `system`.
+
+The dedupe is a third heartbeat field, `escalated_at`: written *after* the
+post lands (a stamp-first escalation whose post threw would suppress the
+banner for the rest of the streak), checked before posting (so a ten-hour
+outage is one post, not one per tick), and cleared by every success path —
+a scheduled tick, `quorum agent run-once`, and `quorum agent resume` all
+clear it alongside `error` and `consecutive_failures`, which is also what
+makes the closing `agent.recovered` post (on `system` — a self-healed
+outage is informational, and the time-windowed banner has no read-state to
+dismiss) fire exactly once. Nothing here pauses, retries or throttles the
+agent; the post is an observation, in the same class as `possible-loop`
+and `ci:`.
 
 ### Design seam: outboxes and a router
 

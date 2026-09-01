@@ -364,6 +364,27 @@ itself.** There is no dumbed-down fallback: the manager's tick simply fails
 state of the world from files and relaunches whatever died in the meantime.
 You don't have to do anything.
 
+You do, however, get told. Individual failures go to the **system** board,
+which nothing nags you about — but after five consecutive failed ticks the
+supervisor posts `agent.failing` to the **attention** board, the banner
+`quorum status`, the TUI and the web dashboard all show. An agent that is
+never paused would otherwise fail all night in a channel nobody watches;
+this is the one failure quorum will interrupt you about. It is one post per
+outage, not per tick, and when the manager ticks again a matching
+`agent.recovered` lands on **system** — the outage is over and there is
+nothing for you to do, so it does not add to the banner:
+
+```
+$ quorum status
+supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
+⚠ 1 on #attention in the last 7d — `quorum board read attention`
+
+$ quorum board read attention
+[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
+has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
+so it keeps retrying — last error: manager harness run 01K2… exited 1
+```
+
 ### The notebook
 
 Every tick is a fresh run with no memory: the digest is all the manager
@@ -582,15 +603,19 @@ config or restarting:
 ```bash
 quorum agent run-now manager      # tick immediately
 quorum agent pause manager        # stop scheduling it
-quorum agent resume manager       # resume (also clears the auto-pause counter)
+quorum agent resume manager       # resume (also clears the failure streak)
 quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
 
 Commands are delivered through the supervisor's inbox and applied within
-~15 seconds. An agent that fails 5 ticks in a row is auto-paused — unless
-its config sets `auto_pause = false`, as the manager's does, in which case
-it keeps retrying (loud failures, automatic recovery);
-`agent resume` is the recovery lever. A pause survives supervisor restarts.
+~15 seconds. An agent that fails 5 ticks in a row is auto-paused, announced
+on the system board — unless its config sets `auto_pause = false`, as the
+manager's does, in which case it keeps retrying (loud failures, automatic
+recovery) and its streak is escalated once to the attention board instead
+of being paused; `agent resume` is the recovery lever. Either lever ends
+the streak: a successful `run-once` and a `resume` both clear the failure
+counter and the escalation, so the *next* outage escalates afresh. A pause
+survives supervisor restarts.
 
 ## Prompt-driven agents
 
