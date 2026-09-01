@@ -108,3 +108,18 @@ def test_nudge_lands_in_the_selected_tasks_inbox(home: Path):
         assert MessageBus(home).pending(inbox_name(ids[0]))
 
     drive(home, script)
+
+
+def test_task_table_shows_waiting_on_dependencies(home: Path):
+    """A dependent task reads as waiting in the TUI too — a pure file read,
+    same as every other cell here (#31)."""
+    store = TaskStore(home)
+    upstream = store.add("proj-a", "build it", "fake")
+    store.add("proj-a", "review it", "fake", depends_on=[upstream.id])
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
+        assert any(f"⏳{upstream.short_id}" in c for c in cells)
+
+    drive(home, script)

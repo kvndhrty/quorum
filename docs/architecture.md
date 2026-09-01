@@ -70,7 +70,8 @@ supervisor.lock                   pid + start time; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
-                                   note, reported token/cost usage)
+                                   note, reported token/cost usage) +
+                                  depends_on: full ids this task waits on
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -248,6 +249,55 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
+### Task dependencies
+
+(User-facing how-to: [guide.md](guide.md#chaining-tasks-with---after).)
+
+`quorum task add … --after <id>` (repeatable) records `depends_on` — a list
+of **full** task ids — in `task.json`. It is the one new piece of durable
+state, and it is deliberately *not* a DAG engine: nothing schedules on it,
+nothing topologically sorts, nothing fans out. The manager still makes every
+launch decision; dependencies only tell it when a launch would be premature.
+Cross-project chains work by construction, since ids are global.
+
+- **Validation happens once, at `task add`** (`tasks.resolve_dependencies`):
+  handles resolve through the same prefix/suffix `resolve()` as everything
+  else and are stored expanded, an unknown or ambiguous handle fails the
+  command (nothing is queued), and a task cannot depend on itself. A
+  dependency must already exist, so a cycle is only reachable by hand-editing
+  `task.json`.
+- **Reading is total** (`tasks.dependency_state`, pure over an
+  already-loaded task listing, so every reader stays a file reader):
+  `waiting_on` = dependencies that have not reached a terminal status, plus
+  any whose record is gone; `failed` = dependencies that ended `blocked` or
+  `cancelled`; `missing`; and `cycle`, detected rather than recursed into.
+  A hand-edited `depends_on` never raises.
+- **The digest observes** (`waiting-on=<short ids>` on the task line while a
+  dependency is unfinished; `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE` flags
+  with a line of explanation). These are observations of the same class as
+  `possible-loop` and `BUDGET-EXCEEDED` — the manager judges them (nudge the
+  dependency, cancel the dependent, escalate) and quorum does nothing on its
+  own. Note that a `failed` dependency does **not** block: it can never be
+  satisfied, so continuing to call it "waiting" would hide the decision.
+- **One narrow substrate refusal**: `run_task` (and `quorum task run`, so
+  `--detach` fails in the parent too) refuses a task with unfinished
+  dependencies unless `--force`. This is the third rail of that class, next
+  to `runner.lock` and the attached-task refusal — a deliberate bend of "the
+  action cap is the only rail", justified the same way: a dependent launched
+  early is pure waste (it reviews a PR that does not exist yet), and the
+  manager is the only caller that would ever do it by accident. It refuses
+  the launch; it never cancels, re-queues or reorders anything.
+- **Views** (`quorum status` / `task list` / `task show`, TUI, web) render
+  `waiting_on` / `dep_failed` / `dep_cycle` straight off `views.task_rows`.
+  Nothing is materialized to disk for them.
+- **Reading the upstream outcome**: the dependent task's composed prompt
+  gains a *Tasks this one depends on* block listing each dependency's short
+  id, status and `pr_url` (`runner.dependency_note` — fields already in
+  `task.json`, one read each, no new state), and points at
+  `quorum task show <id>` for the full record, reports and branch. That is
+  deliberately the whole mechanism: no `{depends.*}` template substitution,
+  no result-passing channel.
+
 ### Attached tasks: adopting a live session
 
 (User-facing how-to: [guide.md](guide.md#adopting-a-live-session).)
@@ -322,7 +372,9 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    delivering it, which the default manager prompt treats as not done and
    relaunches with a nudge to commit and push; a `ci:` line carrying the
    pull request behind the branch, `CI-FAILING` on a finished task whose
-   checks are red (see below); a `possible-loop:` line
+   checks are red (see below); `waiting-on=` and the `DEP-*` flags for a
+   task with declared dependencies (see *Task dependencies* above); a
+   `possible-loop:` line
    when a task's transcript tail is dominated by one repeated tool call
    (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a

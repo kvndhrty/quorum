@@ -219,6 +219,74 @@ and displays it. The conventional flow is `planning → executing → reviewing
 `cancelled` mean anything to quorum itself: they end the manager's
 attention.
 
+### Chaining tasks with `--after`
+
+Some work only makes sense once other work has landed. `--after` says so:
+
+```bash
+quorum task add my-api "add rate limiting, open a PR" --harness claude
+# → queued task a3f2k9 on my-api
+
+quorum task add my-api "review the rate-limiting PR and fix what you find" \
+    --after a3f2k9
+# → queued task b7c1x4 on my-api
+#   waits on: a3f2k9 — `task run` refuses until they finish (--force overrides)
+```
+
+`--after` is repeatable (`--after a3f2k9 --after d4e5f6` waits for both) and
+takes the same short handles as everything else; the ids are global, so a
+task in one project may wait on a task in another. An unknown handle fails
+the command — nothing is queued.
+
+What this *does*: while a dependency has not reached a terminal status, the
+dependent shows `waiting-on a3f2k9` in `quorum status`, `task list`,
+`task show`, the TUI and the dashboard; the manager's digest marks the same
+thing and its prompt tells it not to launch such a task; and `quorum task
+run` refuses it outright (`--force` if you disagree). Once every dependency
+is `done`, the task is an ordinary queued task and the manager picks it up
+on its next tick.
+
+What this is **not**: a workflow engine. Nothing schedules on dependencies,
+nothing runs automatically the instant an upstream finishes, and quorum
+never cancels or reorders anything for you. If a dependency ends `blocked`
+or `cancelled` it can never be satisfied, so the digest flags `DEP-FAILED`
+and the manager decides what to do — nudge the dependency, cancel the
+dependent, or escalate to you.
+
+**How the dependent reads the upstream's result.** Its prompt gains a block
+naming each dependency with its status and PR url:
+
+```
+# Tasks this one depends on
+
+- a3f2k9: status=done pr=https://github.com/you/my-api/pull/42
+  it was asked to: add rate limiting, open a PR
+
+Read the full record of any of them — reports, PR url, branch — with
+`quorum task show <id>`.
+```
+
+`quorum task show <id>` (add `--json` for the raw record) is the rest of the
+channel: reports, branch, runs, spend. That is the whole mechanism — the
+harness has the CLI and `QUORUM_HOME`, so nothing else is needed.
+
+**The review-task recipe.** Queue both at once and let the manager sequence
+them:
+
+```bash
+quorum task add my-api "implement issue #14 and open a PR" --harness claude
+quorum task add my-api \
+  "review the PR opened by the task you depend on: read its diff with \
+   \`gh pr diff\`, fix what you find on its branch, and report done with a \
+   summary of the changes you made" \
+  --after <the first task's id>
+```
+
+The reviewer cannot start before the PR exists, so it never spends a run
+reviewing nothing — and if the implementation ends up `blocked`, the digest
+says `DEP-FAILED` instead of silently launching a review of a PR that will
+never come.
+
 **Watching.**
 
 ```bash
@@ -273,6 +341,11 @@ when there is something to manage), the manager compiles a **digest**:
 - what each task has spent, when its harness reports usage, and a
   `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
   observation, never a stop;
+- `waiting-on=<ids>` on a task queued with [`--after`](#chaining-tasks-with---after)
+  whose dependencies have not finished — the prompt tells the manager not to
+  launch it yet (the runner refuses anyway) — and `DEP-FAILED` when a
+  dependency ended `blocked`/`cancelled`, which is a decision for the
+  manager, not a rule quorum acts on;
 - the manager's own **recent actions with observed outcomes** ("you nudged
   a3f2k9 at 14:02; status UNCHANGED since") — auto-recorded, so the manager
   never loops on an intervention that isn't working;
@@ -741,7 +814,8 @@ def test_milestone(tmp_path):
   config.toml                       yours; quorum never rewrites it
   supervisor.lock                   pid + start time; mtime = liveness
   projects/<slug>.json              registered projects
-  tasks/<id>/task.json              spec, reported status, session, run history
+  tasks/<id>/task.json              spec, reported status, session, run history,
+                                    dependencies (`--after`)
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
   tasks/<id>/runner.lock            pid of a live run

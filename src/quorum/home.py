@@ -129,6 +129,8 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the #19 (usage/budget) revision, replaced by the merge with the
         # ci-probe revision
         "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
+        # the ci-probe revision, replaced by the #31 task-dependency rule
+        "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
     },
 }
 

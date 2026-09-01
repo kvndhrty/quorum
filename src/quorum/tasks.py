@@ -18,11 +18,17 @@ manager stops attending to a task once it reaches one of them.
 Guidance flows the other way through the ordinary message bus: each task
 owns the inbox `task-<id>`, and the runner injects claimed messages into the
 next run's prompt.
+
+A task may declare `depends_on` (`task add --after <id>`): tasks it must not
+start before. That is *not* a scheduler — the manager still decides every
+launch. `dependency_state` reads the list back for the digest, the views and
+the runner's one narrow refusal.
 """
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +78,11 @@ class Task(BaseModel):
     # The herdr pane hosting the session, when it runs inside herdr: enables
     # pane-status observation and the nudge doorbell (herdr.py).
     herdr_pane: str | None = None
+    # Full ids of the tasks this one must not start before (`task add
+    # --after`). Not a DAG engine: the manager still decides every launch,
+    # and these only say when a launch would be premature. See
+    # `dependency_state` for how they are read.
+    depends_on: list[str] = Field(default_factory=list)
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -161,6 +172,7 @@ class TaskStore:
         session: str | None = None,
         attached: bool = False,
         status: str = "queued",
+        depends_on: list[str] | None = None,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -174,6 +186,7 @@ class TaskStore:
             session=session,
             attached=attached,
             status=status,
+            depends_on=list(depends_on or []),
             created_at=created,
             updated_at=created,
         )
@@ -229,6 +242,119 @@ class TaskStore:
         task = Task.model_validate(data)
         fsio.atomic_write_json(task_json_path(self.home, task.id), task.model_dump())
         return task
+
+
+def short_handle(task_id: str) -> str:
+    """The short id of a task id, without needing the record — dependencies
+    may name a task whose file is gone."""
+    return task_id[-6:].lower()
+
+
+def resolve_dependencies(
+    store: TaskStore, handles: Iterable[str], self_id: str | None = None
+) -> list[str]:
+    """Turn `--after` handles into full task ids, in order, deduplicated.
+
+    Raises ValueError (message ready for the CLI) for anything that could
+    never be a usable dependency: an unknown or ambiguous handle, and the
+    task itself. This is the *only* validated entry point for dependencies —
+    a hand-edited task.json can still say anything, which is why the readers
+    below are total.
+    """
+    resolved: list[str] = []
+    for handle in handles:
+        try:
+            dep = store.resolve(handle)
+        except KeyError:
+            raise ValueError(f"no task matching {handle!r} — `quorum task list`") from None
+        except ValueError as e:
+            raise ValueError(str(e)) from None
+        if self_id is not None and dep.id == self_id:
+            raise ValueError(f"task {dep.short_id} cannot depend on itself")
+        # TODO(#12 perpetual tasks): a perpetual task never reaches a
+        # terminal status, so a dependent would wait on it forever. The
+        # field is being added on a parallel branch; this getattr guard
+        # starts refusing the moment `Task.perpetual` exists, and the
+        # skipped test in tests/test_tasks.py turns live with it.
+        if getattr(dep, "perpetual", False):
+            raise ValueError(
+                f"task {dep.short_id} is perpetual — it never finishes, so nothing "
+                "may depend on it"
+            )
+        if dep.id not in resolved:
+            resolved.append(dep.id)
+    return resolved
+
+
+def _reaches_cycle(start: Task, by_id: Mapping[str, Task]) -> bool:
+    """Whether following `depends_on` from this task ever revisits a task
+    already on the path. Only reachable by hand-editing task.json (`task add`
+    can only point at tasks that already exist), so this exists to make the
+    readers total rather than to police anything."""
+    visiting: set[str] = set()
+    done: set[str] = set()
+    stack: list[tuple[str, bool]] = [(start.id, False)]
+    while stack:
+        tid, closing = stack.pop()
+        if closing:
+            visiting.discard(tid)
+            done.add(tid)
+            continue
+        if tid in done:
+            continue
+        if tid in visiting:
+            return True
+        visiting.add(tid)
+        stack.append((tid, True))
+        node = by_id.get(tid)
+        for dep in node.depends_on if node else ():
+            stack.append((dep, False))
+    return False
+
+
+def dependency_state(task: Task, by_id: Mapping[str, Task]) -> dict[str, Any]:
+    """How a task's declared dependencies stand, over an already-loaded
+    lookup of every task (so views, the digest and the runner all read
+    dependencies the same way, from one listing).
+
+    Total by design — a hand-edited `depends_on` never raises here:
+
+      waiting_on  short ids of everything unsatisfied: a dependency that has
+                  not reached a terminal status, or one whose record is gone.
+                  This is what the digest renders and what `task run` refuses
+                  on.
+      failed      short ids of dependencies that ended `blocked`/`cancelled`
+                  — satisfied they never will be. An observation for the
+                  manager to judge (nudge, cancel, escalate), never a rail:
+                  they are *not* in `waiting_on`, so nothing is blocked by one.
+      missing     handles named by `depends_on` with no task record.
+      cycle       True when the dependency chain loops (it would wait forever).
+    """
+    waiting_on: list[str] = []
+    failed: list[str] = []
+    missing: list[str] = []
+    for dep_id in task.depends_on:
+        dep = by_id.get(dep_id)
+        if dep is None:
+            missing.append(short_handle(dep_id))
+            waiting_on.append(short_handle(dep_id))
+        elif dep.status not in TERMINAL_STATUSES:
+            waiting_on.append(dep.short_id)
+        elif dep.status != "done":
+            failed.append(dep.short_id)
+    return {
+        "waiting_on": waiting_on,
+        "failed": failed,
+        "missing": missing,
+        "cycle": _reaches_cycle(task, by_id) if task.depends_on else False,
+    }
+
+
+def dependency_states(all_tasks: list[Task]) -> dict[str, dict[str, Any]]:
+    """`dependency_state` for every task that declares dependencies, keyed by
+    full task id — one listing, one pass, for readers that render many rows."""
+    by_id = {t.id: t for t in all_tasks}
+    return {t.id: dependency_state(t, by_id) for t in all_tasks if t.depends_on}
 
 
 def report(

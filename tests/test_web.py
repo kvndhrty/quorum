@@ -109,3 +109,19 @@ def test_patch_deadline_empty_clears_it(client: TestClient, home: Path, tmp_path
     assert r.json()["deadline"] is None
     r = client.patch("/api/projects/clearable", json={"notes": "kept"})
     assert r.json()["deadline"] is None and r.json()["notes"] == "kept"
+
+
+def test_task_rows_expose_dependencies(client: TestClient, home: Path):
+    """The browser gets `waiting_on` from the same read model the CLI and the
+    TUI use — nothing dependency-shaped is materialized to disk (#31)."""
+    store = TaskStore(home)
+    upstream = store.add("web-proj", "build it", "fake")
+    dependent = store.add("web-proj", "review it", "fake", depends_on=[upstream.id])
+
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[dependent.id]["waiting_on"] == [upstream.short_id]
+    assert rows[dependent.id]["dep_failed"] == []
+
+    tasks.report(home, upstream.id, status="done", text="shipped")
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[dependent.id]["waiting_on"] == []

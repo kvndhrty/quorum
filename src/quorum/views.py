@@ -20,8 +20,10 @@ from .tasks import (
     TERMINAL_STATUSES,
     TaskStore,
     attached_state,
+    dependency_states,
     read_reports,
     runner_alive,
+    short_handle,
     workdir_git_state,
 )
 
@@ -175,7 +177,11 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     budget = config.tasks
     rows = []
     now = fsio.utc_now()
-    for t in TaskStore(home).list():
+    all_tasks = TaskStore(home).list()
+    # One pass over the listing we already have: dependencies are read, never
+    # materialized, so every view stays a pure file reader.
+    deps = dependency_states(all_tasks)
+    for t in all_tasks:
         last = read_reports(home, t.id, limit=1)
         git_state = None
         if t.status not in TERMINAL_STATUSES or (
@@ -206,6 +212,12 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                     t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
                 ),
                 "pr_url": t.pr_url,
+                # Dependencies as the views render them: full ids for anyone
+                # who needs to link, short ids for anyone who displays.
+                "depends_on": [short_handle(d) for d in t.depends_on],
+                "waiting_on": deps.get(t.id, {}).get("waiting_on", []),
+                "dep_failed": deps.get(t.id, {}).get("failed", []),
+                "dep_cycle": deps.get(t.id, {}).get("cycle", False),
                 "git": git_state,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,

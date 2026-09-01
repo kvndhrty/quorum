@@ -165,6 +165,10 @@ class QuorumTUI(App):
         def fill_tasks(table: DataTable) -> None:
             for t in task_rows:
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
+                if t.get("waiting_on"):
+                    status += " ⏳" + ",".join(t["waiting_on"])
+                if t.get("dep_failed"):
+                    status += " DEP-FAILED"
                 style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
                 table.add_row(
                     t["id_short"],

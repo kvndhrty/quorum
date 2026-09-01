@@ -620,3 +620,152 @@ def test_task_rows_surface_git_state_but_skip_settled_tasks(home: Path, tmp_path
     old = fsio.utc_now() - timedelta(hours=views.GIT_PROBE_TERMINAL_HOURS + 1)
     store.update(task.id, now=old, status="done")
     assert views.task_rows(home)[0]["git"] is None
+
+
+# -- dependencies (#31) ---------------------------------------------------
+
+
+def test_resolve_dependencies_accepts_short_ids_and_dedupes(home: Path):
+    store = TaskStore(home)
+    first = store.add("proj", "upstream", "fake")
+    second = store.add("proj", "other upstream", "fake")
+    resolved = tasks.resolve_dependencies(
+        store, [first.short_id, second.id, first.short_id.upper()]
+    )
+    assert resolved == [first.id, second.id]
+
+
+def test_resolve_dependencies_rejects_unknown_and_self(home: Path):
+    store = TaskStore(home)
+    existing = store.add("proj", "upstream", "fake")
+    with pytest.raises(ValueError, match="no task matching"):
+        tasks.resolve_dependencies(store, ["zzzzzz"])
+    with pytest.raises(ValueError, match="cannot depend on itself"):
+        tasks.resolve_dependencies(store, [existing.short_id], self_id=existing.id)
+
+
+class _PerpetualStandIn:
+    """A task that already carries #12's `perpetual` field."""
+
+    id = "01PERPETUALPERPETUALPETUAL"
+    short_id = "petual"
+    perpetual = True
+
+
+class _PerpetualStore:
+    def resolve(self, handle):
+        return _PerpetualStandIn()
+
+
+def test_cannot_depend_on_a_perpetual_task():
+    """A perpetual task (#12) never reaches a terminal status, so a dependent
+    would wait on it forever. `Task.perpetual` is being added on another
+    branch; the guard is a getattr, so it starts refusing the moment the
+    field lands — here it is driven against a stand-in that already has it."""
+    with pytest.raises(ValueError, match="perpetual"):
+        tasks.resolve_dependencies(_PerpetualStore(), ["petual"])
+
+
+@pytest.mark.skipif(
+    "perpetual" not in tasks.Task.model_fields,
+    reason="#12 (perpetual tasks) has not landed on this branch yet",
+)
+def test_cannot_depend_on_a_real_perpetual_task(home: Path):
+    """The same guard against the real field, once #12 is merged."""
+    store = TaskStore(home)
+    upstream = store.add("proj", "forever", "fake")
+    store.update(upstream.id, perpetual=True)
+    with pytest.raises(ValueError, match="perpetual"):
+        tasks.resolve_dependencies(store, [upstream.short_id])
+
+
+def test_dependency_state_reads_waiting_failed_and_missing(home: Path):
+    store = TaskStore(home)
+    running = store.add("proj", "still going", "fake")
+    finished = store.add("proj", "shipped", "fake", status="done")
+    dead = store.add("proj", "gave up", "fake", status="blocked")
+    dependent = store.add(
+        "proj", "the follow-up", "fake",
+        depends_on=[running.id, finished.id, dead.id, "01GHOSTGHOSTGHOSTGHOSTGH0ST"],
+    )
+    state = tasks.dependency_state(dependent, {t.id: t for t in store.list()})
+    assert state["waiting_on"] == [running.short_id, "tgh0st"]
+    assert state["failed"] == [dead.short_id]  # never blocks: the manager judges it
+    assert state["missing"] == ["tgh0st"]
+    assert state["cycle"] is False
+
+    # once the upstream reports done, nothing is waiting
+    tasks.report(home, running.id, "done", "shipped it")
+    state = tasks.dependency_state(
+        store.get(dependent.id), {t.id: t for t in store.list()}
+    )
+    assert state["waiting_on"] == ["tgh0st"]
+
+
+def test_dependency_state_flags_a_hand_edited_cycle_instead_of_crashing(home: Path):
+    store = TaskStore(home)
+    a = store.add("proj", "a", "fake")
+    b = store.add("proj", "b", "fake", depends_on=[a.id])
+    store.update(a.id, depends_on=[b.id])  # only reachable by hand-editing
+    by_id = {t.id: t for t in store.list()}
+    state = tasks.dependency_state(store.get(b.id), by_id)
+    assert state["cycle"] is True and state["waiting_on"] == [a.short_id]
+    # an upstream cycle the task is not itself part of is flagged too
+    c = store.add("proj", "c", "fake", depends_on=[b.id])
+    assert tasks.dependency_state(c, {t.id: t for t in store.list()})["cycle"] is True
+
+
+def test_run_refuses_a_task_with_unfinished_dependencies(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    with pytest.raises(RunnerError, match=f"waiting on {upstream.short_id}"):
+        run_task(home, config, dependent.id)
+    assert store.get(dependent.id).runs == []  # nothing was spent
+
+
+def test_force_overrides_the_dependency_refusal(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "do the work", "fake")
+    dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
+    assert run_task(home, config, dependent.id, force=True) == 0
+    assert len(store.get(dependent.id).runs) == 1
+
+
+def test_a_satisfied_dependency_runs_and_reaches_the_prompt(
+    home: Path, project: str, monkeypatch
+):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "build the thing", "fake")
+    tasks.report(home, upstream.id, "done", "shipped", pr_url="https://x/pr/7")
+    dependent = store.add(project, "review the PR", "fake", depends_on=[upstream.id])
+
+    assert run_task(home, config, dependent.id) == 0
+    text = transcript_text(home, dependent.id)
+    # the cheapest sufficient upstream handoff: status + pr url in the prompt,
+    # and a pointer at `task show` for everything else
+    assert f"- {upstream.short_id}: status=done pr=https://x/pr/7" in text
+    assert "quorum task show" in text
+
+
+def test_task_rows_surface_waiting_on(home: Path):
+    from quorum import views
+
+    store = TaskStore(home)
+    upstream = store.add("proj", "first", "fake")
+    dependent = store.add("proj", "second", "fake", depends_on=[upstream.id])
+    rows = {r["id"]: r for r in views.task_rows(home)}
+    assert rows[dependent.id]["waiting_on"] == [upstream.short_id]
+    assert rows[dependent.id]["depends_on"] == [upstream.short_id]
+    assert rows[upstream.id]["waiting_on"] == []
+
+    tasks.report(home, upstream.id, "cancelled", "dropped")
+    rows = {r["id"]: r for r in views.task_rows(home)}
+    assert rows[dependent.id]["waiting_on"] == []
+    assert rows[dependent.id]["dep_failed"] == [upstream.short_id]

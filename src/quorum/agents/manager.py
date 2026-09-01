@@ -206,6 +206,54 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
     return lines
 
 
+def _dependency_marks(state: dict | None) -> str:
+    """The greppable part of a dependency observation, appended to the task
+    line: `waiting-on=<short ids>` while a prerequisite is unfinished, plus
+    the flags. Empty for the overwhelming majority of tasks."""
+    if not state:
+        return ""
+    marks = ""
+    if state["waiting_on"]:
+        marks += f" waiting-on={','.join(state['waiting_on'])}"
+    if state["failed"]:
+        marks += " DEP-FAILED"
+    if state["cycle"]:
+        marks += " DEP-CYCLE"
+    return marks
+
+
+def _dependency_lines(state: dict | None) -> list[str]:
+    """The prose behind the marks. Every one of these is an *observation* the
+    manager judges — quorum refuses a premature `task run` (a substrate rail,
+    like the attached refusal), but it never cancels, re-queues or rewrites a
+    dependency for you."""
+    if not state:
+        return []
+    lines = []
+    if state["waiting_on"]:
+        lines.append(
+            f"  deps: waiting on {', '.join(state['waiting_on'])} — do not `task run` "
+            "this task until they reach a terminal status (the runner refuses anyway)"
+        )
+    if state["failed"]:
+        lines.append(
+            f"  DEP-FAILED: dependency {', '.join(state['failed'])} ended blocked or "
+            "cancelled, so this task will never become runnable on its own — decide "
+            "(nudge the dependency, cancel this task, or escalate) and journal it"
+        )
+    if state["missing"]:
+        lines.append(
+            f"  DEP-MISSING: dependency {', '.join(state['missing'])} has no task "
+            "record — its directory is gone; this task can never start"
+        )
+    if state["cycle"]:
+        lines.append(
+            "  DEP-CYCLE: this task's dependency chain loops back on itself "
+            "(only possible by hand-editing task.json) — it can never start"
+        )
+    return lines
+
+
 def _budget(home: Path, tasks_config: TasksConfig | None) -> TasksConfig:
     """The task budget the digest judges spend against; defaults (no budget)
     when the caller has no config and none can be read."""
@@ -235,6 +283,8 @@ def build_digest(
     """
     home = Path(home)
     budget = _budget(home, tasks_config)
+    # Dependencies, read once over the listing we already hold (tasks.py).
+    deps = tasks.dependency_states(all_tasks)
     live = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
@@ -263,9 +313,11 @@ def build_digest(
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
             f"runner={'alive' if alive else 'dead'} runs={len(t.runs)} quiet={quiet}"
+            + _dependency_marks(deps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
+        lines.extend(_dependency_lines(deps.get(t.id)))
         git = tasks.workdir_git_state(t)
         if git and (git["dirty"] or git["unpushed"]):
             unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
