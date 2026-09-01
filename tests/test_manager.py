@@ -564,3 +564,23 @@ def test_a_perpetual_task_that_reported_done_is_observed_not_forgotten(
     assert f"PERPETUAL-ENDED {ended.short_id}: reported 'done'" in digest
     assert stopped.short_id not in digest.split("## Active tasks")[0]
     assert ordinary.short_id not in digest.split("## Active tasks")[0]
+
+
+def test_house_rules_from_the_overlay_reach_the_manager_run(
+    home: Path, clock, project: str
+):
+    """prompts/manager.local.md is how a home adds policy without forking the
+    packaged constitution and stranding itself on an old default (#37)."""
+    write_config(home, "echo")
+    TaskStore(home).add(project, "tidy up the docs", "tasktool")
+    (home / "prompts" / "manager.local.md").write_text(
+        "House rules for this home: never run more than two tasks at once.\n"
+    )
+
+    make_manager(home, clock).tick()
+
+    text = manager_transcript_text(home)
+    assert "never run more than two tasks at once" in text
+    assert "You are the manager of a quorum home" in text  # the packaged default
+    # the header comment still *documents* the key, hence the line anchor
+    assert "PROMPT| {local}" not in text
