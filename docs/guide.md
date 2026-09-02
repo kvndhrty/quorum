@@ -230,7 +230,8 @@ defaults); every `[harness.*]` table — argv[0] on PATH, a template that can
 actually carry a prompt, `{session}` wherever a `resume` template promises
 one, and argv that speaks stream-json without `inject` set; `[tasks].default_harness`;
 git and each registered project directory; `gh` when `[ci]` is on, the herdr
-socket when `[herdr]` is, and nono-py when `[sandbox]` asks for it; each
+socket when `[herdr]` is, the `[notify]` command when there is one (`–` with
+a pointer when there is not), and nono-py when `[sandbox]` asks for it; each
 `prompts/` file against the packaged default (`default` / an unedited older
 seed `quorum init` would upgrade / your own edit over a default that has
 since moved); and the state earlier runs left behind — a supervisor lock
@@ -812,6 +813,71 @@ for you is never silent.
 - `quorum manager journal` — what the manager did and why.
 - `quorum manager notes` — what it is carrying forward between runs.
 
+## Getting notified
+
+Everything above shows you an escalation when you look. The `[notify]`
+table is how one reaches you when you are not looking: an argv template
+that quorum runs once for every new message on the listed board topics —
+by default just `attention`, the manager's ask-a-human channel (and where
+the supervisor reports an agent that keeps failing).
+
+```toml
+[notify]
+command = ["terminal-notifier", "-title", "quorum", "-message", "{text}"]
+topics = ["attention"]        # board topics that fire it (default: attention)
+timeout_seconds = 10
+```
+
+Some other shapes, one per line of `command`:
+
+```toml
+# a phone, via ntfy.sh (or your own ntfy server)
+command = ["ntfy", "publish", "--title", "quorum: {from}", "my-quorum-topic", "{text}"]
+
+# a Slack incoming webhook (curl, no shell — every element is one argv)
+command = ["curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
+           "-d", "{\"text\": \"{from}: {text}\"}", "https://hooks.slack.com/services/…"]
+
+# anything at all: a script of yours gets the text as its last argument
+command = ["/Users/you/bin/notify-me"]
+```
+
+`{text}`, `{from}`, `{topic}`, `{type}` and `{id}` are substituted inside
+each argument, exactly like `{prompt}` in a harness template — there is no
+shell, so a message containing quotes, spaces or `$` is still one argument.
+A template with no `{text}` gets the text appended as the final argument.
+Substitution is plain text replacement, though, so if an argument is itself
+structured — the JSON body in the Slack line above — a message containing a
+`"` or a backslash makes it malformed; prefer a small script of your own
+(the last shape) when the payload has to be escaped.
+
+Prove the wiring before an escalation does:
+
+```bash
+quorum notify test "hello from quorum"
+```
+
+That runs the template once, right now, and exits 1 with the reason if it
+could not (binary not on PATH, nonzero exit, timeout). `quorum doctor`
+also reports the table — `✗` when the command is not on PATH.
+
+The supervisor delivers for real: every ~15 seconds (and once at startup,
+before anything else it does) it sends out whatever landed on the listed
+topics since the last one it delivered, oldest first, keeping its place in
+`state/notify.json`. So an escalation posted while `quorum up` was stopped
+still goes out when it comes back, and nothing is ever sent twice: it
+writes its place down *before* running your command, so the one thing it
+will do under a crash or a full disk is skip a notification, never repeat
+one. Turning the hook on starts from *now* — it does not replay old
+messages the banner already showed.
+
+Delivery fails soft, like every other integration: a command that is
+missing, exits nonzero or hangs past `timeout_seconds` is one line in
+`logs/supervisor.log`, and the next message is still delivered. What is
+worth escalating stays where it was — in `prompts/manager.md` — because the
+hook fires on the *topic*, not on what the message says; list `system` or
+`tasks` too if you want the firehose.
+
 ## Controlling agents at runtime
 
 While `quorum up` is running you can steer its schedule without editing
@@ -1172,6 +1238,7 @@ def test_milestone(tmp_path):
   state/manager/usage.jsonl         what each manager run cost and how it
                                     ended (agents get the same file under
                                     state/agents/<name>/)
+  state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
 ```

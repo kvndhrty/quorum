@@ -118,6 +118,49 @@ class CIConfig(BaseModel):
     timeout_seconds: float = 10.0
 
 
+class NotifyConfig(BaseModel):
+    """Optional [notify] table: an argv template fired once per new board
+    message on the listed topics (notify.py).
+
+    `command` is substituted element-wise like a `[harness.<name>]` template
+    ("{text}", "{from}", "{topic}", "{type}", "{id}"; a template with no
+    "{text}" gets the text appended as the final argument), so there is no
+    shell and no quoting. Absent table: nothing fires — the board is still
+    the record, it just reaches no one. `topics` must name at least one
+    topic: an empty list would be a hook that never fires, which is what
+    deleting the table already says; the default is the one topic that is
+    meant to reach a person."""
+
+    command: list[str]
+    topics: list[str] = Field(default_factory=lambda: ["attention"])
+    timeout_seconds: float = 10.0
+
+    @field_validator("command")
+    @classmethod
+    def _nonempty_command(cls, v: list[str]) -> list[str]:
+        if not v or not v[0]:
+            raise ValueError("[notify].command argv must not be empty")
+        return v
+
+    @field_validator("topics")
+    @classmethod
+    def _nonempty_topics(cls, v: list[str]) -> list[str]:
+        topics = [t.strip() for t in v]
+        if not topics or any(not t for t in topics):
+            raise ValueError(
+                "[notify].topics must list at least one board topic "
+                "(remove the [notify] table to turn notifications off)"
+            )
+        return topics
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def _positive_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("[notify].timeout_seconds must be > 0")
+        return v
+
+
 class QuorumSection(BaseModel):
     timezone: str = "local"
     retention_days: int = 30
@@ -175,6 +218,7 @@ class Config(BaseModel):
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     herdr: HerdrConfig | None = None
     ci: CIConfig = Field(default_factory=CIConfig)
+    notify: NotifyConfig | None = None
     harness: dict[str, HarnessConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 

@@ -92,6 +92,20 @@ observes a PR.
   out, escalate after hitting the cap two runs running.
 - A prompt agent whose template writes `{notes}` gets the same
   self-observation lines above its notebook (no new placeholder).
+- Notification hook: a `[notify]` table holds an argv template
+  (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
+  no shell) that the supervisor runs once for every new message on the
+  listed board topics — `attention` by default, so a manager escalation or
+  an `agent.failing` reaches you without your looking. A private cursor in
+  `state/notify.json`, advanced and persisted *before* each delivery,
+  makes it at-most-once across restarts — nothing is ever sent twice, and
+  a crash mid-hook loses one notification rather than repeating it forever
+  (posts while the supervisor is down go out on the next start, oldest
+  first; enabling it starts from now). Delivery fails soft: a missing
+  binary, nonzero exit or timeout is one `supervisor.log` line and the
+  cursor has already advanced.
+  `quorum notify test "…"` proves the wiring loudly; `quorum doctor` gains
+  a `notify` line. (#55)
 
 ## [0.2.0] - 2026-09-01
 

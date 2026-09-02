@@ -106,6 +106,8 @@ state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent and how it went ({at, run,
                                   usage|null, outcome, duration_seconds})
+state/notify.json                 the [notify] hook's private board cursors
+                                  (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
@@ -913,6 +915,56 @@ dismiss) fire exactly once. Nothing here pauses, retries or throttles the
 agent; the post is an observation, in the same class as `possible-loop`
 and `ci:`.
 
+### Board consumers: the notification hook
+
+The board carries no read marks, so *reaching* someone is a consumer's job,
+and `notify.py` is the one consumer quorum ships for a person rather than
+an agent. An optional `[notify]` table holds an argv template — the same
+shape as `[harness.<name>]`, substituted element-wise (`{text}`, `{from}`,
+`{topic}`, `{type}`, `{id}`; a template with no `{text}` gets it appended,
+like a harness template with no `{prompt}`), so there is no shell and
+nothing to quote — and the topics that fire it (default `attention`, the
+one topic meant for a human). The supervisor runs `_notify` on the control
+cadence (15 s, and once at startup, that startup catch-up running *before*
+the scheduler and the janitor so it can neither race the job's first fire
+nor lose an escalation the janitor is about to archive): it reads each
+listed topic past a private cursor kept in `state/notify.json` (the last
+on-disk filename processed, per topic — `MessageBus.entries_after_cursor`
+hands back real filenames, because a message's own `filename()` is only
+what `post()` happened to write) and runs the template once per message,
+oldest first, advancing and persisting the cursor *before* each delivery.
+Delivery is therefore **at-most-once** by design: a crash — or a failed
+cursor write — mid-hook loses one notification, where the other order
+would repeat it every 15 seconds for as long as the disk stayed full.
+Nothing is ever delivered twice, including across a restart or between
+the startup drain and the job (`drain` takes a process-wide lock, since
+APScheduler's `max_instances` guards a job only against itself). That is
+the documented board-consumer pattern and nothing more: no queue, no retry
+store, no second transport, and a message posted while the supervisor is
+down goes out on the next start.
+
+Three stances hold it in shape. **It fires on topic membership, never on
+content**: what is escalation-worthy stays prompt policy, and the hook
+would deliver a `note` on `attention` as readily as an `escalation`. **It
+fails soft** in herdr's mold, not sandbox.py's: a missing binary, a
+nonzero exit or a hang past `[notify].timeout_seconds` is one line in
+`logs/supervisor.log` and an advanced cursor — a notification that cannot
+be delivered must not block the ones behind it, and nothing here can fail
+a tick, a board post or the supervisor (`drain` catches everything,
+including an unwritable cursor file; an unreadable one is re-initialized
+with a log line rather than raised at every tick). **Enabling it starts
+from now**: the first drain arms each topic's cursor at its current tail
+without delivering, so turning the hook on does not replay a month of
+old escalations the banner already showed. A per-tick cap
+(`MAX_PER_TICK`) keeps a suddenly busy listed topic from wedging the job
+thread; the rest waits for the next tick. The template runs with the
+supervisor's environment, as a harness does — not a security boundary.
+
+`quorum notify test "…"` runs the template once, directly and loudly (exit
+1 with the reason), without touching the board or the cursor; `quorum
+doctor` reports the table (`–` when absent, `✗` when `command[0]` is not
+on PATH, `–` when the template has no `{text}`).
+
 ### Design seam: outboxes and a router
 
 v1 delivers directly (writer → recipient's `new/`), because everything
@@ -1070,7 +1122,10 @@ Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
 `ci.auth_status` (the module that owns every gh subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
-seeds by), sandbox support through `sandbox.availability()`.
+seeds by), sandbox support through `sandbox.availability()`. The
+`[notify]` line is static (argv[0] on PATH, `{text}` in the template);
+actually running the template is `quorum notify test`, which is loud
+where the supervisor's delivery is deliberately not.
 
 One small function per check, each taking only what it needs (a `Config`, a
 `HarnessConfig`, a home path), so every check has both a passing and a
