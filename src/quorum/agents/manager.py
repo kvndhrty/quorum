@@ -321,7 +321,15 @@ def build_digest(
             # finished work always gets probed.
             return None
         ci_budget -= 1
-        return ci.pr_state(home, task)
+        state = ci.pr_state(home, task)
+        if state is not None:
+            # The one place a probe result is written to disk: what the forge
+            # says about the PR outlives the probe, so views that never make
+            # a network call can still badge a merged task. An observation,
+            # never a status change — see tasks.record_pr_state and
+            # docs/architecture.md ("The merged observation").
+            tasks.record_pr_state(home, task, state["state"], now=now)
+        return state
 
     # A perpetual task is never supposed to finish, so one that reported a
     # terminal status is either the user ending it (cancelled — fine) or a
@@ -455,7 +463,13 @@ def build_digest(
             # loudly, and leave the judgement to the prompt.
             pr = ci_state(t)
             if pr:
-                bad = "CI-FAILING " if (pr["summary"] == "failing" or pr["conflict"]) else ""
+                # A merged PR is delivered, full stop: its checks are
+                # historical and its "conflict" is meaningless. Suppressed
+                # explicitly rather than by construction, so a forge that
+                # keeps reporting a stale red rollup after the merge cannot
+                # send the manager to relaunch finished work.
+                red = pr["summary"] == "failing" or pr["conflict"]
+                bad = "CI-FAILING " if red and not pr["merged"] else ""
                 lines.append(f"  ci: {bad}{ci.describe(pr)}")
             lines.extend(_usage_lines(t, budget))
         lines.append("")

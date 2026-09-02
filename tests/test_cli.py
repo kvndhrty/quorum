@@ -1022,6 +1022,46 @@ def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path)
     assert "∞" not in runner.invoke(app, ["task", "list", "--home", str(home)]).output
 
 
+# -- the merged observation (#57) --------------------------------------------
+
+
+def test_a_merged_or_closed_pr_is_badged_everywhere(home: Path, tmp_path: Path):
+    """`done ✔` is delivered; `done ⊘` is a PR a human closed unmerged. Both
+    are read straight off task.json — the manager tick recorded them, this
+    command never probes a forge."""
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    store = TaskStore(home)
+    shipped = store.add(slug, "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged", pr_state_at="2026-01-01T00:00:00Z")
+    dropped = store.add(slug, "abandoned", "fake", status="done")
+    store.update(dropped.id, pr_state="closed", pr_state_at="2026-01-01T00:00:00Z")
+    store.add(slug, "never observed", "fake", status="done")
+
+    rows = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    assert [r["pr_state"] for r in rows] == ["merged", "closed", None]
+
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "done ✔" in listing and "done ⊘" in listing
+    assert "✔" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "✔" in runner.invoke(app, ["status", "--legend"]).output
+    shown = runner.invoke(app, ["task", "show", shipped.short_id, "--home", str(home)]).output
+    assert "pr state: merged (observed 2026-01-01T00:00:00Z)" in shown
+
+
+def test_a_task_with_no_observed_pr_state_is_not_badged(home: Path, tmp_path: Path):
+    """Absence means "never observed" — no gh, no PR — never "not merged"."""
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "✔" not in listing and "⊘" not in listing
+    short = json.loads(
+        runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output
+    )[0]["id_short"]
+    assert "pr state" not in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
+
+
 # -- one load-config fallback (#34) ------------------------------------------
 
 

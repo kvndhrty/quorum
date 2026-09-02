@@ -18,7 +18,7 @@ from quorum.config import HarnessConfig, load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.runner import RunnerError, run_task
-from quorum.tasks import TaskStore
+from quorum.tasks import TaskStore, task_json_path
 
 TESTS_BIN = Path(__file__).parent / "bin"
 FAKE = str(TESTS_BIN / "fake_harness.py")
@@ -935,6 +935,34 @@ def test_a_perpetual_run_gets_the_softened_delivery_conventions(
     assert "PERPETUAL" not in once and "PROMPT| {perpetual}" not in once
     # the ordinary delivery protocol survives in both
     assert "git push -u origin HEAD" in cycling and "git push -u origin HEAD" in once
+
+
+def test_pr_state_survives_a_round_trip_and_defaults_to_unobserved(home: Path):
+    """`pr_state` is what the *forge* said, kept beside — never merged into —
+    the status the harness reported (#57)."""
+    store = TaskStore(home)
+    task = store.add("p", "ship it", "fake", status="done")
+    assert task.pr_state is None and task.pr_state_at is None
+
+    store.update(task.id, pr_state="merged", pr_state_at="2026-01-01T00:00:00Z")
+    reread = store.get(task.id)
+    assert reread.pr_state == "merged" and reread.pr_state_at == "2026-01-01T00:00:00Z"
+    assert reread.status == "done"  # the observation never became the status
+
+
+def test_a_task_json_written_before_pr_state_existed_still_loads(home: Path):
+    """Old homes upgrade in place: the field is absent, not null, on every
+    record written before this version."""
+    import json as _json
+
+    store = TaskStore(home)
+    task = store.add("p", "old record", "fake")
+    path = task_json_path(home, task.id)
+    data = _json.loads(path.read_text())
+    del data["pr_state"], data["pr_state_at"]
+    path.write_text(_json.dumps(data))
+
+    assert store.get(task.id).pr_state is None
 
 
 def test_perpetual_survives_a_round_trip_and_defaults_off(home: Path):

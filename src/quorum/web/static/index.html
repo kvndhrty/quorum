@@ -195,6 +195,11 @@ async function refresh() {
     // "∞": perpetual — never finishes by design, only the user ends it.
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""))
       + (t.perpetual ? ' <span title="perpetual: runs in cycles until you cancel it">∞</span>' : "")
+      // "✔"/"⊘": what the forge last said about the PR, observed by the
+      // manager tick and read back off task.json — no badge means nothing
+      // was ever observed, not "not merged".
+      + (t.pr_state === "merged" ? ` <span title="pull request merged (observed ${esc(t.pr_state_at || "")})">✔</span>` : "")
+      + (t.pr_state === "closed" ? ` <span class="muted" title="pull request closed unmerged (observed ${esc(t.pr_state_at || "")})">⊘</span>` : "")
       + waiting + depFailed + depMissing;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over

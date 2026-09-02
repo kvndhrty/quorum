@@ -355,6 +355,26 @@ def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
     drive(home, script)
 
 
+def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path):
+    """`✔` distinguishes "done and delivered" from "done and waiting on a
+    human" — read off task.json, since the TUI never probes a forge."""
+    store = TaskStore(home)
+    shipped = store.add("proj-a", "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged")
+    dropped = store.add("proj-a", "abandoned", "fake", status="done")
+    store.update(dropped.id, pr_state="closed")
+    store.add("proj-a", "never observed", "fake", status="done")
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
+        assert statuses[0].endswith("✔")
+        assert statuses[1].endswith("⊘")
+        assert "✔" not in statuses[2] and "⊘" not in statuses[2]
+
+    drive(home, script)
+
+
 def test_selecting_an_agent_shows_its_notebook(home: Path):
     """The notebook is read-only here, like everything else in the TUI: a
     file reader, working with the supervisor stopped."""

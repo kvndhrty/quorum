@@ -126,6 +126,14 @@ def test_packaged_manager_and_preamble_carry_the_slot():
         assert prompts.has_slot(text), f"{name}.md lost its {{local}} slot"
 
 
+def test_the_packaged_manager_prompt_reads_a_merged_pull_request():
+    """Supervision policy is prompt text, not Python, so the reading of
+    `state=merged` / `state=closed` is only real if the shipped template
+    actually says it (#57)."""
+    text = prompts.packaged("manager")
+    assert "state=merged" in text and "state=closed" in text
+
+
 def test_a_missing_template_still_raises(home: Path):
     with pytest.raises(KeyError):
         prompts.load(home, "no-such-template")

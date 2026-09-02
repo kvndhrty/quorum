@@ -465,16 +465,21 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
-- a `ci:` line for any task whose branch has a pull request — check counts,
-  the names of the failing checks, and `MERGE-CONFLICT` when the branch no
-  longer merges. A task that reported `done` over red checks is marked
+- a `ci:` line for any task whose branch has a pull request — its state
+  (`state=open` / `merged` / `closed`), check counts, the names of the
+  failing checks, and `MERGE-CONFLICT` when the branch no longer merges. A
+  task that reported `done` over red checks is marked
   `CI-FAILING`, the same way work left uncommitted is marked
-  `STRANDED-WORK`: pushed is not the same as working. This needs `gh` on
+  `STRANDED-WORK`: pushed is not the same as working. A **merged** task never
+  carries that mark — merged is delivered, and the default prompt reads it as
+  "needs nothing from you". This needs `gh` on
   PATH and authenticated; without it (or without a PR yet) the line is
   simply absent, and nothing else changes. Turn the probe off with
   `enabled = false` under `[ci]` in config.toml — it costs one `gh` call per
   task per tick (capped at 12 probed tasks and 10s each, so a hung network
-  delays a tick by a bounded couple of minutes at worst, never forever);
+  delays a tick by a bounded couple of minutes at worst, never forever).
+  Whatever state the probe sees is also written to the task's record, which
+  is what puts the `✔` on the row — see [below](#merged-pull-requests);
 - what each task has spent, when its harness reports usage, and a
   `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — with
   `(next run gated; --force to override)` when it was the last run, since
@@ -888,6 +893,40 @@ retune: change the two-strike rule, have it comment on the PR instead of
 relaunching, restrict it to one project, or make it open follow-up tasks
 with `quorum task add`. It runs under the ordinary prompt-agent rails — every
 action journaled to `state/agents/babysitter/journal.jsonl`, capped per run.
+
+### Merged pull requests
+
+A task ends at the harness's word — `done` — but the work is delivered when
+its pull request merges. Those are different facts and quorum keeps them
+apart: it never changes a status because a PR merged.
+
+What it does do is *remember* what the forge said. When the manager's tick
+probes a task's PR (above), it records the state it saw on the task's own
+record as `pr_state` (`open` / `merged` / `closed`) and `pr_state_at`. Every
+read-only surface then shows it without touching the network:
+
+```
+  ✓ k3n8qz  quorum  done ✔  claude  shipped the prune command  https://…/pull/71
+  ✓ w1r0gp  quorum  done ⊘  claude  superseded by #74
+```
+
+`✔` merged, `⊘` closed without merging. `quorum task show <id>` prints the
+same thing with its timestamp (`pr state: merged (observed 2026-09-02T…Z)`),
+and `quorum status --legend` explains the glyphs.
+
+Two things to keep in mind:
+
+- **No badge means nothing was ever observed** — no PR yet, no `gh`, `[ci]`
+  off, or the supervisor was never up while the PR was open. It never means
+  "not merged".
+- **The observation is as old as its timestamp.** Only the manager tick
+  writes it; a stopped supervisor means a merge that happened this morning
+  is not on the row yet.
+
+For the manager, a merged task needs nothing at all. A task that reported
+`done` whose PR was *closed unmerged* is the interesting case: something a
+human decided, which quorum cannot interpret — the default prompt tells the
+manager to say so in one line and leave it alone.
 
 ## Sandboxing
 

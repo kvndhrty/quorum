@@ -77,7 +77,9 @@ tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
                                    note, reported token/cost usage) + the
                                   attached / perpetual flags + depends_on:
-                                  full ids this task waits on
+                                  full ids this task waits on + pr_state /
+                                  pr_state_at: what the forge last said about
+                                  the PR, the one materialized probe result
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -460,7 +462,10 @@ Cross-project chains work by construction, since ids are global.
   the launch; it never cancels, re-queues or reorders anything.
 - **Views** (`quorum status` / `task list` / `task show`, TUI, web) render
   `waiting_on` / `dep_failed` / `dep_missing` / `dep_cycle` straight off
-  `views.task_rows`. Nothing is materialized to disk for them.
+  `views.task_rows`. Nothing is materialized to disk for them (unlike the
+  merged observation, [below](#the-merged-observation) — dependencies are
+  derivable from files quorum already holds, so materializing them would buy
+  nothing).
 - **Reading the upstream outcome**: the dependent task's composed prompt
   gains a *Tasks this one depends on* block listing each dependency's short
   id, status and `pr_url` (`runner.dependency_note` — fields already in
@@ -678,7 +683,9 @@ the human is on for an adopted one). The rollup mixes CheckRun (Actions:
 `status` + `conclusion`) and StatusContext (classic: `state`) shapes;
 `_verdict` classifies each as pass/fail/pending and treats anything it does
 not recognize as pending, because an unknown shape must never read as a
-pass. The line is `key=value` like the rest of the digest — check counts,
+pass. The line is `key=value` like the rest of the digest — the PR's own
+state (`state=open` / `merged` / `closed`, normalized by
+`ci.normalize_state` from whatever the forge calls it), check counts,
 up to five failing check *names*, `MERGE-CONFLICT` when `mergeable` is
 `CONFLICTING`, and the PR url.
 
@@ -712,9 +719,59 @@ diagnostic never has to grow a gh subprocess of its own.
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
 says how to read the line, and the shipped `prompts/babysitter.md` (below)
-is a whole reactive policy written as prompt text. Views stay pure file
-readers — the probe runs during digest build only, and nothing materializes
-its result to disk, so `views.py` never acquires a network call.
+is a whole reactive policy written as prompt text.
+
+#### The merged observation
+
+A task's lifecycle ends at the harness's word (`done`); its work is
+delivered when the PR merges. Quorum keeps the two apart — `done` is the
+harness's word, merged is the forge's, and **nothing in Python turns one
+into the other**. But the second fact has to survive the probe that saw it,
+because the surfaces that would show it never make network calls.
+
+So there is exactly one materialized probe result. When `build_digest`'s
+probe returns a state in `tasks.PR_STATES` (`open` / `merged` / `closed`),
+`tasks.record_pr_state` writes it — with `pr_state_at` — onto
+`tasks/<id>/task.json`. Every reader then gets it for free off the file:
+`quorum status` / `task list` / `task show`, the TUI and the web dashboard
+badge `✔` merged and `⊘` closed-unmerged straight out of
+`views.task_rows`, and `views.py` still never acquires a `gh` subprocess.
+
+This is a deliberate revision of the rule this section used to state
+outright ("nothing materializes its result to disk"). The rule was there to
+stop views from growing network calls; it did not anticipate a fact that is
+*durable* — a merge is final, unlike a check rollup, which is only ever true
+as of now. The narrow exception is fenced by five properties, and a second
+materialized probe result would have to earn all of them again:
+
+- **one writer**, `record_pr_state`, called from **one place**, the
+  digest's probe closure. Never from a view, a CLI command or the runner.
+- **closed vocabulary**: only the three known states are written. `unknown`
+  writes nothing, so a forge shape quorum does not understand can never
+  badge a task as delivered — and nothing re-probes a task once its worktree
+  is gone.
+- **never a status**: `status` and `pr_state` are separate fields, and no
+  code path derives one from the other.
+- **`updated_at` untouched**. It means "someone acted on this task", and the
+  digest's recently-finished window is measured from it; a probe that bumped
+  it would pin every merged task in that section forever. The record is also
+  re-read from disk rather than dumped from the in-memory `Task`, so a
+  status a live run reported meanwhile is never rolled back.
+- **fail-soft to the end**: an unreadable or unwritable `task.json` is a
+  lost observation, re-made on the next tick, never a failed digest.
+
+Absence stays uninformative, exactly as the missing `ci:` line is: no
+`pr_state` means no PR, no `gh`, `[ci]` off, or a supervisor that was never
+up while the PR was open — never "not merged". And a recorded state is only
+as fresh as `pr_state_at`, which every surface that has room prints next to
+it.
+
+Two consequences elsewhere: a merged PR suppresses `CI-FAILING`
+explicitly (a forge may keep serving a stale red rollup after the merge, and
+that must never send the manager to relaunch finished work), and the manager
+prompt gains the reading — a merged task needs nothing; a `done` task whose
+PR was closed unmerged is a human decision quorum cannot interpret, worth
+one line to the human and nothing else.
 
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
