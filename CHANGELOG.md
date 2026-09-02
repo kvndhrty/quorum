@@ -106,6 +106,26 @@ observes a PR.
   cursor has already advanced.
   `quorum notify test "…"` proves the wiring loudly; `quorum doctor` gains
   a `notify` line. (#55)
+- On-demand cleanup, all of it "archive, never delete" (#53):
+  - `quorum task prune [--status] [--older-than] [--worktrees] [--dry-run]
+    [--force]` moves finished tasks into `tasks/.archive/<id>/`. The
+    directory is dot-prefixed, so every existing reader — `status`,
+    `task list`, the TUI, the web dashboard, the manager digest — skips it
+    with no code change, and restoring a task is one `mv` back. Refuses a
+    task with a live runner, an attached task, one another task still
+    depends on, and (unless `--force`) one whose worktree holds uncommitted
+    or unpushed work. `--worktrees` adds `git worktree remove` plus branch
+    deletion, keeping an unmerged branch unless forced. `--force` is never
+    passed to `git worktree remove`: a dirty worktree is left alone and its
+    task unarchived. Its two meanings are waiving the stranded-work refusal
+    and upgrading `git branch -d` to `-D` — the one destructive thing here,
+    said out loud in the confirm prompt. `--worktrees --dry-run` names each
+    worktree and branch it would touch.
+  - `quorum board clear <topic> [--before 7d|<date>] [--dry-run]` archives a
+    board topic into the same `messages/archive/YYYY-MM.jsonl.gz` the
+    janitor writes — `board clear attention` empties the escalation banner.
+  - `quorum task inbox <id> --clear` archives guidance still waiting
+    undelivered (unclaimed mail only).
 
 ## [0.2.0] - 2026-09-01
 

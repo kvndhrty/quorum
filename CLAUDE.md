@@ -112,6 +112,33 @@ so the record stays true.
   inside the wheel (hatch force-include → `quorum/integrations`) so
   `quorum integration list|install` works from a package install;
   `cli._integrations_root()` falls back to the repo dir in a checkout.
+- `prune.py` — on-demand cleanup, and the same "archive, never delete" rule
+  the bus follows: `quorum task prune` **moves** `tasks/<id>/` to
+  `tasks/.archive/<id>/` (dot-prefixed, so `TaskStore.list` and therefore
+  every view/digest/doctor scan skips it with no code change; restoring is
+  one `mv`). Total readers — `select` (pure, over an already-loaded task
+  list; skips perpetual tasks, ages off `updated_at`), `refusal`,
+  `dependents_first` (pure batch order), `plan`, `worktree_plan` (the
+  `--dry-run` preview of the git half) — plus `remove_task_worktree` and
+  `archive_task`, kept separable because #57 will re-use the selection. The
+  refusals are substrate rails of the runner's class, not policy: live
+  runner, attached task, a task something else still `depends_on` (a
+  dependent pruned in the same pass doesn't count), and stranded work in the
+  worktree (`workdir_git_state`) — only the last is `--force`-able. The
+  archive loop re-derives `refusal` per task right before archiving, so a
+  runner that appeared during the confirm is caught and a task skipped
+  mid-sweep leaves the batch (its upstream is refused again instead of
+  dangling) — which is what `dependents_first` ordering is for.
+  `--worktrees` treats the two git objects asymmetrically because git does:
+  a worktree it refuses to remove leaves the task unarchived, an unmerged
+  branch is kept with a note and the task archived anyway. **`--force` never
+  reaches `git worktree remove`** — a tidy-up flag must not destroy
+  uncommitted files; its two meanings are waiving the stranded-work refusal
+  and upgrading `branch -d` to `-D` (which does lose commits, so the confirm
+  prompt says so). One `_actor_guard` entry per *command*, not per task, so
+  a sweep can't burn an agent's action cap half-way through. The board/inbox
+  half lives in `messages.py` (`archive_board_message` → `archive_topic`,
+  `clear_inbox`), behind `quorum board clear` and `task inbox --clear`.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
