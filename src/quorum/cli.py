@@ -605,10 +605,72 @@ def _echo_task_row(t: dict) -> None:
 # -- tasks -----------------------------------------------------------------
 
 
+def _stdin_prompt() -> str:
+    """Everything on stdin, decoded as UTF-8 without newline translation."""
+    stream = getattr(sys.stdin, "buffer", None)
+    try:
+        data = stream.read() if stream is not None else sys.stdin.read()
+    except OSError as e:
+        raise _fail(f"cannot read stdin: {e}") from None
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _fail("stdin is not valid UTF-8") from None
+
+
+def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
+    """The task prompt from exactly one of: the positional argument, stdin
+    (`-`), or --prompt-file.
+
+    Read as bytes and decoded here rather than through `read_text`, so what
+    lands in task.json is byte-for-byte what was piped or written — a prompt
+    is quoted verbatim into the harness's context, and silently rewriting
+    CRLF or the trailing newline would make a stored task differ from its
+    source. Empty (or whitespace-only) input is refused: a task with nothing
+    to do would queue, launch, and waste a whole run."""
+    from_stdin = prompt == "-"
+    given = [
+        label
+        for label, on in (
+            ("the prompt argument", bool(prompt) and not from_stdin),
+            ("`-` (stdin)", from_stdin),
+            ("--prompt-file", prompt_file is not None),
+        )
+        if on
+    ]
+    if len(given) > 1:
+        raise _fail(f"pass the prompt exactly one way — got {' and '.join(given)}")
+    if not given:
+        raise _fail(
+            "a task needs a prompt: pass it as an argument, `-` to read stdin, "
+            "or --prompt-file <path>"
+        )
+    if from_stdin:
+        text = _stdin_prompt()
+        source = "stdin"
+    elif prompt_file is not None:
+        try:
+            text = prompt_file.read_bytes().decode("utf-8")
+        except OSError as e:
+            raise _fail(f"cannot read {prompt_file}: {e}") from None
+        except UnicodeDecodeError:
+            raise _fail(f"{prompt_file} is not valid UTF-8") from None
+        source = str(prompt_file)
+    else:
+        text = prompt
+        source = "the prompt argument"
+    if not text.strip():
+        raise _fail(f"empty prompt ({source}) — a task needs something to do")
+    return text
+
+
 @task_app.command("add")
 def task_add(
     project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
-    prompt: str = typer.Argument(help="What the harness should do."),
+    prompt: str = typer.Argument("", help="What the harness should do — or `-` to read it from stdin."),
+    prompt_file: Path | None = typer.Option(None, "--prompt-file", help="Read the prompt from this file instead of the argument."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
@@ -619,6 +681,12 @@ def task_add(
     yourself with `quorum task run`.
 
     Example: quorum task add my-api "fix the flaky auth tests"
+
+    A long prompt does not have to fight the shell: `-` reads it from stdin
+    and --prompt-file reads it from a file, both verbatim. Queue a GitHub
+    issue without teaching quorum about `gh`:
+
+    gh issue view 14 --json title,body -q '"\\(.title)\\n\\n\\(.body)"' | quorum task add my-api -
 
     Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
     queues a task the manager will not launch until a1b2c3 finishes.
@@ -631,6 +699,7 @@ def task_add(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, resolve_dependencies, short_handle
 
+    text = _task_prompt(prompt, prompt_file)
     target = get_home(home)
     config = _load_config(target)
     if ProjectRegistry(target).get(project) is None:
@@ -647,10 +716,10 @@ def task_add(
         depends_on = resolve_dependencies(store, after or [])
     except ValueError as e:
         raise _fail(str(e)) from None
-    _actor_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
+    _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
     task = store.add(
         project=project,
-        prompt=prompt,
+        prompt=text,
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
         depends_on=depends_on,
