@@ -25,6 +25,19 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
     janitor writes — `board clear attention` empties the escalation banner.
   - `quorum task inbox <id> --clear` archives guidance still waiting
     undelivered (unclaimed mail only).
+- Attention acknowledgement (#56): `quorum board ack <message-id>` archives
+  one board message down the same path, so an escalation you have handled
+  leaves the `#attention` banner in `quorum status`, the TUI header and the
+  web header instead of sitting there for the seven-day window — while
+  `messages/archive/` keeps it with its original `created_at`. Ids resolve
+  like task ids (full id, unique prefix, or the short suffix `board read`
+  now prints); unknown and ambiguous are refused, never guessed at.
+  `board ack --all <topic>` is `board clear <topic>`, implemented on top of
+  it. The same ack is a keystroke in the TUI (`a` opens the `#attention`
+  list and acks the highlighted line, notifying rather than crashing on an
+  unwritable home) and an **Ack** button per escalation in the web
+  dashboard's new Attention panel — both thin calls to one shared
+  `MessageBus.ack_board_message`.
 
 ## [0.2.0] - 2026-09-01
 

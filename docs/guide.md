@@ -528,12 +528,16 @@ nothing for you to do, so it does not add to the banner:
 ```
 $ quorum status
 supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
-⚠ 1 on #attention in the last 7d — `quorum board read attention`
+⚠ 1 on #attention in the last 7d — `quorum board read attention`, then
+`quorum board ack <id>` for each one you have handled
 
 $ quorum board read attention
-[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
-has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
-so it keeps retrying — last error: manager harness run 01K2… exited 1
+[2026-08-30 23:05:12] attention 7c1af2 <supervisor> agent.failing: agent
+manager has failed 5 consecutive ticks and is not auto-paused (auto_pause =
+false), so it keeps retrying — last error: manager harness run 01K2… exited 1
+
+$ quorum board ack 7c1af2
+acked 7c1af2 on #attention — archived, not deleted
 ```
 
 ### The notebook
@@ -679,7 +683,9 @@ task unarchived — the record is what would have told you the work was there.
 because the board has no read-state. When you've dealt with them:
 
 ```bash
+quorum board ack 7c1af2                  # just this one — see Dashboards
 quorum board clear attention             # archive the topic, empty the banner
+quorum board ack --all attention         # the same sweep, other name
 quorum board clear tasks --before 30d    # or just the old part of one
 ```
 
@@ -769,8 +775,23 @@ Escalations are surfaced everywhere: recent posts on the `attention` topic
 (the manager's ask-a-human channel) show up as a warning line in `status`,
 in the TUI banner, and as a badge in the web header, so a manager asking
 for you is never silent. The banner is a seven-day window with no
-read-state, so once you have dealt with what it says, empty it with
-`quorum board clear attention` (see [Cleaning up](#cleaning-up)).
+read-state, so an escalation you have already handled would otherwise sit
+there for the rest of the week. Say you have seen it:
+
+```bash
+quorum board read attention              # each line starts with its short id
+quorum board ack 7c1af2                  # that one leaves every banner
+quorum board ack --all attention         # all of them (= board clear)
+```
+
+Acking **archives** rather than marks: the message moves into
+`messages/archive/YYYY-MM.jsonl.gz` with the `created_at` it was posted
+with, so the history still says what was escalated when, and the board goes
+on carrying no read-state at all. Ids resolve like task ids — a full id, a
+unique prefix, or the short suffix `board read` prints — and an unknown or
+ambiguous one is refused rather than guessed at. The same ack is a keystroke
+in the TUI (`a`) and a button in the browser; `--all` is the sledgehammer
+described under [Cleaning up](#cleaning-up).
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something
@@ -793,13 +814,17 @@ read-state, so once you have dealt with what it says, empty it with
   | `m` | tell the manager — a directive for its next run, no task needed |
   | `s` | start a detached run of the highlighted task |
   | `c` | cancel the highlighted task (asks first) |
+  | `a` | open the `#attention` list and ack the highlighted escalation |
   | `r` | refresh now |
   | `q` | quit |
 
   `n`, `s` and `c` act on the row you're pointing at, so you never have to
   open a task to act on it; while you're reading one task's transcript they
-  act on that task. If the home directory has gone unwritable, they say so
-  and carry on rather than taking the dashboard down with them.
+  act on that task. `a` is the same idea one level over: the banner is a
+  count and the board pane is a log, so it opens the `#attention` list —
+  where a line *can* be highlighted — and acks the one you pick (`esc`
+  closes it without acking). If the home directory has gone unwritable, they
+  all say so and carry on rather than taking the dashboard down with them.
 
   `s` refuses a task that is already running or attached to a live session;
   `c` only marks the task cancelled — to also stop a live runner, use
@@ -815,7 +840,9 @@ read-state, so once you have dealt with what it says, empty it with
   ports. It nudges tasks like the TUI does, and where the TUI stops it goes
   on: pause/resume/run-now an agent, create a prompt agent with the "new
   agent…" form, post to the board, and click a project's deadline to edit or
-  clear it — all without leaving the browser. It has no run, cancel or
+  clear it — all without leaving the browser. Live escalations get their own
+  Attention panel at the top, one **Ack** button each, archiving that
+  message exactly as the CLI and the TUI do. It has no run, cancel or
   manager directive; those live in the TUI and the CLI.
 
   <picture>

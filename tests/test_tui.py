@@ -5,10 +5,12 @@ rebuild reset the reader's cursor, with nothing to catch either)."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 from pathlib import Path
 
 import pytest
+from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input, Static
 
 from quorum.messages import MessageBus
@@ -348,5 +350,94 @@ def test_selecting_an_agent_shows_its_notebook(home: Path):
         await pilot.pause()
         assert app.selected_agent is None
         assert mode_text(app).startswith("board")
+
+    drive(home, script)
+
+
+def attention_rows(app) -> list[str]:
+    """The escalation column of the open attention list."""
+    table = app.screen.query_one("#attention-list", DataTable)
+    return [
+        str(table.get_cell_at(Coordinate(r, 2))) for r in range(table.row_count)
+    ]
+
+
+def test_a_acks_the_highlighted_attention_line(home: Path):
+    """The banner is a time window, so `a` is how a handled escalation leaves
+    it: the list gives `a` something highlighted to act on, and the ack is an
+    archive — the message is gone from the topic, not from the history."""
+    populate(home)
+    bus = MessageBus(home)
+    bus.post("manager", "attention", "escalation", text="first escalation")
+    second = bus.post("manager", "attention", "escalation", text="second escalation")
+
+    async def script(app, pilot):
+        assert "2 on #attention" in str(app.query_one("#top", Static).content)
+        await pilot.press("a")
+        await pilot.pause()
+        assert attention_rows(app) == ["first escalation", "second escalation"]
+        await pilot.press("down")  # point at the second one
+        await pilot.press("a")
+        await pilot.pause()
+        live = [m.payload["text"] for m in bus.read_topic("attention")]
+        assert live == ["first escalation"]
+        assert "1 on #attention" in str(app.query_one("#top", Static).content)
+        archive = list((home / "messages" / "archive").glob("*.jsonl.gz"))
+        assert archive and second.id in gzip.open(archive[0], "rt").read()
+
+    drive(home, script)
+
+
+def test_escape_closes_the_attention_list_without_acking(home: Path):
+    populate(home)
+    MessageBus(home).post("manager", "attention", "escalation", text="left alone")
+
+    async def script(app, pilot):
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert [m.payload["text"] for m in MessageBus(home).read_topic("attention")] == [
+            "left alone"
+        ]
+        assert not app.screen.query("#attention-list")
+
+    drive(home, script)
+
+
+def test_a_with_an_empty_attention_topic_says_so(home: Path):
+    populate(home)
+
+    async def script(app, pilot):
+        await pilot.press("a")
+        await pilot.pause()
+        assert not app.screen.query("#attention-list")
+        assert [str(n.message) for n in app._notifications] == ["nothing on #attention"]
+
+    drive(home, script)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through a read-only directory")
+def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path):
+    """The `_write` rule covers `a` too: an unwritable home is a notification,
+    and the escalation stays on the board where it can still be seen."""
+    populate(home)
+    MessageBus(home).post("manager", "attention", "escalation", text="undeletable")
+    board = home / "messages" / "board" / "attention"
+
+    async def script(app, pilot):
+        board.chmod(0o500)
+        try:
+            await pilot.press("a")
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+        finally:
+            board.chmod(0o700)
+        assert app.is_running
+        assert [m.payload["text"] for m in MessageBus(home).read_topic("attention")] == [
+            "undeletable"
+        ]
+        assert [n.severity for n in app._notifications] == ["error"]
 
     drive(home, script)
