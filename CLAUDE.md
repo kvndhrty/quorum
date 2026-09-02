@@ -159,8 +159,10 @@ so the record stays true.
   run's tool calls (live runners only, deduped by call id, JSON-event
   harnesses only), an `overlaps=` mark from `overlap_signal` — pairs of
   live worktree tasks on one project whose worktrees change the same paths
-  (`tasks.worktree_changed_paths`: read-only git against origin/HEAD, else
-  the checkout's branch, else the upstream; attached and `--no-worktree`
+  (`tasks.worktree_changed_paths`: read-only git against the checkout's
+  branch — what the runner forked from, so an unpushed commit in the
+  checkout is not charged to every task — else origin/HEAD, else the
+  upstream; attached and `--no-worktree`
   tasks skipped; bounded by `OVERLAP_MAX_PAIRS`), plus a `ci:` line from
   `ci.pr_state` — all **observations the manager judges, never rails**;
   thresholds are commented constants, tuned to prefer false negatives

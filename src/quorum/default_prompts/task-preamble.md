@@ -38,6 +38,10 @@ assume gh, glab, or any other forge CLI is installed):
 - Before finishing, leave nothing behind: commit every change, and if the
   repository has a remote, push your branch:
     git push -u origin HEAD
+  If that push is rejected as non-fast-forward because you rebased a branch
+  an earlier run had already pushed, push it again *with a lease*:
+    git push --force-with-lease origin HEAD
+  Only ever on your own task branch, and never a bare `--force`.
 - If a pull-request tool is actually available (gh, glab, ...), open a PR
   and report its URL:
     quorum task report {task_id} --status pr --pr-url <url> "<PR title>"

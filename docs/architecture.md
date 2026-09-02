@@ -643,21 +643,26 @@ intersects the path sets their worktrees have changed, read by
 `tasks.worktree_changed_paths` — the working tree against the merge-base
 with the base branch (so committed work, staged and unstaged edits, and
 untracked files all count: a live task has usually not committed what it is
-touching right now). The base is `refs/remotes/origin/HEAD` when the
-repository knows it (a clone does), else the branch checked out in the
-repository's main worktree — exactly what the runner forked the task branch
-from, and the only base a `git init`ed project has — else the branch's own
-upstream; with none of those the task is simply unobservable. Read-only git
-plumbing, no network, never `git fetch`: the comparison is against whatever
-the repository already knows.
+touching right now). The base is the branch checked out in the repository's
+main worktree, because that is exactly what the runner forked the task
+branch from (`git worktree add <path> -b quorum/<id>` takes no start-point).
+It has to come first: a checkout one unpushed commit ahead of the remote,
+measured against `origin/HEAD` instead, would put that commit's paths into
+*every* live task's changed set and report an overlap on a file neither task
+wrote. `refs/remotes/origin/HEAD` (set by `git clone`) is the fallback — the
+base for a `--no-worktree` task sitting on the main branch itself — and the
+branch's own upstream the one after that; with none of those the task is
+simply unobservable. Read-only git plumbing, no network, never `git fetch`:
+the comparison is against whatever the repository already knows.
 
 A non-empty intersection renders ` overlaps=<short-id> paths=N` on *both*
 task lines plus an `overlap:` line naming at most `OVERLAP_MAX_PATHS` (3)
 of the shared paths. Attached sessions and tasks run with `--no-worktree`
 are never compared: that directory is the human's checkout, and its diff is
-theirs. Cost is bounded by `OVERLAP_MAX_PAIRS` (20) pairs per digest — each
-task's first appearance in a pair costs a few git subprocesses, and digest
-build blocks the tick — spent in digest order, so a home with more
+theirs. Cost is bounded by `OVERLAP_MAX_PAIRS` (20) pairs per digest — pairs
+are what grows quadratically, while the git subprocesses are per task (each
+worktree read once, memoized) and digest build blocks the tick — spent in
+digest order, so a home with more
 concurrency than budget still sees its first pairs and the rest go
 unobserved. That is the same *prefer false negatives* setting as
 `possible-loop`, and the same contract: an observation, never a rail.
@@ -665,8 +670,11 @@ Parallel edits to one file are sometimes exactly the job, so Python decides
 nothing; `prompts/manager.md` tells the manager to judge — nudge both to
 fetch and rebase before pushing, or serialize the two — and the task
 preamble's delivery protocol now carries the matching step on the other
-side: fetch and rebase onto the base branch before pushing, and report
-`blocked` naming the conflicting files when the rebase cannot complete.
+side: fetch and rebase onto the base branch before pushing, push again with
+`--force-with-lease` (never a bare `--force`, never off the task's own
+branch) when a rebase leaves an already-pushed branch unable to
+fast-forward, and report `blocked` naming the conflicting files when the
+rebase cannot complete.
 Views never show it (they stay pure file readers; the read happens at digest
 build only, alongside the CI probe, and nothing is materialized to disk).
 

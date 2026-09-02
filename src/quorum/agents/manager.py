@@ -193,11 +193,12 @@ def loop_signal(entries: list[dict]) -> dict | None:
 # only when both PRs came back MERGE-CONFLICT. `overlap_signal` intersects
 # the path sets the worktrees have changed (tasks.worktree_changed_paths —
 # read-only git, no network) for every pair of live worktree tasks on the
-# same project. Pairs are bounded because each new task in a pair costs a
-# few git subprocesses at digest build, which blocks the tick: budget is
-# spent in digest order, a home with more concurrency than budget still
-# sees its first OVERLAP_MAX_PAIRS pairs, and the rest go unobserved —
-# prefer false negatives, like `possible-loop`. The detail line names at
+# same project. Pairs are what the budget counts, because pairs are what
+# grows quadratically; the git subprocesses are per *task* (each worktree
+# is read once and memoized) and they block the tick. Budget is spent in
+# digest order, so a home with more concurrency than budget still sees its
+# first OVERLAP_MAX_PAIRS pairs and the rest go unobserved — prefer false
+# negatives, like `possible-loop`. The detail line names at
 # most OVERLAP_MAX_PATHS shared paths so one wide pair cannot become a wall.
 OVERLAP_MAX_PAIRS = 20
 OVERLAP_MAX_PATHS = 3
@@ -205,6 +206,9 @@ OVERLAP_MAX_PATHS = 3
 
 def overlap_signal(live: list[tasks.Task]) -> dict[str, list[dict]]:
     """Which live worktree tasks touch the same files as which others.
+
+    `live` is the caller's already-filtered listing (the digest passes its
+    active tasks — nothing terminal, nothing attached).
 
     Returns {task id: [{"with": short id, "paths": sorted shared paths}, ...]}
     for every task that shares at least one changed path with another live
@@ -223,8 +227,6 @@ def overlap_signal(live: list[tasks.Task]) -> dict[str, list[dict]]:
     by_project: dict[str, list[tasks.Task]] = {}
     for t in live:
         if t.attached or not t.use_worktree or not t.workdir:
-            continue
-        if t.status in tasks.TERMINAL_STATUSES:
             continue
         by_project.setdefault(t.project, []).append(t)
     paths: dict[str, set[str] | None] = {}

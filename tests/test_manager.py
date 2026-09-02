@@ -898,6 +898,32 @@ def test_overlap_falls_back_to_the_checkout_branch_without_a_remote(
     assert set(overlap_signal(store.list())) == {a.id, b.id}
 
 
+def test_overlap_ignores_the_checkouts_own_unpushed_commits(home: Path, tmp_path: Path):
+    """The runner forks a worktree from the checkout's HEAD, not from
+    origin/HEAD. A checkout one unpushed commit ahead of the remote would,
+    measured against origin/HEAD, put that commit's paths in *every* live
+    task's changed set — and two tasks on unrelated files would report an
+    overlap on a file neither of them wrote."""
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "ahead")
+    make_origin(tmp_path, repo)
+    # One commit the remote has never seen, touching a file no task will.
+    (repo / "X.txt").write_text("landed locally, not pushed")
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "unpushed")
+
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ahead", "only touch a")
+    b = add_worktree(home, repo, store, "ahead", "only touch b")
+    (Path(a.workdir) / "a.txt").write_text("a")
+    (Path(b.workdir) / "b.txt").write_text("b")
+
+    assert tasks.worktree_changed_paths(a) == {"a.txt"}
+    assert tasks.worktree_changed_paths(b) == {"b.txt"}
+    assert overlap_signal(store.list()) == {}
+
+
 def test_overlap_is_unobservable_without_a_base_or_a_worktree(home: Path, tmp_path: Path):
     from quorum.agents.manager import overlap_signal
 
@@ -947,4 +973,8 @@ def test_the_preamble_tells_a_task_to_rebase_before_pushing(home: Path):
     assert "git fetch origin" in text
     assert "rebase" in text
     assert "report blocked, naming the conflicting files" in text
+    # A task that pushed in an earlier run cannot fast-forward after a
+    # rebase; the way out is spelled, and it is leased.
+    assert "git push --force-with-lease origin HEAD" in text
+    assert "never a bare `--force`" in text
     assert "overlaps=" in prompts.load(home, "manager")

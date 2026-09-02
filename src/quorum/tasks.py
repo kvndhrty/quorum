@@ -519,20 +519,23 @@ def workdir_git_state(task: Task) -> dict[str, Any] | None:
     return {"branch": branch, "dirty": dirty, "unpushed": unpushed}
 
 
-def _worktree_base(git, workdir: Path) -> str | None:
+def _worktree_base(git) -> str | None:
     """The ref a task branch is measured against, or None when nothing
     usable exists (a worktree with no remote and no discoverable main
     branch is simply unobservable — never a guess).
 
-    In order: the remote's default branch (`refs/remotes/origin/HEAD`, set
-    by `git clone`); the branch checked out in the repository's *main*
-    worktree, which is exactly what the runner forked the task branch from
-    (a `git init`ed project has no origin/HEAD, so without this a whole
-    class of homes would never see an overlap); the branch's own upstream.
+    In order: the branch checked out in the repository's *main* worktree,
+    because that is what the runner forked the task branch from (`git
+    worktree add <path> -b quorum/<id>` takes no start-point, so the fork
+    point is the checkout's HEAD). It comes first for exactly that reason —
+    a checkout ahead of `origin/HEAD` by even one unpushed commit would
+    otherwise put every path that commit touched into *every* live task's
+    changed set, and two tasks working on unrelated files would report an
+    overlap on a file neither of them wrote. Then the remote's default
+    branch (`refs/remotes/origin/HEAD`, set by `git clone`), which is what a
+    `--no-worktree` task sitting on the main branch measures against; then
+    the branch's own upstream.
     """
-    head = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-    if head is not None and head.returncode == 0 and head.stdout.strip():
-        return head.stdout.strip()
     listing = git("worktree", "list", "--porcelain")
     if listing is not None and listing.returncode == 0:
         # The first block is always the main worktree. Its branch is the
@@ -547,6 +550,9 @@ def _worktree_base(git, workdir: Path) -> str | None:
         mine = current.stdout.strip() if current is not None and current.returncode == 0 else ""
         if branch and branch != mine:
             return branch
+    head = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if head is not None and head.returncode == 0 and head.stdout.strip():
+        return head.stdout.strip()
     upstream = git("rev-parse", "--symbolic-full-name", "@{upstream}")
     if upstream is not None and upstream.returncode == 0 and upstream.stdout.strip():
         return upstream.stdout.strip()
@@ -586,7 +592,7 @@ def worktree_changed_paths(task: Task) -> set[str] | None:
     inside = git("rev-parse", "--is-inside-work-tree")
     if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
         return None
-    base = _worktree_base(git, workdir)
+    base = _worktree_base(git)
     if base is None:
         return None
     fork = git("merge-base", base, "HEAD")

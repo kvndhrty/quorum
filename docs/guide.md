@@ -278,8 +278,10 @@ forked from the same commit that both edit one file will both open PRs that
 conflict. Quorum handles this the way it handles everything else — as
 something the manager sees and a harness is told about, not a lock. The
 preamble's delivery protocol tells every task to `git fetch` and rebase
-onto the base branch before pushing (and to report `blocked` naming the
-conflicting files if it cannot), and the manager's digest marks any two live
+onto the base branch before pushing (to report `blocked` naming the
+conflicting files if it cannot, and to re-push with `--force-with-lease` —
+never a bare `--force` — when the rebase leaves a branch it pushed in an
+earlier run unable to fast-forward), and the manager's digest marks any two live
 tasks on one project whose branches touch the same paths with
 `overlaps=<id> paths=N` ([below](#the-manager)), so it can nudge them to
 rebase or let one land first. If your projects are genuinely independent
