@@ -168,6 +168,26 @@ def test_run_overages_names_the_run():
     assert usage.run_overages(runs, max_cost=1.0) == ["run 3: cost $9.00 > max_cost_per_run $1.00"]
 
 
+def test_last_run_overages_reads_only_the_last_run():
+    """The budget gate's condition: the last run and nothing else. An earlier
+    overage is history; a cheaper or silent later run clears it; no runs and
+    no budget never gate."""
+
+    class Run:
+        def __init__(self, usage):
+            self.usage = usage
+
+    over, under, silent = Run({"cost_usd": 9.0}), Run({"cost_usd": 0.1}), Run(None)
+    assert usage.last_run_overages([under, over], max_cost=1.0) == [
+        "cost $9.00 > max_cost_per_run $1.00"
+    ]
+    assert usage.last_run_overages([over, under], max_cost=1.0) == []  # cleared
+    assert usage.last_run_overages([over, silent], max_cost=1.0) == []  # silence is not spend
+    assert usage.last_run_overages([], max_cost=1.0) == []
+    assert usage.last_run_overages([over]) == []  # 0 = off
+    assert usage.last_run_overages([Run({"total_tokens": 5_000})], max_tokens=1_000) == [
+        "tokens 5.0k > max_tokens_per_run 1.0k"
+    ]
 # -- the ledger as a run record, not only a spend record (#59) --------------
 
 

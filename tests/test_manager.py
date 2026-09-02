@@ -254,7 +254,7 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
 def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, project: str):
     """Surfacing: cost/tokens show up per task when the harness reported
     them, and a configured budget turns an expensive run into a digest
-    observation — quorum still never stops anything."""
+    line that also says what the runner's budget gate will do about it."""
     write_config(home, "manager_act")
     store = TaskStore(home)
     task = store.add(project, "expensive work", "tasktool")
@@ -276,9 +276,38 @@ def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, pr
     digest = build_digest(
         home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
     )
-    assert "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00" in digest
-    assert "an observation, not a rail" in digest
+    assert (
+        "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00 "
+        "(next run gated; --force to override)" in digest
+    )
     assert "run 1:" not in digest  # the cheap run is not indicted
+
+
+def test_digest_marks_an_earlier_overage_as_cleared(home: Path, clock, project: str):
+    """Only the last run gates: an over-budget run followed by a cheaper one
+    is still reported (the spend happened) but the digest says the gate is
+    clear, so the manager does not reach for --force it does not need."""
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "calmed down", "tasktool")
+    store.update(
+        task.id,
+        status="executing",
+        runs=[
+            {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+             "usage": {"cost_usd": 2.0, "total_tokens": 40000, "events": 1}},
+            {"started_at": "t2", "ended_at": "t3", "exit_code": 0,
+             "usage": {"cost_usd": 0.5, "total_tokens": 5000, "events": 1}},
+        ],
+    )
+    digest = build_digest(
+        home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
+    )
+    assert (
+        "BUDGET-EXCEEDED: run 1: cost $2.00 > max_cost_per_run $1.00 "
+        "(an earlier run; a later one cleared the gate)" in digest
+    )
+    assert "next run gated" not in digest
 
 
 def test_digest_says_nothing_about_spend_a_harness_never_reported(

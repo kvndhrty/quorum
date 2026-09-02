@@ -147,9 +147,14 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule
         "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
-        # the #31 revision, replaced by the self-observation revision (#59):
-        # what to do about timing-out runs and a cap hit two runs running
+        # the task-dependency revision, replaced by the budget-gate rule (#19)
         "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
+        # the budget-gate revision, replaced by the merged-observation
+        # revision (#57): how to read `state=merged` / `state=closed`
+        "e082bdb1588d389285bca08c991dd5b79da6af4be441a634460a09bec7ed2ef3",
+        # the merged-observation revision, replaced by the self-observation
+        # revision (#59): timing-out runs and a cap hit two runs running
+        "3b060014ec4fac03637df6c9185ea1fc8e3b3ab7065935ad36a8ace2388e3600",
     },
 }
 

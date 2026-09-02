@@ -187,7 +187,16 @@ class QuorumTUI(App):
         if runner_alive(self.home, task.id):
             self.notify(f"task {task.short_id} is already running", severity="warning")
             return
-        from ..runner import launch_detached
+        from ..config import load_config_or_default
+        from ..runner import budget_blockers, budget_refusal, launch_detached
+
+        # the runner's budget gate, checked here so the refusal is a notice
+        # on screen rather than a line in runner.log nobody reads; the TUI
+        # has no --force — that is a CLI decision
+        over = budget_blockers(load_config_or_default(self.home).tasks, task)
+        if over:
+            self.notify(budget_refusal(task, over), severity="warning")
+            return
 
         pid = self._write("start the run", lambda: launch_detached(self.home, task.id))
         if pid is FAILED:
@@ -371,6 +380,9 @@ class QuorumTUI(App):
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
                 if t.get("perpetual"):
                     status += " ∞"  # never finishes by design; only the user ends it
+                # The forge's word about the PR, materialized by the manager
+                # tick so this table stays a pure file read.
+                status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
                 if t.get("waiting_on"):
                     status += " ⏳" + ",".join(t["waiting_on"])
                 if t.get("dep_failed"):
