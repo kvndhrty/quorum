@@ -289,11 +289,21 @@ so the record stays true.
   remote, PR from the checked-out branch) and returns state / check counts /
   failing check names / merge conflict — or `None` for every disappointment
   (disabled, no gh, no auth, no remote, no PR, timeout, garbage), so a digest
-  always builds and a missing `ci:` line means nothing. Only `build_digest`
+  always builds and a missing `ci:` line means nothing. The PR's own state is
+  normalized (`normalize_state` → `tasks.PR_STATES`: `open|merged|closed`,
+  anything else `unknown`) so a second forge backend fills the same field.
+  Only `build_digest`
   calls it (a `ci:` line per task, `CI-FAILING` on a finished task over red
-  checks, bounded by `manager.CI_MAX_PROBES` since digest build blocks the
-  tick), which is what keeps `views.py` a pure file reader — do not
-  materialize probe results to disk to feed a view without revisiting that.
+  checks — suppressed explicitly for a merged PR, bounded by
+  `manager.CI_MAX_PROBES` since digest build blocks the
+  tick), which is what keeps `views.py` a pure file reader. Exactly **one**
+  probe result is materialized: that closure calls `tasks.record_pr_state`
+  to write `pr_state`/`pr_state_at` onto `task.json` (one writer, one call
+  site, closed vocabulary, never a status, `updated_at` untouched, fail-soft)
+  so views badge `✔` merged without a network call — the rule this used to
+  state outright ("never materialize") was revised for that case in #57, and
+  the five properties fencing it are in `docs/architecture.md` ("The merged
+  observation"). A second exception must earn all five again.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
   `timeout_seconds`). The second (and only other) entry point is

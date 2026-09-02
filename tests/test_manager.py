@@ -161,8 +161,20 @@ def test_action_cap_refuses_and_bounds_the_journal(home: Path, clock, project: s
     make_manager(home, clock).tick()
 
     entries = fsio.read_jsonl(journal_path(home))
-    assert len(entries) == 2  # the cap, exactly
+    actions = [e["action"] for e in entries]
+    assert actions.count("task.nudge") == 2  # the cap, exactly
     assert "REFUSED|" in manager_transcript_text(home)
+
+    # ...and the refusal left a mark the *next* run can read (#59): one
+    # cap.hit for the run, however many further actions it tried.
+    hits = [e for e in entries if e["action"] == "cap.hit"]
+    assert len(hits) == 1
+    assert hits[0]["actor"] == "manager" and hits[0]["run"] == entries[0]["run"]
+    assert "task.nudge" in hits[0]["args"] and "cap (2)" in hits[0]["args"]
+
+    # the journal section of the next digest is where the manager meets it
+    digest = build_digest(home, TaskStore(home).list(), clock(), [])
+    assert "cap.hit" in digest
 
 
 def test_failed_harness_raises_and_returns_directives(home: Path, clock, project: str):
@@ -242,7 +254,7 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
 def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, project: str):
     """Surfacing: cost/tokens show up per task when the harness reported
     them, and a configured budget turns an expensive run into a digest
-    observation — quorum still never stops anything."""
+    line that also says what the runner's budget gate will do about it."""
     write_config(home, "manager_act")
     store = TaskStore(home)
     task = store.add(project, "expensive work", "tasktool")
@@ -264,9 +276,38 @@ def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, pr
     digest = build_digest(
         home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
     )
-    assert "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00" in digest
-    assert "an observation, not a rail" in digest
+    assert (
+        "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00 "
+        "(next run gated; --force to override)" in digest
+    )
     assert "run 1:" not in digest  # the cheap run is not indicted
+
+
+def test_digest_marks_an_earlier_overage_as_cleared(home: Path, clock, project: str):
+    """Only the last run gates: an over-budget run followed by a cheaper one
+    is still reported (the spend happened) but the digest says the gate is
+    clear, so the manager does not reach for --force it does not need."""
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "calmed down", "tasktool")
+    store.update(
+        task.id,
+        status="executing",
+        runs=[
+            {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+             "usage": {"cost_usd": 2.0, "total_tokens": 40000, "events": 1}},
+            {"started_at": "t2", "ended_at": "t3", "exit_code": 0,
+             "usage": {"cost_usd": 0.5, "total_tokens": 5000, "events": 1}},
+        ],
+    )
+    digest = build_digest(
+        home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
+    )
+    assert (
+        "BUDGET-EXCEEDED: run 1: cost $2.00 > max_cost_per_run $1.00 "
+        "(an earlier run; a later one cleared the gate)" in digest
+    )
+    assert "next run gated" not in digest
 
 
 def test_digest_says_nothing_about_spend_a_harness_never_reported(
@@ -599,6 +640,73 @@ def test_a_manager_harness_that_reports_no_spend_says_nothing(
     assert "Your own runs have cost" not in digest
     row = next(r for r in views.agent_rows(home) if r["name"] == "manager")
     assert row["usage"] is None and row["usage_text"] == ""
+
+
+# -- self-observations: recent outcomes and the action budget (#59) ----------
+
+
+def test_a_run_records_how_it_went_and_the_next_digest_shows_it(
+    home: Path, clock, project: str
+):
+    """The ledger line is the record of a run, not only of its cost: a
+    manager that has been timing out must be able to read that off its own
+    digest — which is the one thing no amount of task detail tells it."""
+    write_config(home, "manager_act")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    entry = fsio.read_jsonl(usage_path(home, "manager"))[-1]
+    assert entry["outcome"] == "ok"
+    assert isinstance(entry["duration_seconds"], (int, float))
+    assert entry["duration_seconds"] >= 0
+
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[], cap=7)
+    assert "Your last run: ok " in digest
+    assert "Actions this run: 0 of 7 (cap)" in digest
+
+
+def test_a_timed_out_run_is_the_one_the_ledger_must_still_show(
+    home: Path, clock, project: str
+):
+    """A timeout reports no usage at all, so its outcome is exactly the thing
+    a spend-only ledger would lose — and the run before it is still `ok`."""
+    write_config(home, "manager_act")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+    make_manager(home, clock).tick()
+
+    write_config(home, "hang", run_timeout_seconds=1)
+    with pytest.raises(RuntimeError, match="timed out"):
+        make_manager(home, clock).tick()
+
+    outcomes = [e.get("outcome") for e in fsio.read_jsonl(usage_path(home, "manager"))]
+    assert outcomes == ["ok", "timeout"]
+
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    line = next(ln for ln in digest.splitlines() if ln.startswith("Your last 2 runs:"))
+    assert "TIMEOUT" in line and line.index("ok") < line.index("TIMEOUT")
+    assert "Your own runs have cost" not in digest  # neither run reported any
+
+
+def test_a_crashed_run_is_recorded_as_raised(home: Path, clock, project: str):
+    write_config(home, "fail")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+    with pytest.raises(RuntimeError, match="exited 3"):
+        make_manager(home, clock).tick()
+
+    entry = fsio.read_jsonl(usage_path(home, "manager"))[-1]
+    assert entry["outcome"] == "raised"
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    assert "RAISED" in digest
+
+
+def test_the_action_budget_is_in_every_digest_even_an_empty_home(home: Path, clock):
+    """The budget line does not depend on a ledger existing: a manager's very
+    first run still needs to know what it may spend."""
+    write_config(home, "manager_act")
+    digest = build_digest(home, [], clock(), directives=[])
+    assert "Actions this run: 0 of 20 (cap)" in digest  # the default cap
+    assert "Your last" not in digest
 
 
 # -- perpetual tasks (#12) ---------------------------------------------------

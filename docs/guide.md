@@ -105,11 +105,16 @@ nothing, never a misleading `$0.00`.
 
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
-That is all it does today — quorum will not kill, pause, or refuse a run
-over its budget. The mark reaches the manager, whose prompt tells it to ask
-whether the spend is buying progress and to nudge, decompose, or escalate if
-it is not. If you want a hard stop, that is your judgement to make from the
-flag.
+The budget also gates the **next** run: while a task's *last* run is over
+budget, `quorum task run` refuses it (`$! GATED` in `task list`, a `gated:`
+line in `task show`, and the TUI's `s` key says so) until you run it with
+`--force` or a run comes in under budget — a run that reports no usage
+counts as under, since silence is not spend. Quorum never kills a run in
+progress: a run past its budget finishes, and only the relaunch is held.
+The digest tells the manager the gate is on, and its prompt tells it not to
+reach for `--force` by reflex but to sharpen the nudge, split the task, or
+escalate to you first. With no budget set (the default) nothing is ever
+gated.
 
 ## Harnesses
 
@@ -256,6 +261,20 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 quorum task add my-api "migrate the test suite to pytest" --harness codex
 quorum up                      # the manager launches queued tasks
 ```
+
+A prompt does not have to survive shell quoting. `-` reads it from stdin and
+`--prompt-file` reads it from a file, both verbatim — so queuing a GitHub
+issue is a one-liner, and quorum never has to learn about `gh`:
+
+```bash
+gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' \
+  | quorum task add my-api -
+
+quorum task add my-api --prompt-file ~/notes/migration-plan.md
+```
+
+Pass the prompt exactly one way — an argument, `-`, or `--prompt-file`; two
+at once is an error, and so is empty input.
 
 You can also drive runs by hand — no supervisor required:
 
@@ -447,19 +466,26 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
-- a `ci:` line for any task whose branch has a pull request — check counts,
-  the names of the failing checks, and `MERGE-CONFLICT` when the branch no
-  longer merges. A task that reported `done` over red checks is marked
+- a `ci:` line for any task whose branch has a pull request — its state
+  (`state=open` / `merged` / `closed`), check counts, the names of the
+  failing checks, and `MERGE-CONFLICT` when the branch no longer merges. A
+  task that reported `done` over red checks is marked
   `CI-FAILING`, the same way work left uncommitted is marked
-  `STRANDED-WORK`: pushed is not the same as working. This needs `gh` on
+  `STRANDED-WORK`: pushed is not the same as working. A **merged** task never
+  carries that mark — merged is delivered, and the default prompt reads it as
+  "needs nothing from you". This needs `gh` on
   PATH and authenticated; without it (or without a PR yet) the line is
   simply absent, and nothing else changes. Turn the probe off with
   `enabled = false` under `[ci]` in config.toml — it costs one `gh` call per
   task per tick (capped at 12 probed tasks and 10s each, so a hung network
-  delays a tick by a bounded couple of minutes at worst, never forever);
+  delays a tick by a bounded couple of minutes at worst, never forever).
+  Whatever state the probe sees is also written to the task's record, which
+  is what puts the `✔` on the row — see [below](#merged-pull-requests);
 - what each task has spent, when its harness reports usage, and a
-  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
-  observation, never a stop;
+  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — with
+  `(next run gated; --force to override)` when it was the last run, since
+  `task run` will refuse that task until a cheaper run clears it
+  (*What runs cost*, under [Setup](#setup) above); never a mid-run stop;
 - what the manager's **own** runs have cost, when its harness reports usage:
   supervision is not free, and in a busy home it is the steadiest recurring
   bill. The same figure shows up next to the agent in `quorum status`, the
@@ -503,7 +529,18 @@ as a user turn instead of waiting.
 
 Two things bound a bad run, neither of which second-guesses a decision: a
 per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
-the journal.
+the journal. The cap is not silent: when a run reaches it, the refusal is
+recorded in the journal as `cap.hit`, so the *next* run sees that the last
+one ran out of budget (and the default prompt tells it to escalate to you
+rather than try a third time).
+
+The manager also sees a few lines about *itself* at the top of every digest
+— what its recent runs have cost, how its last five runs ended
+(`ok 2m10s · TIMEOUT 15m00s · ...`), and the action budget for this run.
+They are observations, exactly like the ones it gets about tasks: nothing
+pauses, throttles or changes anything, and the prompt decides what to do
+about a run of timeouts. A prompt agent gets the same lines wherever its
+template writes `{notes}`.
 
 The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
@@ -571,7 +608,8 @@ several, then `forget` the rest.
 
 The same file exists for every agent (`quorum manager remember --agent
 <name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
-own notebook wherever its template writes `{notes}`. Both dashboards show an
+own notebook — and the same self-observation lines above it — wherever its
+template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it.
 
 ## Prompt customization
@@ -934,6 +972,40 @@ relaunching, restrict it to one project, or make it open follow-up tasks
 with `quorum task add`. It runs under the ordinary prompt-agent rails — every
 action journaled to `state/agents/babysitter/journal.jsonl`, capped per run.
 
+### Merged pull requests
+
+A task ends at the harness's word — `done` — but the work is delivered when
+its pull request merges. Those are different facts and quorum keeps them
+apart: it never changes a status because a PR merged.
+
+What it does do is *remember* what the forge said. When the manager's tick
+probes a task's PR (above), it records the state it saw on the task's own
+record as `pr_state` (`open` / `merged` / `closed`) and `pr_state_at`. Every
+read-only surface then shows it without touching the network:
+
+```
+  ✓ k3n8qz  quorum  done ✔  claude  shipped the prune command  https://…/pull/71
+  ✓ w1r0gp  quorum  done ⊘  claude  superseded by #74
+```
+
+`✔` merged, `⊘` closed without merging. `quorum task show <id>` prints the
+same thing with its timestamp (`pr state: merged (observed 2026-09-02T…Z)`),
+and `quorum status --legend` explains the glyphs.
+
+Two things to keep in mind:
+
+- **No badge means nothing was ever observed** — no PR yet, no `gh`, `[ci]`
+  off, or the supervisor was never up while the PR was open. It never means
+  "not merged".
+- **The observation is as old as its timestamp.** Only the manager tick
+  writes it; a stopped supervisor means a merge that happened this morning
+  is not on the row yet.
+
+For the manager, a merged task needs nothing at all. A task that reported
+`done` whose PR was *closed unmerged* is the interesting case: something a
+human decided, which quorum cannot interpret — the default prompt tells the
+manager to say so in one line and leave it alone.
+
 ## Sandboxing
 
 Quorum pairs with [nono](https://github.com/nolabs-ai/nono), which confines
@@ -1163,8 +1235,9 @@ def test_milestone(tmp_path):
   state/manager/journal.jsonl       the manager's auto-recorded actions
   state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
-  state/manager/usage.jsonl         what each manager run cost (agents get
-                                    the same file under state/agents/<name>/)
+  state/manager/usage.jsonl         what each manager run cost and how it
+                                    ended (agents get the same file under
+                                    state/agents/<name>/)
   state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents

@@ -49,7 +49,7 @@ from pathlib import Path
 
 from . import fsio, prompts, usage
 from .actor import strip_actor_env
-from .config import Config, HarnessConfig
+from .config import Config, HarnessConfig, TasksConfig
 from .messages import Message, MessageBus
 from .projects import ProjectRegistry
 from .tasks import (
@@ -98,11 +98,17 @@ class GuidancePump:
     guidance keeps arriving and ends at the first idle turn boundary.
     Anything arriving after close stays in `new/` for the next run.
 
-    The lock guards only the counters and the closed flag; inbox and stdin
-    I/O runs outside it (there is one delivering thread, so the prompt turn
-    always precedes guidance), and a `result` event on the transcript thread
-    never waits on filesystem work. A claim is counted *before* its write so
-    the close condition can't fire while a message is in flight.
+    The lock guards the counters, the closed flag, and — the one piece of
+    filesystem work under it — the *claim* of each inbox message (the
+    rename out of `new/`), which is counted as delivered in the same
+    critical section. That pairing is what makes the close condition
+    sound: a `result` arriving on the transcript thread either still sees
+    the message pending in `new/` (so it does not close) or sees it already
+    counted (so the turn is still owed). Claiming outside the lock and
+    counting after left a gap in which a result closed stdin with a nudge in
+    flight — a real CI flake, one result event instead of two. Stdin writes
+    stay outside the lock (there is one delivering thread, so the prompt
+    turn always precedes guidance).
     """
 
     def __init__(self, home: Path, inbox: str, stdin, prompt: str):
@@ -158,10 +164,15 @@ class GuidancePump:
         return True
 
     def _deliver_pending(self) -> None:
-        for claimed in self._bus.claim(self._inbox):
+        claims = self._bus.claim(self._inbox)
+        while True:
             with self._lock:
                 if self._closed:
-                    claimed.reject()
+                    return  # unclaimed messages stay in new/ for the next run
+                # the rename happens inside next(); counting it here, under
+                # the same lock a result's close check takes, is the point
+                claimed = next(claims, None)
+                if claimed is None:
                     return
                 self._delivered += 1
             if not self._write_turn(guidance_note(claimed.message)):
@@ -529,8 +540,8 @@ def stream_transcript(
 def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) -> int:
     """Execute one run of a task in the foreground. Returns the harness exit code.
 
-    `force` waives the dependency refusal below; nothing else about a run
-    changes.
+    `force` waives the dependency and budget refusals below; nothing else
+    about a run changes.
     """
     home = Path(home)
     store = TaskStore(home)
@@ -559,6 +570,16 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
             f"task {task.short_id} is waiting on {', '.join(blockers)} — "
             "unfinished dependencies; `--force` to run anyway"
         )
+    over = budget_blockers(config.tasks, task) if not force else []
+    if over:
+        # The third substrate rail, and the second of the rate-limit class
+        # the per-run action cap belongs to: a task whose *last* run went
+        # past the configured budget is not relaunched until someone says
+        # so. It gates the next run only — never a mid-run kill, never a
+        # veto of any particular choice — and the manager (or the user)
+        # decides what the task deserves instead: a sharper nudge, a
+        # decomposition, an escalation, or `--force`.
+        raise RunnerError(budget_refusal(task, over))
     harness = resolve_harness(config, task.harness)
 
     lock = runner_lock_path(home, task.id)
@@ -638,6 +659,26 @@ def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
         return []
     by_id = {t.id: t for t in store.list()}
     return dependency_state(task, by_id)["waiting_on"]
+
+
+def budget_blockers(budget: TasksConfig, task: Task) -> list[str]:
+    """How the task's last run exceeded the `[tasks]` budget — the notes the
+    budget gate refuses on; empty (and free) whenever no budget is set, the
+    task has no runs, or its last run came in under budget or reported no
+    usage at all."""
+    return usage.last_run_overages(
+        task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+    )
+
+
+def budget_refusal(task: Task, over: list[str]) -> str:
+    """The one message the budget gate speaks with, wherever it is checked
+    (here, and mirrored in `quorum task run` so `--detach` fails in the
+    parent too)."""
+    return (
+        f"task {task.short_id}'s last run exceeded its budget ({'; '.join(over)}) — "
+        "next run gated; `--force` to run anyway"
+    )
 
 
 def launch_detached(home: Path, task_id: str, force: bool = False) -> int:
