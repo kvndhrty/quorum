@@ -157,8 +157,12 @@ so the record stays true.
   statuses, runner liveness, quiet time, report/transcript tails, a
   `possible-loop` flag from `loop_signal` — a repetition read over the current
   run's tool calls (live runners only, deduped by call id, JSON-event
-  harnesses only), plus a `ci:` line from `ci.pr_state` — both
-  **observations the manager judges, never rails**;
+  harnesses only), an `overlaps=` mark from `overlap_signal` — pairs of
+  live worktree tasks on one project whose worktrees change the same paths
+  (`tasks.worktree_changed_paths`: read-only git against origin/HEAD, else
+  the checkout's branch, else the upstream; attached and `--no-worktree`
+  tasks skipped; bounded by `OVERLAP_MAX_PAIRS`), plus a `ci:` line from
+  `ci.pr_state` — all **observations the manager judges, never rails**;
   thresholds are commented constants, tuned to prefer false negatives
   — the manager's own
   action journal with then-vs-now outcomes, user directives from the `manager`

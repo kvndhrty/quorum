@@ -517,3 +517,87 @@ def workdir_git_state(task: Task) -> dict[str, Any] | None:
             except ValueError:
                 unpushed = None
     return {"branch": branch, "dirty": dirty, "unpushed": unpushed}
+
+
+def _worktree_base(git, workdir: Path) -> str | None:
+    """The ref a task branch is measured against, or None when nothing
+    usable exists (a worktree with no remote and no discoverable main
+    branch is simply unobservable — never a guess).
+
+    In order: the remote's default branch (`refs/remotes/origin/HEAD`, set
+    by `git clone`); the branch checked out in the repository's *main*
+    worktree, which is exactly what the runner forked the task branch from
+    (a `git init`ed project has no origin/HEAD, so without this a whole
+    class of homes would never see an overlap); the branch's own upstream.
+    """
+    head = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if head is not None and head.returncode == 0 and head.stdout.strip():
+        return head.stdout.strip()
+    listing = git("worktree", "list", "--porcelain")
+    if listing is not None and listing.returncode == 0:
+        # The first block is always the main worktree. Its branch is the
+        # base only when it is not *this* worktree's branch (a task run
+        # with --no-worktree sits on it and would diff against itself).
+        main = listing.stdout.split("\n\n", 1)[0]
+        branch = next(
+            (line.split(" ", 1)[1] for line in main.splitlines() if line.startswith("branch ")),
+            "",
+        )
+        current = git("symbolic-ref", "-q", "HEAD")
+        mine = current.stdout.strip() if current is not None and current.returncode == 0 else ""
+        if branch and branch != mine:
+            return branch
+    upstream = git("rev-parse", "--symbolic-full-name", "@{upstream}")
+    if upstream is not None and upstream.returncode == 0 and upstream.stdout.strip():
+        return upstream.stdout.strip()
+    return None
+
+
+def worktree_changed_paths(task: Task) -> set[str] | None:
+    """Every path a task's worktree has changed relative to the branch it
+    forked from, or None when that cannot be read (no workdir yet, not a
+    git directory, no base to measure against, git unavailable).
+
+    The set is what two concurrent tasks on one project are compared on
+    (`agents/manager.py::overlap_signal`): everything committed on the task
+    branch since its merge-base with the base (`git diff --name-only
+    <base>...HEAD`, in effect), *plus* uncommitted edits and untracked files
+    in the tree, because a live task has usually not committed what it is
+    touching right now. Read-only plumbing, no network — `git fetch` is
+    never run, so the base is whatever the repository already knows about.
+    """
+    if not task.workdir:
+        return None
+    workdir = Path(task.workdir)
+    if not workdir.is_dir():
+        return None
+
+    def git(*args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(workdir), *args],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    inside = git("rev-parse", "--is-inside-work-tree")
+    if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    base = _worktree_base(git, workdir)
+    if base is None:
+        return None
+    fork = git("merge-base", base, "HEAD")
+    if fork is None or fork.returncode != 0 or not fork.stdout.strip():
+        return None
+    # Working tree against the fork point: committed + staged + unstaged.
+    diff = git("diff", "--name-only", fork.stdout.strip())
+    if diff is None or diff.returncode != 0:
+        return None
+    paths = {line for line in diff.stdout.splitlines() if line.strip()}
+    untracked = git("ls-files", "--others", "--exclude-standard")
+    if untracked is not None and untracked.returncode == 0:
+        paths |= {line for line in untracked.stdout.splitlines() if line.strip()}
+    return paths

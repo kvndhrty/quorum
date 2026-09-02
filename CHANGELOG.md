@@ -9,6 +9,24 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+- Overlap observation: the manager digest marks any two live worktree tasks
+  on one project whose branches change the same files with
+  `overlaps=<id> paths=N` on both lines, plus an `overlap:` line naming up
+  to three shared paths — read from the worktrees with local read-only git
+  (committed, uncommitted and untracked changes against the base branch:
+  `origin/HEAD`, else the checkout's branch, else the upstream), no network,
+  bounded by `OVERLAP_MAX_PAIRS`. Attached sessions and `--no-worktree`
+  tasks are never compared. An observation like `possible-loop`, never a
+  rail; the manager prompt says to nudge both to rebase or serialize them.
+  (#58)
+
+### Changed
+- The task preamble's delivery protocol now says to `git fetch` and rebase
+  onto the base branch before pushing, and to report `blocked` naming the
+  conflicting files when the rebase cannot complete. `quorum init` upgrades
+  an unedited `task-preamble.md` and `manager.md`. (#58)
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

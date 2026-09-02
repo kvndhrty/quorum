@@ -41,6 +41,7 @@ __all__ = [
     "build_digest",
     "journal_path",
     "loop_signal",
+    "overlap_signal",
     "transcript_path",
 ]
 
@@ -183,6 +184,98 @@ def loop_signal(entries: list[dict]) -> dict | None:
         "window": len(window),
         "distinct": distinct,
     }
+
+
+# --- overlap observation -----------------------------------------------------
+# Two live tasks on one project each see their own worktree and nothing
+# else: the digest showed each task's git state in isolation, so a manager
+# that launched two branches from the same base found out they collided
+# only when both PRs came back MERGE-CONFLICT. `overlap_signal` intersects
+# the path sets the worktrees have changed (tasks.worktree_changed_paths —
+# read-only git, no network) for every pair of live worktree tasks on the
+# same project. Pairs are bounded because each new task in a pair costs a
+# few git subprocesses at digest build, which blocks the tick: budget is
+# spent in digest order, a home with more concurrency than budget still
+# sees its first OVERLAP_MAX_PAIRS pairs, and the rest go unobserved —
+# prefer false negatives, like `possible-loop`. The detail line names at
+# most OVERLAP_MAX_PATHS shared paths so one wide pair cannot become a wall.
+OVERLAP_MAX_PAIRS = 20
+OVERLAP_MAX_PATHS = 3
+
+
+def overlap_signal(live: list[tasks.Task]) -> dict[str, list[dict]]:
+    """Which live worktree tasks touch the same files as which others.
+
+    Returns {task id: [{"with": short id, "paths": sorted shared paths}, ...]}
+    for every task that shares at least one changed path with another live
+    task on the same project — both sides of a pair are listed, so both
+    digest lines carry the mark. Attached tasks and tasks run without a
+    worktree are never compared: that directory is the human's checkout,
+    and its diff is theirs, not the task's. Pure over the worktrees (no
+    state file, nothing written), fail-soft per task (an unreadable
+    worktree contributes no paths and no pair), and bounded by
+    OVERLAP_MAX_PAIRS.
+
+    Like every other flag in the digest this is an observation, not a rail:
+    parallel edits to one file are sometimes exactly the job, and the
+    manager decides whether to serialize, nudge, or ignore.
+    """
+    by_project: dict[str, list[tasks.Task]] = {}
+    for t in live:
+        if t.attached or not t.use_worktree or not t.workdir:
+            continue
+        if t.status in tasks.TERMINAL_STATUSES:
+            continue
+        by_project.setdefault(t.project, []).append(t)
+    paths: dict[str, set[str] | None] = {}
+
+    def changed(t: tasks.Task) -> set[str] | None:
+        if t.id not in paths:
+            paths[t.id] = tasks.worktree_changed_paths(t)
+        return paths[t.id]
+
+    result: dict[str, list[dict]] = {}
+    budget = OVERLAP_MAX_PAIRS
+    for group in by_project.values():
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                if budget <= 0:
+                    return result
+                budget -= 1
+                pa, pb = changed(a), changed(b)
+                if not pa or not pb:
+                    continue
+                shared = sorted(pa & pb)
+                if not shared:
+                    continue
+                result.setdefault(a.id, []).append({"with": b.short_id, "paths": shared})
+                result.setdefault(b.id, []).append({"with": a.short_id, "paths": shared})
+    return result
+
+
+def _overlap_marks(overlaps: list[dict] | None) -> str:
+    """The greppable part: ` overlaps=<short-id> paths=N` per partner,
+    appended to the task line. Empty for the overwhelming majority of tasks."""
+    if not overlaps:
+        return ""
+    return "".join(f" overlaps={o['with']} paths={len(o['paths'])}" for o in overlaps)
+
+
+def _overlap_lines(overlaps: list[dict] | None) -> list[str]:
+    """The prose behind the marks: up to OVERLAP_MAX_PATHS shared paths per
+    partner, and how many more there are."""
+    if not overlaps:
+        return []
+    lines = []
+    for o in overlaps:
+        shown = ", ".join(o["paths"][:OVERLAP_MAX_PATHS])
+        more = len(o["paths"]) - OVERLAP_MAX_PATHS
+        tail = f" (+{more} more)" if more > 0 else ""
+        lines.append(
+            f"  overlap: with {o['with']} on {shown}{tail} — both branches change these "
+            "files; an observation, not a rail"
+        )
+    return lines
 
 
 def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
@@ -335,6 +428,9 @@ def build_digest(
     lines.append("## Active tasks")
     if not active:
         lines.append("(none)")
+    # Read once over the active listing: attached tasks are excluded by
+    # construction here and again inside (their checkout is the human's).
+    overlaps = overlap_signal(active)
     for t in active:
         alive = tasks.runner_alive(home, t.id)
         seen = tasks.last_activity(home, t.id)
@@ -346,10 +442,12 @@ def build_digest(
             # the marker reads as the exception it is.
             + (" perpetual=true" if t.perpetual else "")
             + _dependency_marks(deps.get(t.id))
+            + _overlap_marks(overlaps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
         lines.extend(_dependency_lines(deps.get(t.id)))
+        lines.extend(_overlap_lines(overlaps.get(t.id)))
         git = tasks.workdir_git_state(t)
         if git and (git["dirty"] or git["unpushed"]):
             unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]

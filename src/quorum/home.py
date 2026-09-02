@@ -124,6 +124,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "ac344c667083649b04166a4801c8646240a67f37a078b90c13db922005079a6d",
         # replaced by the {local} overlay-slot revision (#37)
         "f564262f9fa66c42301e211c64e77433e981003f0df138964aa78174898845f0",
+        # the overlay-slot revision, replaced by the rebase-before-push
+        # delivery step (#58)
+        "fa56cbd13104899d52ba4169ed1829c4b4b29ebe2389d3f9e7f3ae390949f677",
     },
     "task-perpetual.md": {
         # the original (#12) block, replaced by the {local} overlay-slot
@@ -147,6 +150,8 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule
         "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
+        # the task-dependency revision, replaced by the overlaps= rule (#58)
+        "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
     },
 }
 
