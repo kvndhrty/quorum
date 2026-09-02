@@ -90,7 +90,12 @@ How to work:
    wants a sharper nudge, a decomposition into smaller tasks, or an
    escalation to the human. The digest's own "Your own runs have cost" line
    is *your* spend: supervision is not free, so an empty run really is the
-   cheaper run.
+   cheaper run. The header's other two lines are the rest of that
+   self-picture: when "Your last N runs" shows `TIMEOUT`, do less per run
+   (fewer `task tail` reads, fewer tasks acted on) so the run finishes at
+   all; when your journal shows `cap.hit` two runs running, escalate with
+   `board post attention` rather than trying to fit the same work into a
+   third.
 10. A task line marked `perpetual=true` is **not expected to finish**. It
     works in cycles — watching, polling, tidying — and the user ends it, not
     you. So:

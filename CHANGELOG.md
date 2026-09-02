@@ -9,6 +9,26 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+
+- **The manager can see its own last few runs** (#59). Each agent harness run
+  already appended a line to `state/manager/usage.jsonl` (or
+  `state/agents/<name>/usage.jsonl`); that line now also carries `outcome`
+  (`ok` / `raised` / `timeout`) and `duration_seconds`, and the digest opens
+  with `Your last 5 runs: ok 2m10s · TIMEOUT 15m00s · …` next to the
+  existing spend line. A run that times out reports no usage at all, so its
+  outcome is exactly what a spend-only ledger lost. Ledger lines written by
+  earlier versions read back as unknown (`?`), never as `ok`.
+- **The action cap says so in the journal** (#59). Refusing an action over
+  `max_actions_per_run` now appends one `cap.hit` entry per run, so the next
+  digest's journal section shows the run that ran out of budget; the digest
+  header also states the budget (`Actions this run: 0 of 20 (cap)`). Both are
+  observations — nothing pauses, throttles or changes the cap — and the
+  manager prompt gains one rule: shorten your own work when your runs time
+  out, escalate after hitting the cap two runs running.
+- A prompt agent whose template writes `{notes}` gets the same
+  self-observation lines above its notebook (no new placeholder).
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0
