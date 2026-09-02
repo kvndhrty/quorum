@@ -371,6 +371,9 @@ class QuorumTUI(App):
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
                 if t.get("perpetual"):
                     status += " ∞"  # never finishes by design; only the user ends it
+                # The forge's word about the PR, materialized by the manager
+                # tick so this table stays a pure file read.
+                status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
                 if t.get("waiting_on"):
                     status += " ⏳" + ",".join(t["waiting_on"])
                 if t.get("dep_failed"):

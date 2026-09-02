@@ -9,6 +9,43 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+
+- **Merged pull requests are visible** (#57). A task ends at the harness's
+  word (`done`); its work is delivered when the PR merges. The CI probe now
+  normalizes the PR's own state to `open` / `merged` / `closed` and the
+  digest's `ci:` line carries it, so the manager can tell "done and shipped"
+  from "done and waiting on a human" — the default `manager.md` reads a
+  merged task as needing nothing, and a `done` task whose PR was *closed
+  unmerged* as one line for the human. `quorum status`, `task list`, `task
+  show`, the TUI and the web dashboard badge it (`✔` merged, `⊘` closed
+  unmerged) without making a network call, because the manager tick records
+  what it saw as `pr_state` / `pr_state_at` on `tasks/<id>/task.json`.
+
+  Quorum still never changes a status because a PR merged: `done` is the
+  harness's word, merged is the forge's. Fail-soft like the rest of `ci.py`
+  — no `gh`, no PR, `[ci].enabled = false` → nothing recorded and no badge,
+  and **no badge never means "not merged"**, only "never observed". Field
+  names are forge-neutral so a GitLab backend (#51) fills the same ones.
+
+### Changed
+
+- The `ci:` digest line renders `state=merged` where it used to render
+  `state=MERGED` (all PR states are lowercase now). A merged PR never
+  carries `CI-FAILING`, even if the forge still serves a stale red rollup.
+- `docs/architecture.md`'s "nothing materializes its result to disk" note is
+  revised: `pr_state` is the one deliberate exception, and the section now
+  lists the five properties that fence it — this is the case that note said
+  to revisit for.
+
+### Upgrading
+
+Run `quorum init` to pick up the new `manager.md` (a copy you never edited
+is upgraded in place, recognized by hash; an edited one is left alone —
+`quorum prompt diff manager.md` shows what changed). Existing `task.json`
+records need no migration: the new fields are absent until the manager next
+observes a PR.
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

@@ -483,6 +483,9 @@ def doctor(
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ✔ its pull request merged   ⊘ its pull request was closed unmerged.
+             Observed by the manager tick, not by this command — no badge
+             means nothing was ever observed (no PR yet, or no `gh` here)
           ⏳ waiting on unfinished dependencies (`task add --after`); the
              runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
              name dependencies that can never finish — nothing waits on those,
@@ -574,6 +577,9 @@ def _echo_task_row(t: dict) -> None:
     else:
         marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
     status = t["status"] + (" ∞" if t.get("perpetual") else "")
+    # The forge's word next to the harness's: "done ✔" is delivered, "done ⊘"
+    # is a PR someone closed without merging. Absent = never observed.
+    status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
     line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {status:<12} {t['harness']}"
     if t["last_report"]:
         line += f"  {t['last_report'][:60]}"
@@ -942,6 +948,10 @@ def task_show(
         typer.echo(f"  session:  {task.session}")
     if task.pr_url:
         typer.echo(f"  pr:       {task.pr_url}")
+    if task.pr_state:
+        # Observed by the manager tick, so it can be older than "now" — say
+        # when, rather than implying it was just checked.
+        typer.echo(f"  pr state: {task.pr_state} (observed {task.pr_state_at})")
     if task.depends_on:
         deps = dependency_state(task, {t.id: t for t in TaskStore(target).list()})
         line = ", ".join(short_handle(d) for d in task.depends_on)

@@ -143,6 +143,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
         # replaced by the {local} overlay-slot revision (#37)
         "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
+        # replaced by the merged-observation revision (#57): how to read
+        # `state=merged` / `state=closed` on a finished task
+        "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
         # replaced by the notebook revision (#35): note vs remember vs forget
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule

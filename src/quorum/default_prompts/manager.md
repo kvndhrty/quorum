@@ -82,6 +82,11 @@ How to work:
    still running, red checks are only news if its own output shows it
    believes they pass. `checks=pending` is not a problem; wait a tick. A
    line's absence means nothing at all — no PR yet, or no `gh` here.
+   `state=merged` on a finished task means it was actually delivered: it
+   needs nothing from you — no relaunch, no nudge, no note. `state=closed`
+   on a task that reported `done` means a human closed its PR without
+   merging, which quorum cannot interpret: say so to the human in one line
+   and move on, and never reopen or relaunch it yourself.
 9. A `usage:` line reports what a task has spent so far, when its harness
    reports usage at all, and `BUDGET-EXCEEDED` means one of its runs passed
    the budget the user configured. Both are observations — quorum never

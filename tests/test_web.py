@@ -134,3 +134,23 @@ def test_task_rows_expose_dependencies(client: TestClient, home: Path):
     tasks.report(home, upstream.id, status="done", text="shipped")
     rows = {r["id"]: r for r in client.get("/api/tasks").json()}
     assert rows[dependent.id]["waiting_on"] == []
+
+
+def test_task_rows_expose_the_observed_pr_state(client: TestClient, home: Path):
+    """The browser badges merged off the same read model, and the dashboard
+    never probes a forge: the field is on task.json because the manager tick
+    put it there (#57)."""
+    from quorum.web import app as web_app
+
+    store = TaskStore(home)
+    shipped = store.add("web-proj", "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged", pr_state_at="2026-01-01T00:00:00Z")
+    quiet = store.add("web-proj", "never observed", "fake", status="done")
+
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[shipped.id]["pr_state"] == "merged"
+    assert rows[shipped.id]["pr_state_at"] == "2026-01-01T00:00:00Z"
+    assert rows[quiet.id]["pr_state"] is None
+
+    page = (Path(web_app.__file__).parent / "static" / "index.html").read_text()
+    assert 't.pr_state === "merged"' in page and 't.pr_state === "closed"' in page
