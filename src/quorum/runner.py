@@ -41,9 +41,11 @@ import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -65,6 +67,11 @@ from .tasks import (
     transcript_path,
     worktree_path,
 )
+
+# How long `stop_run` (and the stall watchdog) waits for a SIGTERMed process
+# to go away before escalating to SIGKILL. Seconds, because a harness that
+# means to exit cleanly flushes and dies in well under one.
+STOP_GRACE_SECONDS = 5.0
 
 
 class RunnerError(RuntimeError):
@@ -213,6 +220,124 @@ def guidance_pump(
         yield pump
     finally:
         pump.stop()
+
+
+def note_transcript(path: Path, text: str) -> None:
+    """Write one `quorum:` line into a task's transcript.
+
+    Everything quorum itself does to a run — an auto-commit, a stall, a
+    stop — says so in the same stream the harness writes to, because that is
+    where every reader (the digest's `out|` tail, `task tail`, the TUI) is
+    already looking. Never raises: a note that cannot be written must not
+    cost the run its record.
+    """
+    with contextlib.suppress(OSError):
+        fsio.append_jsonl(path, {"at": fsio.iso(fsio.utc_now()), "line": f"quorum: {text}"})
+
+
+class StallWatchdog:
+    """The mechanical half of hung-session recovery: no output for N seconds
+    ends the run.
+
+    Off unless `[tasks].run_stall_timeout_seconds` is set. A harness that
+    hangs — blocked forever on stdin (#24), waiting on an API call that will
+    never answer, plain stuck — keeps its process alive and its lock live, so
+    passive observation reads it as a healthy run and the manager must judge
+    it. This turns that into the case supervision already handles well: a
+    **dead runner with a non-terminal status**, which is simply relaunched.
+
+    It counts *silence*, not progress: any line the harness prints resets the
+    clock, so the threshold has to sit above the longest silent step a real
+    run takes. That is why it is off by default and why the runner never
+    picks a value for the user.
+
+    On firing it notes the stall in the transcript, SIGTERMs the harness,
+    and SIGKILLs it after `STOP_GRACE_SECONDS`. It does not set status (no
+    part of the runner does) and it does not kill the runner itself: the run
+    ends the ordinary way, so the run record, auto-commit and lock release
+    all still happen — with `stalled = true` on the record.
+    """
+
+    def __init__(
+        self,
+        proc: subprocess.Popen,
+        timeout: float,
+        transcript: Path,
+        *,
+        grace: float = STOP_GRACE_SECONDS,
+        monotonic=time.monotonic,
+    ):
+        self._proc = proc
+        self._timeout = timeout
+        self._transcript = transcript
+        self._grace = grace
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._last = monotonic()
+        self._stalled = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    @property
+    def stalled(self) -> bool:
+        return self._stalled
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def saw_output(self) -> None:
+        """One line arrived: the harness is alive and talking."""
+        with self._lock:
+            self._last = self._monotonic()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self._grace + 5)
+
+    def _loop(self) -> None:
+        # Poll at a fraction of the timeout: the check is two cheap reads, and
+        # a coarse poll would make the effective threshold up to 2x the
+        # configured one.
+        poll = max(0.05, min(1.0, self._timeout / 4))
+        while not self._stop.wait(poll):
+            if self._proc.poll() is not None:
+                return  # the run ended on its own
+            with self._lock:
+                quiet = self._monotonic() - self._last
+            if quiet >= self._timeout:
+                self._fire(quiet)
+                return
+
+    def _fire(self, quiet: float) -> None:
+        self._stalled = True
+        note_transcript(
+            self._transcript,
+            f"run stalled — no harness output for {int(quiet)}s "
+            f"(>= [tasks].run_stall_timeout_seconds = {self._timeout:g}); stopping the harness",
+        )
+        with contextlib.suppress(OSError):
+            self._proc.terminate()
+        deadline = self._monotonic() + self._grace
+        while self._monotonic() < deadline:
+            if self._proc.poll() is not None:
+                return
+            time.sleep(0.05)
+        with contextlib.suppress(OSError):
+            self._proc.kill()
+
+
+@contextmanager
+def stall_watchdog(proc: subprocess.Popen, timeout: float, transcript: Path):
+    """Attach a StallWatchdog to a live run when the config opts in."""
+    if not timeout or timeout <= 0:
+        yield None
+        return
+    watchdog = StallWatchdog(proc, timeout, transcript)
+    watchdog.start()
+    try:
+        yield watchdog
+    finally:
+        watchdog.stop()
 
 
 def resolve_harness(config: Config, name: str) -> HarnessConfig:
@@ -485,11 +610,7 @@ def _maybe_auto_commit(
             note = f"auto-commit failed: {e}"
     if not note:
         return None
-    with contextlib.suppress(OSError):
-        fsio.append_jsonl(
-            transcript_path(home, task.id),
-            {"at": fsio.iso(fsio.utc_now()), "line": f"quorum: {note}"},
-        )
+    note_transcript(transcript_path(home, task.id), note)
     return note
 
 
@@ -499,6 +620,7 @@ def stream_transcript(
     *,
     extra: dict | None = None,
     on_event=None,
+    on_line=None,
     now=fsio.utc_now,
 ) -> None:
     """Stream a harness process's stdout into a transcript.jsonl, line by line.
@@ -508,12 +630,18 @@ def stream_transcript(
     Both the task runner and the manager write transcripts through here, so
     every reader (`read_transcript_tail`, the digest, `task tail`) sees one
     entry shape.
+
+    `on_line` is called for every line, parsed or not — it is the "the
+    harness said something" signal the stall watchdog counts, and silence is
+    exactly what a hung harness produces.
     """
     assert proc.stdout is not None
     for line in proc.stdout:
         line = line.rstrip("\n")
         if not line:
             continue
+        if on_line is not None:
+            on_line()
         entry: dict = {"at": fsio.iso(now()), **(extra or {})}
         try:
             event = json.loads(line)
@@ -526,11 +654,26 @@ def stream_transcript(
         fsio.append_jsonl(transcript, entry)
 
 
-def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) -> int:
+def run_task(
+    home: Path,
+    config: Config,
+    task_prefix: str,
+    force: bool = False,
+    fresh_session: bool = False,
+) -> int:
     """Execute one run of a task in the foreground. Returns the harness exit code.
 
     `force` waives the dependency refusal below; nothing else about a run
     changes.
+
+    `fresh_session` drops the session id captured from earlier runs before
+    composing the argv, so the harness starts a *new* session in the same
+    worktree instead of resuming a damaged one (a thread that errors on
+    every turn, a context the provider will not accept again). The work on
+    disk is untouched — the worktree, not the session, is the durable state
+    — but the new session remembers nothing, so a caller that has context
+    worth carrying over should nudge it in. The run records
+    `fresh_session = true`, which is how the digest counts restarts.
     """
     home = Path(home)
     store = TaskStore(home)
@@ -576,6 +719,17 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
             apply_task_sandbox(home, config, task, workdir)
         guidance = claim_guidance(home, task.id)
         prompt = compose_prompt(home, task, workdir, guidance)
+        if fresh_session and task.session:
+            # Forget the damaged session before it can be resumed. Durable,
+            # not just local: the *next* run must not resume it either, and
+            # the harness is about to hand us a new id anyway.
+            store.update(task.id, session=None)
+            task = task.model_copy(update={"session": None})
+            note_transcript(
+                transcript_path(home, task.id),
+                "starting a fresh session (--fresh-session) — the worktree is unchanged, "
+                "but this session remembers nothing of the previous ones",
+            )
         argv = build_harness_argv(harness, prompt, task.session)
 
         # The task harness acts as itself, not as whoever launched it.
@@ -597,7 +751,12 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
         session = task.session
         spend = usage.UsageCollector()
 
-        with guidance_pump(home, inbox_name(task.id), harness, proc, prompt) as pump:
+        with (
+            guidance_pump(home, inbox_name(task.id), harness, proc, prompt) as pump,
+            stall_watchdog(
+                proc, config.tasks.run_stall_timeout_seconds, transcript_path(home, task.id)
+            ) as watchdog,
+        ):
 
             def on_event(event: object) -> None:
                 nonlocal session
@@ -610,8 +769,14 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
                 if pump is not None:
                     pump.on_event(event)
 
-            stream_transcript(proc, transcript_path(home, task.id), on_event=on_event)
+            stream_transcript(
+                proc,
+                transcript_path(home, task.id),
+                on_event=on_event,
+                on_line=watchdog.saw_output if watchdog is not None else None,
+            )
             exit_code = proc.wait()
+            stalled = watchdog is not None and watchdog.stalled
 
         auto_commit_note = _maybe_auto_commit(home, config, store, task, workdir)
 
@@ -621,6 +786,8 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
             exit_code=exit_code,
             auto_commit=auto_commit_note,
             usage=spend.result(),
+            stalled=stalled,
+            fresh_session=fresh_session,
         )
         fresh = store.get(task.id)  # status may have moved via `task report` mid-run
         prior = [r.model_dump() for r in (fresh.runs if fresh else task.runs)]
@@ -628,6 +795,156 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
         return exit_code
     finally:
         fsio.release_pid_lock(lock)
+
+
+def stop_run(
+    home: Path,
+    task_prefix: str,
+    *,
+    grace_seconds: float = STOP_GRACE_SECONDS,
+    now=fsio.utc_now,
+) -> dict:
+    """End a task's live run without ending the task. Returns what it did.
+
+    The non-destructive half of `task cancel --kill`: that one marks the task
+    `cancelled` and loses the work along with its queue position, which is
+    the wrong tool for a hung session. This kills the run and leaves
+    *everything else alone* — status untouched (the runner never sets one,
+    and neither does this), worktree untouched, the task queued exactly where
+    it was and ready to be relaunched, with `--fresh-session` when the
+    session itself is the problem.
+
+    The signal goes to the runner's **process group**: a detached run is a
+    session leader (`launch_detached` uses start_new_session) and the harness
+    and everything it spawned inherit that group, so the group is the only
+    handle that reaches the whole tree. SIGTERM first, then SIGKILL after
+    `grace_seconds` for a harness that ignores it. A foreground run sharing
+    our own process group is signalled by pid instead — killing our group
+    would kill the caller.
+
+    The killed runner never gets to write its own record, so this writes it:
+    a `run.stopped` transcript note and a `TaskRun` with `stopped = true` and
+    the signal as the exit code, so views and the digest say a run ended
+    here rather than showing one that never closed. If the runner did manage
+    to record the run itself (a harness that exits cleanly on SIGTERM), that
+    record stands and nothing is duplicated. The stale lock is cleared too,
+    since its pid is now provably gone.
+
+    Refuses an attached task: the same substrate rail as the runner's, and
+    the sharpest one here — the "runner" of an attached task is the user's
+    own interactive session, which quorum never kills.
+    """
+    home = Path(home)
+    store = TaskStore(home)
+    try:
+        task = store.resolve(task_prefix)
+    except KeyError:
+        raise RunnerError(f"no task matching {task_prefix!r} — `quorum task list`") from None
+    except ValueError as e:
+        raise RunnerError(str(e)) from None
+    if task.attached:
+        raise RunnerError(
+            f"task {task.short_id} is attached to a live interactive session — "
+            "quorum never kills your session; end it yourself, or `quorum task detach` it"
+        )
+    lock = runner_lock_path(home, task.id)
+    try:
+        meta = fsio.read_json(lock)
+        pid = int(meta.get("pid", -1))
+    except (OSError, ValueError):
+        meta, pid = {}, -1
+    if pid <= 0 or not fsio.pid_alive(pid):
+        raise RunnerError(
+            f"task {task.short_id} has no live run to stop "
+            "(`quorum task run` to start one)"
+        )
+    runs_before = len(task.runs)
+    sent, alive = _terminate_process_group(pid, grace_seconds)
+    if alive:
+        raise RunnerError(
+            f"the run of task {task.short_id} (runner pid {pid}) survived SIGKILL — "
+            "something in it is stuck in the kernel; check the processes by hand"
+        )
+    note_transcript(
+        transcript_path(home, task.id),
+        f"run.stopped — runner pid {pid} ended with {sent.name} by `quorum task stop`; "
+        "the task keeps its status and its worktree",
+    )
+    fsio.clear_stale_pid_lock(lock)
+    fresh = store.get(task.id) or task
+    recorded = False
+    if len(fresh.runs) == runs_before:
+        # Nothing wrote the run record, because the process that would have
+        # is the one we just killed. Close it honestly instead of leaving a
+        # run that reads as still going.
+        run = TaskRun(
+            started_at=str(meta.get("started_at") or fresh.updated_at),
+            ended_at=fsio.iso(now()),
+            exit_code=-int(sent),
+            stopped=True,
+        )
+        store.update(task.id, runs=[*[r.model_dump() for r in fresh.runs], run.model_dump()])
+        recorded = True
+    return {"task": task.id, "pid": pid, "signal": sent.name, "run_recorded": recorded}
+
+
+def _terminate_process_group(
+    pid: int, grace_seconds: float
+) -> tuple[signal.Signals, bool]:
+    """SIGTERM a runner's whole process group, SIGKILL what refuses to die.
+
+    Returns the last signal sent and whether anything is still alive. A
+    process that disappears between checks is a success, not an error.
+
+    Liveness is asked of the *group*, not of the runner's pid: SIGTERM kills
+    the runner (a plain python process) instantly, while the harness that
+    ignores SIGTERM keeps running — checking only the pid would call that a
+    clean stop and leave the hung harness behind. `killpg(group, 0)` answers
+    "is anyone left in this group", which is the question worth asking.
+    """
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        pgid = 0
+    # Our own group: a foreground `quorum task run` shares it, and killing
+    # the group would take the caller (and, under `quorum up`, the
+    # supervisor) with it. Then the runner's pid is the only handle we have.
+    group = pgid if pgid > 0 and pgid != os.getpgrp() else 0
+
+    def send(sig: int) -> None:
+        with contextlib.suppress(OSError):
+            if group:
+                os.killpg(group, sig)
+            else:
+                os.kill(pid, sig)
+
+    def gone() -> bool:
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            if not _run_alive(pid, group):
+                return True
+            time.sleep(0.05)
+        return not _run_alive(pid, group)
+
+    send(signal.SIGTERM)
+    if gone():
+        return signal.SIGTERM, False
+    send(signal.SIGKILL)
+    return signal.SIGKILL, not gone()
+
+
+def _run_alive(pid: int, group: int) -> bool:
+    """Whether any process of a run survives — the group when we have one
+    (so a harness outliving its runner still counts), else the runner's pid."""
+    if not group:
+        return fsio.pid_alive(pid)
+    try:
+        os.killpg(group, 0)
+    except PermissionError:
+        return True  # someone else's now, but it exists
+    except OSError:
+        return False
+    return True
 
 
 def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
@@ -640,11 +957,16 @@ def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
     return dependency_state(task, by_id)["waiting_on"]
 
 
-def launch_detached(home: Path, task_id: str, force: bool = False) -> int:
+def launch_detached(
+    home: Path, task_id: str, force: bool = False, fresh_session: bool = False
+) -> int:
     """Start `quorum task run <id>` as a detached process; returns its pid.
 
     stdout/stderr go to the task's runner.log (the transcript captures the
-    harness's own output separately, inside the run).
+    harness's own output separately, inside the run). `start_new_session`
+    makes the child a session (and process-group) leader, which is what lets
+    `stop_run` later signal the harness and everything it spawned as one
+    group.
     """
     home = Path(home)
     log_path = runner_log_path(home, task_id)
@@ -657,6 +979,7 @@ def launch_detached(home: Path, task_id: str, force: bool = False) -> int:
             [
                 sys.executable, "-m", "quorum", "task", "run", task_id,
                 "--home", str(home), *(["--force"] if force else []),
+                *(["--fresh-session"] if fresh_session else []),
             ],
             stdout=log,
             stderr=log,

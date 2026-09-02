@@ -31,6 +31,10 @@ worktree = true           # each task runs in its own git worktree
 #max_tokens_per_run = 0   # more spend than this is flagged in the digest and
                           # in `quorum status`. Nothing is killed or refused
                           # for cost — the manager judges what to do.
+#run_stall_timeout_seconds = 1800   # stall watchdog (0 = off): end a run whose
+                          # harness has printed nothing for this long. It counts
+                          # silence, not progress — set it above your longest
+                          # quiet step (a full test suite, a cold build).
 
 # A harness is any coding-agent CLI; {prompt} and {session} are substituted.
 # Runs are unattended — the flags below let the harness act without asking,
@@ -147,6 +151,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule
         "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
+        # the #31 revision, replaced by the #42 hung-session policy (stop,
+        # --fresh-session, STALLED)
+        "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
     },
 }
 

@@ -331,6 +331,65 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
+### Stopping and restarting a run
+
+(User-facing how-to: [guide.md](guide.md#when-a-session-hangs).)
+
+Harness sessions hang: a stream-json CLI blocked forever on stdin (#24), a
+provider turn that never returns, a wedged tool. The process is alive and
+the lock is fresh, so every liveness signal quorum has says "working", and
+the only kill quorum used to offer was `task cancel --kill` — **terminal**,
+losing the task along with the hung run. Three pieces, deliberately split
+between mechanism and judgement:
+
+**`quorum task stop <id>` (`runner.stop_run`)** ends the *run* and nothing
+else. Status untouched (the runner never sets one; neither does this),
+worktree untouched, the task still queued exactly where it was. The signal
+goes to the runner's **process group**: `launch_detached` starts a run with
+`start_new_session`, so the runner leads a group that contains the harness
+and everything it spawned, and the group is the only handle that reaches the
+whole tree. SIGTERM, then SIGKILL after `STOP_GRACE_SECONDS` for a harness
+that ignores it — and liveness is asked of the group (`killpg(pgid, 0)`),
+not the runner's pid, because SIGTERM kills the runner instantly while the
+harness ignoring it keeps running; a pid check would call that a clean stop.
+A run sharing quorum's *own* process group (a foreground `task run`) is
+signalled by pid instead, since killing that group would take the caller
+with it.
+
+The killed runner never gets to write its own record, so `stop` writes it: a
+`quorum: run.stopped` transcript line, a `TaskRun` with `stopped = true` and
+the signal as a negative exit code, and the now-provably-stale lock removed
+(`fsio.clear_stale_pid_lock`, which re-checks the pid so it can never unlink
+a lock a new run has taken). If the runner did manage to record the run
+itself, that record stands and nothing is duplicated. An **attached** task
+is refused outright — the same substrate rail as the runner's, and the
+sharpest one: the "runner" of an attached task is the user's own interactive
+session.
+
+**`quorum task run <id> --fresh-session`** clears the captured
+`session`/`thread_id` before composing the argv, so the harness starts a new
+session instead of resuming a damaged one (a thread that errors on every
+turn, a context the provider will not take back). The worktree — the actual
+durable state — is untouched; the session was only ever a convenience. The
+new session remembers nothing, so the caller is expected to nudge in a
+summary, and the run records `fresh_session = true`.
+
+**`[tasks].run_stall_timeout_seconds`** (0 = off, the default) is the
+mechanical version, and needs no manager at all: `runner.StallWatchdog`
+watches the stdout stream the runner is already reading, and when no line
+arrives for N seconds it notes the stall in the transcript, SIGTERMs the
+harness (SIGKILL after the same grace) and lets the run end the ordinary way
+— so the run record, auto-commit and lock release all still happen, with
+`stalled = true` on the record. That turns a hang into a **dead runner with
+a non-terminal status**, which supervision already handles well. It counts
+silence, not progress, so the threshold has to sit above the longest silent
+step a real run takes (a full test suite, a cold build); that is why it is
+off by default and why quorum never picks a value.
+
+All three are visible in the digest as `stopped=N` / `fresh_sessions=N` /
+`last-run=stalled` on the task line, which is how the manager knows what it
+has already tried without relying on its bounded journal window.
+
 ### Perpetual tasks
 
 (User-facing how-to: [guide.md](guide.md#perpetual-tasks).)
@@ -513,7 +572,10 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    task with declared dependencies (see *Task dependencies* above); a
    `possible-loop:` line
    when a task's transcript tail is dominated by one repeated tool call
-   (see below); a `usage:` line with what the task has spent when its
+   (see below); `STALLED` when a live runner has printed nothing for
+   `STALL_QUIET_MINUTES`, with `stopped=` / `fresh_sessions=` /
+   `last-run=stalled` counting what has already been done about it (see
+   below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
    configured `[tasks]` budget (both observations — see *Token/cost usage*
    above); a header line with what the manager's *own* recent runs have
@@ -629,6 +691,24 @@ stuck detector (which auto-halts): `possible-loop` is an **observation, not a
 rail**. Python makes no decision; the flag is data, the default manager prompt
 tells the manager to read the tail and judge (nudge, relaunch, cancel, or
 ignore), and the per-run action cap remains the only rail.
+
+**Stall observation (`STALLED`).** The other half of *Stopping and
+restarting a run* (above), and the half that judges. `stall_minutes` reads
+the mtime of a task's transcript — deliberately not `last_activity`, which
+also counts the runner lock and the reports file, both of which a hung run
+leaves fresh — and a live runner silent for longer than
+`STALL_QUIET_MINUTES` (30) gets the flag. Only a *live* runner: a dead one
+is simply a task to relaunch, which the manager already handles. Like
+`possible-loop` the threshold is a plain module constant tuned to prefer
+false negatives, because a flag that fires on a long test run teaches the
+manager to ignore it, and like `possible-loop` it is an **observation, not a
+rail** — quorum ends no run on its account. `prompts/manager.md` holds the
+policy: look at the tail once, `task stop` then relaunch, then relaunch
+`--fresh-session` with a summarizing nudge, then escalate to `attention`
+after two fresh restarts, reading which step it is at off the task line's
+own `stopped=` / `fresh_sessions=` counts. The *rail-shaped* answer to the
+same failure is the runner's stall watchdog, which is opt-in config rather
+than supervision.
 
 **CI observation (`ci:`).** `workdir_git_state` follows work as far as
 "pushed" and stops; `ci.py` — the only module that shells out to `gh` —

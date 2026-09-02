@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -18,8 +21,10 @@ import pytest
 from quorum import fsio, notes, runner, tasks
 from quorum.actor import notes_path, usage_path
 from quorum.agent import AgentContext
+from quorum.agents import manager
 from quorum.agents.manager import (
     LOOP_WINDOW_CALLS,
+    STALL_QUIET_MINUTES,
     Manager,
     build_digest,
     journal_path,
@@ -648,6 +653,133 @@ def test_a_perpetual_task_that_reported_done_is_observed_not_forgotten(
 
 
 # -- the notebook (a separate memory, #35) ----------------------------------
+
+
+# -- hung sessions: STALLED, stop, fresh sessions -------------------------
+
+
+def hold_the_runner_lock(home: Path, task_id: str) -> subprocess.Popen:
+    """A real process in its own session holding a task's runner.lock.
+
+    `task stop` kills process *groups* for real, so a stub pid (the pid-1
+    trick the passive-observation tests use) would be both a lie and a
+    disaster. The reaper thread keeps the killed process from lingering as a
+    zombie in a group the stop then reads as still alive.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    threading.Thread(target=proc.wait, daemon=True).start()
+    lock = tasks.runner_lock_path(home, task_id)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fsio.atomic_write_json(
+        lock,
+        {"role": "task-runner", "task": task_id, "pid": proc.pid,
+         "started_at": fsio.iso(fsio.utc_now())},
+    )
+    return proc
+
+
+def age_the_transcript(home: Path, task_id: str, minutes: int) -> None:
+    """One line of output, last written `minutes` ago — a silent harness."""
+    write_transcript(home, task_id, [{"at": fsio.iso(fsio.utc_now()), "line": "PROMPT| working"}])
+    old = time.time() - minutes * 60
+    os.utime(tasks.transcript_path(home, task_id), (old, old))
+
+
+def test_digest_flags_a_silent_live_runner_as_stalled(home: Path, clock, project: str):
+    store = TaskStore(home)
+    quiet = store.add(project, "hung task", "tasktool")
+    busy = store.add(project, "healthy task", "tasktool")
+    for t in (quiet, busy):
+        mark_runner_alive(home, t.id)
+    age_the_transcript(home, quiet.id, minutes=STALL_QUIET_MINUTES + 10)
+    age_the_transcript(home, busy.id, minutes=STALL_QUIET_MINUTES - 10)
+
+    digest = build_digest(home, store.list(), clock(), [])
+
+    assert "STALLED" in digest_line(digest, quiet.short_id, f"- [queued] {quiet.short_id}")
+    assert "STALLED" not in digest_line(digest, busy.short_id, f"- [queued] {busy.short_id}")
+    assert "An observation, not a verdict" in digest
+
+
+def test_a_dead_runner_is_never_stalled_only_relaunchable(home: Path, clock, project: str):
+    """A silent transcript with no live runner is just a task to relaunch —
+    flagging it STALLED would send the manager stopping a run that is over."""
+    store = TaskStore(home)
+    task = store.add(project, "x", "tasktool")
+    age_the_transcript(home, task.id, minutes=STALL_QUIET_MINUTES * 3)
+
+    digest = build_digest(home, store.list(), clock(), [])
+
+    assert "STALLED" not in digest
+    assert manager.stall_minutes(home, task, clock()) >= STALL_QUIET_MINUTES
+
+
+def test_digest_counts_stops_fresh_sessions_and_a_stalled_run(home: Path, clock, project: str):
+    store = TaskStore(home)
+    task = store.add(project, "x", "tasktool")
+    store.update(task.id, runs=[
+        tasks.TaskRun(started_at="2026-01-01T00:00:00Z", stopped=True).model_dump(),
+        tasks.TaskRun(started_at="2026-01-01T01:00:00Z", fresh_session=True).model_dump(),
+        tasks.TaskRun(started_at="2026-01-01T02:00:00Z", fresh_session=True, stalled=True).model_dump(),
+    ])
+
+    digest = build_digest(home, store.list(), clock(), [])
+
+    line = digest_line(digest, task.short_id, f"- [queued] {task.short_id}")
+    assert "stopped=1" in line and "fresh_sessions=2" in line and "last-run=stalled" in line
+    assert "the runner's own stall watchdog" in digest
+
+
+def test_a_task_nobody_restarted_carries_no_restart_marks(home: Path, clock, project: str):
+    store = TaskStore(home)
+    task = store.add(project, "x", "tasktool")
+    digest = build_digest(home, store.list(), clock(), [])
+    line = digest_line(digest, task.short_id, f"- [queued] {task.short_id}")
+    assert "stopped=" not in line and "fresh_sessions=" not in line and "STALLED" not in line
+
+
+def test_manager_stops_resumes_then_restarts_fresh_and_finally_escalates(
+    home: Path, clock, project: str
+):
+    """The whole hung-session policy, driven by a manager harness that reads
+    each step off the digest's own marks (prompts/manager.md item 7)."""
+    write_config(home, "manager_restart")
+    store = TaskStore(home)
+    task = store.add(project, "parse the logs", "tasktool")
+    hung = hold_the_runner_lock(home, task.id)
+    age_the_transcript(home, task.id, minutes=STALL_QUIET_MINUTES + 15)
+
+    make_manager(home, clock).tick()  # 1: STALLED -> stop, then resume
+
+    assert not fsio.pid_alive(hung.pid)  # the hung run is really gone
+    fresh = store.get(task.id)
+    assert fresh.status == "queued"  # stop is not cancel
+    assert fresh.runs[0].stopped and fresh.runs[1].stopped is False
+
+    make_manager(home, clock).tick()  # 2: stopped once already -> fresh session
+    make_manager(home, clock).tick()  # 3: still failing -> a second fresh session
+
+    fresh = store.get(task.id)
+    assert [r.fresh_session for r in fresh.runs] == [False, False, True, True]
+    assert "continue there" in "\n".join(
+        e.get("line", "") for e in fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    )  # the new session was told what the old one had done
+
+    make_manager(home, clock).tick()  # 4: two fresh restarts -> escalate
+
+    attention = MessageBus(home).read_topic("attention")
+    assert len(attention) == 1 and task.short_id in attention[0].payload["text"]
+    actions = [e["action"] for e in fsio.read_jsonl(journal_path(home)) if e["action"] != "note"]
+    assert actions == [
+        "task.stop", "task.run",
+        "task.nudge", "task.run",
+        "task.nudge", "task.run",
+        "board.post",
+    ]
+
 
 
 def notebook_section(digest: str) -> list[str]:

@@ -76,6 +76,8 @@ auto_commit = false     # after each run, commit whatever the harness left
                         # uncommitted in its worktree (safety net; see below)
 max_cost_per_run = 0    # 0 = off. Flag a run that reported spending more
 max_tokens_per_run = 0  # than this — an observation, never a kill switch
+run_stall_timeout_seconds = 0   # 0 = off. End a run whose harness has printed
+                        # nothing for this long (see "when a session hangs")
 ```
 
 `auto_commit` is the belt to the delivery protocol's braces. Harnesses are
@@ -418,7 +420,8 @@ quorum status                     # tasks alongside agents and projects
 shows up in every view. `quorum task cancel <id>` stops the manager's
 attention (`--kill` also SIGTERMs a live runner, and asks first on an
 interactive shell — `--yes` skips). The work itself lives on the
-`quorum/<short-id>` branch either way.
+`quorum/<short-id>` branch either way. To end a *run* without ending the
+task, use `quorum task stop <id>` instead (below).
 
 **Delivery.** The preamble also teaches the harness to deliver with plain
 git — commit everything and `git push -u origin HEAD` before reporting
@@ -430,6 +433,52 @@ or unpushed commits (`⚠ 2 uncommitted, 1 unpushed` in `quorum status`),
 and the manager's digest marks a finished task in that state as
 `STRANDED-WORK` — the default manager prompt relaunches it with a nudge to
 commit and push, so work can't silently rot in a worktree.
+
+### When a session hangs
+
+Harness sessions do hang — blocked on stdin, waiting on a provider turn that
+never returns, stuck in a tool. The process stays alive and the lock stays
+fresh, so nothing looks wrong from the outside; the run just stops
+producing. Two commands and one setting:
+
+```bash
+quorum task stop a3f2k9                        # end the RUN, keep the task
+quorum task run a3f2k9 --detach                # resume the same session
+quorum task run a3f2k9 --detach --fresh-session   # start a new session instead
+```
+
+`task stop` is the non-terminal kill: it SIGTERMs the runner's whole process
+group (SIGKILL if something refuses), records the interrupted run, and
+leaves the task's status, queue position and worktree exactly as they were.
+That is the difference from `task cancel --kill`, which ends the *task*. A
+stopped task is just a task waiting to be run again.
+
+`--fresh-session` is for when resuming is what keeps failing — a session the
+provider now errors on every turn. It forgets the stored session id and
+starts a new one **in the same worktree**, so the work on disk survives, but
+the new session remembers nothing about it: send a `quorum task nudge`
+first, summarizing where the task had got to.
+
+You rarely do this by hand, because the manager does it for you. Its digest
+marks a live-but-silent runner `STALLED`, and its prompt walks the same
+ladder one step per tick — read the tail once, stop and resume, then restart
+with a fresh session and a summarizing nudge, then escalate to you rather
+than restart a third time. `stopped=` and `fresh_sessions=` counts on the
+task line are how it knows what it already tried.
+
+If you would rather not wait for a supervision tick, set the watchdog:
+
+```toml
+[tasks]
+run_stall_timeout_seconds = 1800   # 30 minutes of silence ends the run
+```
+
+The runner then stops a harness that has printed nothing for that long by
+itself, marks the run `stalled`, and exits non-zero — which turns a hang
+into an ordinary dead runner the manager relaunches. It counts *silence,
+not progress*, so set it well above the longest quiet stretch your harness
+has (a full test suite, a cold build, a long provider turn) — it cannot tell
+thinking from hanging. It is off by default for exactly that reason.
 
 ## The manager
 

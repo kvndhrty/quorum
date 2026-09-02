@@ -9,6 +9,41 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+
+- **Hung-session restart** (#42). A harness session that hangs — blocked on
+  stdin, waiting on a turn that never returns — used to cost a whole
+  supervision cycle at best and a whole night at worst, because the only kill
+  was `task cancel --kill`, which ends the task too.
+  - `quorum task stop <id>` ends the *run* and nothing else: SIGTERM (then
+    SIGKILL) to the runner's process group, so the harness and everything it
+    spawned go with it, while the task keeps its status, its queue position
+    and its worktree. The interrupted run is recorded (`stopped`, a
+    `run.stopped` transcript note, the stale lock cleared) rather than left
+    looking live. Attached tasks are refused — quorum never kills your own
+    interactive session.
+  - `quorum task run <id> --fresh-session` forgets the stored session id and
+    starts a new session in the same worktree, for when *resuming* is what
+    keeps failing. Recorded as `fresh_session` on the run.
+  - `[tasks].run_stall_timeout_seconds` (0 = off, the default) is a runner
+    watchdog: no harness output for that long ends the run, marks it
+    `stalled`, and turns a hang into an ordinary dead runner. It counts
+    silence, not progress — set it above your longest quiet step.
+  - The manager digest gains a `STALLED` observation (a live runner whose
+    transcript has not grown for 30 minutes) plus `stopped=` /
+    `fresh_sessions=` / `last-run=stalled` marks, and `prompts/manager.md`
+    gains the policy that reads them: look at the tail once, stop and
+    resume, then restart with a fresh session and a summarizing nudge, then
+    escalate after two fresh restarts. Observations, never rails — quorum
+    still ends no run on its own judgement.
+
+### Changed
+
+- `prompts/manager.md` — new hung-session section (item 7) and two new tools
+  in its command list. An unedited copy is upgraded by `quorum init`; an
+  edited one is not, so move house rules into `prompts/manager.local.md`
+  (`quorum prompt diff manager` shows the gap).
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

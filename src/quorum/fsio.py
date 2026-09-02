@@ -257,3 +257,26 @@ def release_pid_lock(path: Path) -> None:
             path.unlink(missing_ok=True)
     except (OSError, ValueError):
         pass
+
+
+def clear_stale_pid_lock(path: Path) -> bool:
+    """Remove a lock whose recorded pid is gone; leave a live one alone.
+
+    The counterpart to `release_pid_lock` for a lock this process does not
+    own: `quorum task stop` kills someone else's runner, and only after the
+    pid is confirmed dead may it clear the file the runner never got to.
+    Re-reads under the same rule the take-over path uses, so it can never
+    unlink a lock that a new run has meanwhile acquired. Returns whether it
+    removed anything.
+    """
+    try:
+        pid = int(read_json(path).get("pid", -1))
+    except (OSError, ValueError):
+        return False
+    if pid > 0 and pid_alive(pid):
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True

@@ -982,10 +982,21 @@ def task_run(
     task_id: str,
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
     force: bool = typer.Option(False, "--force", help="Run even while the task's dependencies are unfinished."),
+    fresh_session: bool = typer.Option(
+        False,
+        "--fresh-session",
+        help="Forget the captured session id and start a new session (same worktree).",
+    ),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
-    under `quorum up`)."""
+    under `quorum up`).
+
+    `--fresh-session` is for a session that is itself broken — one that hangs
+    or errors the moment it resumes. The worktree (the actual work) is
+    untouched, but the new session remembers nothing, so send a nudge
+    summarizing where the task had got to.
+    """
     from .runner import RunnerError, launch_detached, run_task, unmet_dependencies
 
     target = get_home(home)
@@ -1006,14 +1017,17 @@ def task_run(
                 f"task {task.short_id} is waiting on {', '.join(blockers)} — "
                 "unfinished dependencies; `--force` to run anyway"
             )
-    _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
+    _actor_guard(
+        target, "task.run", target=task.short_id, target_status=task.status,
+        args="--fresh-session" if fresh_session else None,
+    )
     if detach:
-        pid = launch_detached(target, task.id, force=force)
+        pid = launch_detached(target, task.id, force=force, fresh_session=fresh_session)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
         return
     config = _load_config(target)
     try:
-        code = run_task(target, config, task.id, force=force)
+        code = run_task(target, config, task.id, force=force, fresh_session=fresh_session)
     except RunnerError as e:
         raise _fail(str(e)) from None
     color = "green" if code == 0 else "red"
@@ -1131,10 +1145,45 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
 
 
+@task_app.command("stop")
+def task_stop(
+    task_id: str,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """End a task's live run without ending the task.
+
+    For a hung session: SIGTERM (then SIGKILL) the runner's process group,
+    close the run record, and leave the task's status, queue position and
+    worktree exactly as they were — `quorum task run <id> --detach` resumes
+    it, `--fresh-session` too if the session itself is damaged. Use
+    `quorum task cancel` when you mean to end the *task*.
+    """
+    from .runner import RunnerError, stop_run
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    _actor_guard(target, "task.stop", target=task.short_id, target_status=task.status)
+    try:
+        result = stop_run(target, task.id)
+    except RunnerError as e:
+        raise _fail(str(e)) from None
+    typer.secho(
+        f"task {task.short_id}: run stopped ({result['signal']} to pid {result['pid']}) — "
+        f"status is still {task.status!r}",
+        fg="green",
+    )
+    if result["run_recorded"]:
+        typer.echo("the interrupted run was recorded as stopped")
+    typer.echo(f"resume it with `quorum task run {task.short_id} --detach`")
+
+
 @task_app.command("cancel")
 def task_cancel(
     task_id: str,
-    kill: bool = typer.Option(False, "--kill", help="Also SIGTERM a live runner."),
+    kill: bool = typer.Option(
+        False, "--kill",
+        help="Also SIGTERM a live runner (`task stop` ends a run without ending the task).",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     home: Path | None = _HOME_OPT,
 ) -> None:
