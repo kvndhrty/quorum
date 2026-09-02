@@ -15,6 +15,11 @@ calls `quorum task report --status <word>` and quorum records whatever word
 it chose. Only the TERMINAL_STATUSES set carries meaning inside quorum — the
 manager stops attending to a task once it reaches one of them.
 
+`pr_state` sits beside it and is never merged into it: `done` is the
+harness's word about itself, `merged` is the forge's word about the pull
+request, and `record_pr_state` — the single writer, called only from the
+manager tick's CI probe — keeps them separate on purpose.
+
 Guidance flows the other way through the ordinary message bus: each task
 owns the inbox `task-<id>`, and the runner injects claimed messages into the
 next run's prompt.
@@ -44,6 +49,14 @@ BOARD_TOPIC = "tasks"
 # "blocked" parks it for a human. Every other status string is free-form and
 # merely displayed.
 TERMINAL_STATUSES = {"done", "blocked", "cancelled"}
+
+# The vocabulary of `Task.pr_state`: what the *forge* says about the pull
+# request a task's branch belongs to, as opposed to what the harness said
+# about itself. Deliberately forge-neutral (`ci.PR_STATE_WORDS` maps GitHub's
+# OPEN/MERGED/CLOSED into it, and #51's GitLab backend will map its own) and
+# deliberately closed — a state we do not recognize is never written, because
+# nothing re-probes a task once its worktree is gone.
+PR_STATES = frozenset({"open", "merged", "closed"})
 
 
 class TaskRun(BaseModel):
@@ -94,6 +107,17 @@ class Task(BaseModel):
     # prompt is told to relaunch it forever and never call a long run count
     # stuck. See docs/architecture.md ("Perpetual tasks").
     perpetual: bool = False
+    # What the forge last said about this task's pull request: one of
+    # `PR_STATES`, and when it was observed. Quorum's **one** materialized
+    # probe result — written only from the manager tick's digest build
+    # (`record_pr_state`), never by a view, so `quorum status` / `task list`
+    # / the TUI / the web dashboard can badge a merged task while staying
+    # pure file readers. It is an observation and never a status: `done` is
+    # the harness's word, merged is the forge's, and quorum never turns one
+    # into the other. None means nothing was ever observed — no gh, no PR,
+    # `[ci]` off — and reads as "no information", never as "not merged".
+    pr_state: str | None = None
+    pr_state_at: str | None = None
     runs: list[TaskRun] = Field(default_factory=list)
     created_at: str
     updated_at: str
@@ -255,6 +279,55 @@ class TaskStore:
         task = Task.model_validate(data)
         fsio.atomic_write_json(task_json_path(self.home, task.id), task.model_dump())
         return task
+
+
+def record_pr_state(home: Path, task: Task, state: str | None, now: Any = None) -> bool:
+    """Materialize an observed PR state onto `tasks/<id>/task.json`.
+
+    The single writer of `pr_state` / `pr_state_at`, called from exactly one
+    place: the CI probe inside `manager.build_digest`. See
+    docs/architecture.md ("The merged observation") for why this one probe
+    result is allowed to reach disk when nothing else is.
+
+    Returns True when the file changed. Fail-soft in the shape of everything
+    on the probe path — an unreadable or unwritable task.json is a lost
+    observation, re-made next tick, never a failed digest:
+
+    - an unknown state (including `ci`'s "unknown") writes nothing, so a
+      shape we did not understand can never badge a task as delivered;
+    - an unchanged state writes nothing, so a quiet home is not rewritten
+      every tick;
+    - `updated_at` is deliberately left alone. It means "someone acted on
+      this task", and the digest's own recently-finished window is measured
+      from it — a probe that touched it would pin every merged task in that
+      section forever.
+
+    The record is re-read from disk rather than dumped from `task` for the
+    same reason: a live run may have reported a new status since this Task
+    was loaded, and an observation must never roll that back.
+    """
+    if state not in PR_STATES:
+        return False
+    if task.pr_state == state:
+        return False
+    path = task_json_path(home, task.id)
+    try:
+        data = fsio.read_json(path)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    data["pr_state"] = state
+    data["pr_state_at"] = fsio.iso(now or fsio.utc_now())
+    try:
+        fsio.atomic_write_json(path, data)
+    except OSError:
+        return False
+    # Keep the caller's in-memory record true, so the digest being built
+    # right now agrees with the file it just wrote.
+    task.pr_state = state
+    task.pr_state_at = data["pr_state_at"]
+    return True
 
 
 def short_handle(task_id: str) -> str:

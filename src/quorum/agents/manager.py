@@ -29,11 +29,16 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import actor, ci, fsio, herdr, notes, tasks, usage
-from ..actor import journal_path
+from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
 from ..agent import Agent
 from ..config import TasksConfig, load_config_or_default
 from ..runner import guidance_note
-from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
+from .harness_run import (
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    agent_cap,
+    run_agent_harness,
+    self_observations,
+)
 
 __all__ = [
     "DEFAULT_RUN_TIMEOUT_SECONDS",
@@ -284,9 +289,12 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
     """What a task has spent, and whether any run went over budget.
 
     Absent entirely when the harness reported nothing — silence is unknown
-    spend, never zero. The BUDGET-EXCEEDED line is an *observation* of the
-    same class as `possible-loop`: quorum did not stop the run and will not,
-    the manager decides what an expensive task deserves.
+    spend, never zero. A BUDGET-EXCEEDED line on an *earlier* run is an
+    observation of the same class as `possible-loop`. On the *last* run it
+    also names the consequence: the runner's budget gate refuses the next
+    run (`runner.budget_blockers`), so the manager reads why its relaunch
+    failed and what it can do instead — the gate rate-limits, it never
+    decides for it.
     """
     lines = []
     spent = usage.total(r.usage for r in task.runs)
@@ -294,10 +302,14 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
         lines.append(
             f"  usage: {usage.describe(spent)} over {int(spent['runs'])} reporting run(s)"
         )
+    last = f"run {len(task.runs)}:"
     for note in usage.run_overages(
         task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
     ):
-        lines.append(f"  BUDGET-EXCEEDED: {note} — an observation, not a rail")
+        if note.startswith(last):
+            lines.append(f"  BUDGET-EXCEEDED: {note} (next run gated; --force to override)")
+        else:
+            lines.append(f"  BUDGET-EXCEEDED: {note} (an earlier run; a later one cleared the gate)")
     return lines
 
 
@@ -368,6 +380,7 @@ def build_digest(
     now: datetime,
     directives: list[str],
     tasks_config: TasksConfig | None = None,
+    cap: int = DEFAULT_MAX_ACTIONS_PER_RUN,
 ) -> str:
     """The manager's whole world, compiled from files. Greppable: task lines
     look like `- [status] shortid ...` so both models and tests can parse
@@ -386,12 +399,12 @@ def build_digest(
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
-    # What supervision itself costs, read from the manager's own usage
-    # ledger: the one spend nothing else in the digest accounts for. Absent
-    # when the manager's harness reports nothing, like every other figure.
-    self_spend = usage.describe_agent(usage.agent_usage(home, "manager"))
-    if self_spend:
-        lines += [f"Your own runs have cost: {self_spend}", ""]
+    # What supervision itself costs and how its own recent ticks went, read
+    # from the manager's own usage ledger: the one part of the situation
+    # nothing else in the digest accounts for. Spend is absent when the
+    # harness reports nothing, like every other figure; the outcome line
+    # survives that, because a run that times out reports nothing at all.
+    lines += self_observations(home, "manager", cap) + [""]
     # The notebook comes first, and under its own caps (notes.py): it is the
     # only part of the digest a *previous* you wrote deliberately for this
     # run, and it must not compete for room with per-task output that grows
@@ -409,7 +422,15 @@ def build_digest(
             # finished work always gets probed.
             return None
         ci_budget -= 1
-        return ci.pr_state(home, task)
+        state = ci.pr_state(home, task)
+        if state is not None:
+            # The one place a probe result is written to disk: what the forge
+            # says about the PR outlives the probe, so views that never make
+            # a network call can still badge a merged task. An observation,
+            # never a status change — see tasks.record_pr_state and
+            # docs/architecture.md ("The merged observation").
+            tasks.record_pr_state(home, task, state["state"], now=now)
+        return state
 
     # A perpetual task is never supposed to finish, so one that reported a
     # terminal status is either the user ending it (cancelled — fine) or a
@@ -548,7 +569,13 @@ def build_digest(
             # loudly, and leave the judgement to the prompt.
             pr = ci_state(t)
             if pr:
-                bad = "CI-FAILING " if (pr["summary"] == "failing" or pr["conflict"]) else ""
+                # A merged PR is delivered, full stop: its checks are
+                # historical and its "conflict" is meaningless. Suppressed
+                # explicitly rather than by construction, so a forge that
+                # keeps reporting a stale red rollup after the merge cannot
+                # send the manager to relaunch finished work.
+                red = pr["summary"] == "failing" or pr["conflict"]
+                bad = "CI-FAILING " if red and not pr["merged"] else ""
                 lines.append(f"  ci: {bad}{ci.describe(pr)}")
             lines.extend(_usage_lines(t, budget))
         lines.append("")
@@ -604,6 +631,7 @@ class Manager(Agent):
                 self.ctx.now(),
                 directives,
                 self.ctx.config.tasks if self.ctx.config else None,
+                cap=agent_cap(self.ctx),
             )
             prompt = self.ctx.prompt("manager", digest=digest)
             run_agent_harness(self.ctx, prompt)

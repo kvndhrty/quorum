@@ -75,6 +75,13 @@ so the record stays true.
   order is chronological) and maildir-style inboxes (`new/` → `cur/` claimed by
   `os.rename`, so exactly one claimant wins). Task guidance (`task-<id>` inboxes) and
   the supervisor control channel both ride this; no new transports.
+  On-demand archival is the janitor's per-message path exposed
+  (`archive_board_message`), with `ack_board_message` (one message, resolved
+  from a full id / unique prefix / `short_id` suffix — `TaskStore.resolve`'s
+  grammar, raising the same `KeyError`/`ValueError`), `archive_topic` and
+  `clear_inbox` on top. Acking is **archival, never a flag**: that is what
+  keeps the board free of read-state while still letting a handled
+  escalation leave `views.attention_summary`'s seven-day window.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
   `report()` (the harness's return channel), path helpers shared by runner/manager/
   views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`
@@ -112,6 +119,36 @@ so the record stays true.
   inside the wheel (hatch force-include → `quorum/integrations`) so
   `quorum integration list|install` works from a package install;
   `cli._integrations_root()` falls back to the repo dir in a checkout.
+- `prune.py` — on-demand cleanup, and the same "archive, never delete" rule
+  the bus follows: `quorum task prune` **moves** `tasks/<id>/` to
+  `tasks/.archive/<id>/` (dot-prefixed, so `TaskStore.list` and therefore
+  every view/digest/doctor scan skips it with no code change; restoring is
+  one `mv`). Total readers — `select` (pure, over an already-loaded task
+  list; skips perpetual tasks, ages off `updated_at`), `refusal`,
+  `dependents_first` (pure batch order), `plan`, `worktree_plan` (the
+  `--dry-run` preview of the git half) — plus `remove_task_worktree` and
+  `archive_task`, kept separable because #57 will re-use the selection. The
+  refusals are substrate rails of the runner's class, not policy: live
+  runner, attached task, a task something else still `depends_on` (a
+  dependent pruned in the same pass doesn't count), and stranded work in the
+  worktree (`workdir_git_state`) — only the last is `--force`-able. The
+  archive loop re-derives `refusal` per task right before archiving, so a
+  runner that appeared during the confirm is caught and a task skipped
+  mid-sweep leaves the batch (its upstream is refused again instead of
+  dangling) — which is what `dependents_first` ordering is for.
+  `--worktrees` treats the two git objects asymmetrically because git does:
+  a worktree it refuses to remove leaves the task unarchived, an unmerged
+  branch is kept with a note and the task archived anyway. **`--force` never
+  reaches `git worktree remove`** — a tidy-up flag must not destroy
+  uncommitted files; its two meanings are waiving the stranded-work refusal
+  and upgrading `branch -d` to `-D` (which does lose commits, so the confirm
+  prompt says so). One `_actor_guard` entry per *command*, not per task, so
+  a sweep can't burn an agent's action cap half-way through. The board/inbox
+  half lives in `messages.py` (`archive_board_message` → `ack_board_message`,
+  `archive_topic`, `clear_inbox`), behind `quorum board ack`, `board clear`
+  and `task inbox --clear`. `board ack --all <topic>` and `board clear
+  <topic>` share one CLI helper (`_clear_topic`) so the alias cannot drift
+  from what it aliases.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
@@ -215,9 +252,13 @@ so the record stays true.
   through `ConfirmScreen`) — all four target the *highlighted* row while the task
   table has focus (`enter` opens a transcript, it does not arm the write keys),
   falling back to the open task, and all four go through `_write`, so an unwritable
-  home notifies instead of taking the dashboard down. **Web**: nudge, board posts,
+  home notifies instead of taking the dashboard down. `a` is the fifth,
+  aimed at the banner rather than a task: `AttentionScreen` is a picker (the
+  banner is a count and the board pane is a log, so neither can be pointed
+  at) that dismisses with a message id, and the app acks it through `_write`. **Web**: nudge, board posts,
   project edits, and agent create (via `config.create_agent`) /
-  pause / resume / run-now / reload.
+  pause / resume / run-now / reload, plus an Ack button per live escalation
+  (`POST /api/board/{topic}/ack/{message_id}`) — the same shared bus call.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
@@ -262,6 +303,31 @@ so the record stays true.
   `task nudge` pokes the pane that guidance is waiting — the payload stays in
   the maildir inbox; herdr is a doorbell, never a second transport). Optional
   `[herdr]` table (`socket` override, `enabled`).
+- `notify.py` — the `[notify]` hook: the one board *consumer* quorum ships
+  for a person. `drain(home, cfg, bus)` reads each listed topic past a
+  private per-topic cursor in `state/notify.json` (the on-disk filename,
+  via `MessageBus.entries_after_cursor` — never `Message.filename()`,
+  which is only what `post()` happened to write) and runs the argv
+  via `MessageBus.entries_after_cursor`'s `limit`, and armed at the tail
+  through `topic_tail` so nothing is parsed to be discarded) and runs the
+  argv template once per message via `deliver` (`build_argv` substitutes
+  `{text}/{from}/{topic}/{type}/{id}` per element, appending the text
+  when the template has no `{text}` — the harness `{prompt}` convention).
+  Supervisor job `_notify` on the `_control` cadence plus once at
+  startup — that startup call runs *before* `scheduler.start()` and the
+  janitor, and `drain` holds a module lock, so the two callers can never
+  interleave over one cursor. The cursor is advanced and persisted
+  **before** each delivery: **at-most-once** on purpose, a lost
+  notification being cheaper than one that repeats every 15s because the
+  cursor write is what failed. **Fail-soft in herdr's mold**: missing
+  binary / nonzero exit / hang past `timeout_seconds` → one
+  `supervisor.log` line, `drain` never raises (an unwritable cursor is
+  logged; an unreadable one re-initialized). First drain arms the cursor
+  at the tail *without* delivering (enabling must not replay history);
+  `MAX_PER_TICK` bounds one tick. Fires on topic membership, never on
+  content — no policy here. `quorum notify test` is the loud path (exit
+  1 with the reason, touches neither board nor cursor); doctor's
+  `check_notify` is static (`–` absent, `✗` argv[0] not on PATH).
 - `ci.py` — the *only* module that shells out to `gh`, and the second fail-soft
   probe (herdr's mold, not sandbox.py's; both read config through
   `try_load_config`, so an unreadable config.toml disables them):
@@ -270,11 +336,21 @@ so the record stays true.
   remote, PR from the checked-out branch) and returns state / check counts /
   failing check names / merge conflict — or `None` for every disappointment
   (disabled, no gh, no auth, no remote, no PR, timeout, garbage), so a digest
-  always builds and a missing `ci:` line means nothing. Only `build_digest`
+  always builds and a missing `ci:` line means nothing. The PR's own state is
+  normalized (`normalize_state` → `tasks.PR_STATES`: `open|merged|closed`,
+  anything else `unknown`) so a second forge backend fills the same field.
+  Only `build_digest`
   calls it (a `ci:` line per task, `CI-FAILING` on a finished task over red
-  checks, bounded by `manager.CI_MAX_PROBES` since digest build blocks the
-  tick), which is what keeps `views.py` a pure file reader — do not
-  materialize probe results to disk to feed a view without revisiting that.
+  checks — suppressed explicitly for a merged PR, bounded by
+  `manager.CI_MAX_PROBES` since digest build blocks the
+  tick), which is what keeps `views.py` a pure file reader. Exactly **one**
+  probe result is materialized: that closure calls `tasks.record_pr_state`
+  to write `pr_state`/`pr_state_at` onto `task.json` (one writer, one call
+  site, closed vocabulary, never a status, `updated_at` untouched, fail-soft)
+  so views badge `✔` merged without a network call — the rule this used to
+  state outright ("never materialize") was revised for that case in #57, and
+  the five properties fencing it are in `docs/architecture.md` ("The merged
+  observation"). A second exception must earn all five again.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
   `timeout_seconds`). The second (and only other) entry point is
