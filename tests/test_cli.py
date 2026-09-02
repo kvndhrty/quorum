@@ -136,6 +136,119 @@ def test_task_add_requires_known_project_and_harness(home: Path):
     assert r.exit_code == 1 and "no project" in r.output
 
 
+# A prompt that would fight the shell: quotes, backticks, blank lines, and a
+# trailing newline the way `gh issue view ... | ...` delivers one.
+ISSUE_PROMPT = (
+    "## Problem\n\n`quorum task add` takes \"the prompt\" as an argv string.\n\n"
+    "## Proposal\n\n- read it from stdin\n"
+)
+
+
+def stored_prompt(home: Path) -> str:
+    from quorum.tasks import TaskStore
+
+    tasks = TaskStore(home).list()
+    assert len(tasks) == 1
+    return tasks[0].prompt
+
+
+def test_task_add_reads_prompt_from_stdin(home: Path, tmp_path: Path):
+    """`-` pipes the prompt in, byte-for-byte — no stripping, no newline
+    translation: what the harness reads must be what was piped."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(
+        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_reads_prompt_from_file(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "issue.md"
+    body.write_bytes(ISSUE_PROMPT.encode("utf-8"))
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_prompt_file_keeps_crlf(home: Path, tmp_path: Path):
+    """read_bytes, not read_text: universal newlines would rewrite the file."""
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "crlf.md"
+    body.write_bytes(b"line one\r\nline two\r\n")
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == "line one\r\nline two\r\n"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["do it", "--prompt-file", "PROMPT"],
+        ["-", "--prompt-file", "PROMPT"],
+    ],
+)
+def test_task_add_refuses_two_prompt_sources(home: Path, tmp_path: Path, args: list[str]):
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "issue.md"
+    body.write_text(ISSUE_PROMPT)
+    args = [str(body) if a == "PROMPT" else a for a in args]
+    r = runner.invoke(
+        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 1
+    assert "exactly one way" in r.output
+    from quorum.tasks import TaskStore
+
+    assert TaskStore(home).list() == []
+
+
+def test_task_add_without_a_prompt_says_how(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "--prompt-file" in r.output
+
+
+@pytest.mark.parametrize("source", ["stdin", "file"])
+def test_task_add_refuses_empty_input(home: Path, tmp_path: Path, source: str):
+    """A whitespace-only prompt would queue, launch, and waste a whole run."""
+    slug = setup_task_env(home, tmp_path)
+    args = ["-"]
+    if source == "file":
+        blank = tmp_path / "blank.md"
+        blank.write_text("\n  \n")
+        args = ["--prompt-file", str(blank)]
+    r = runner.invoke(
+        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
+        input="\n  \n",
+    )
+    assert r.exit_code == 1
+    assert "empty prompt" in r.output
+    from quorum.tasks import TaskStore
+
+    assert TaskStore(home).list() == []
+
+
+def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    missing = tmp_path / "nope.md"
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(missing), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 1 and "cannot read" in r.output
+
+
 def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
 
@@ -311,6 +424,29 @@ def test_non_manager_actor_journals_to_its_own_path_and_hits_cap(
     r = runner.invoke(app, ["task", "add", slug, "one too many", "--harness", "fake", "--home", str(home)])
     assert r.exit_code == 1
     assert "alpha action cap (2) reached" in r.output
+
+
+def test_a_torn_journal_line_does_not_break_the_cap_count(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """The journal is read back to count this run's actions; a line that is
+    valid JSON but not an object must be skipped, not crash every action."""
+    from quorum import fsio
+    from quorum.actor import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    journal = journal_path(home, "alpha")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text('"not even a dict"\n')
+
+    monkeypatch.setenv("QUORUM_ACTOR", "alpha")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TORNRUN")
+    monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
+
+    r = runner.invoke(app, ["task", "add", slug, "after the torn line", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    entries = [e for e in fsio.read_jsonl(journal) if isinstance(e, dict)]
+    assert [e["action"] for e in entries] == ["task.add"]
 
 
 def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkeypatch):
@@ -845,6 +981,39 @@ def test_task_run_force_overrides_the_dependency_refusal(home: Path, tmp_path: P
     from quorum.tasks import TaskStore
 
     assert len(TaskStore(home).resolve(second).runs) == 1
+def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, monkeypatch):
+    """The budget gate as the manager meets it: `task run` (and `--detach`,
+    in the parent) refuse a task whose last run went over, the views say so,
+    and `--force` is the override."""
+    slug = setup_task_env(home, tmp_path)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+
+    from quorum.tasks import TaskStore
+
+    for extra in ([], ["--detach"]):
+        r = runner.invoke(app, ["task", "run", short, *extra, "--home", str(home)])
+        assert r.exit_code == 1, r.output
+        assert "exceeded its budget" in r.output and "next run gated" in r.output
+        assert "--force" in r.output
+        assert len(TaskStore(home).resolve(short).runs) == 1
+
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "$! GATED" in r.output
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["budget_gated"] is True
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "gated:    the last run exceeded its budget" in r.output
+
+    r = runner.invoke(app, ["task", "run", short, "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert len(TaskStore(home).resolve(short).runs) == 2
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 
@@ -874,6 +1043,46 @@ def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path)
     row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
     assert row["perpetual"] is False
     assert "∞" not in runner.invoke(app, ["task", "list", "--home", str(home)]).output
+
+
+# -- the merged observation (#57) --------------------------------------------
+
+
+def test_a_merged_or_closed_pr_is_badged_everywhere(home: Path, tmp_path: Path):
+    """`done ✔` is delivered; `done ⊘` is a PR a human closed unmerged. Both
+    are read straight off task.json — the manager tick recorded them, this
+    command never probes a forge."""
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    store = TaskStore(home)
+    shipped = store.add(slug, "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged", pr_state_at="2026-01-01T00:00:00Z")
+    dropped = store.add(slug, "abandoned", "fake", status="done")
+    store.update(dropped.id, pr_state="closed", pr_state_at="2026-01-01T00:00:00Z")
+    store.add(slug, "never observed", "fake", status="done")
+
+    rows = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    assert [r["pr_state"] for r in rows] == ["merged", "closed", None]
+
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "done ✔" in listing and "done ⊘" in listing
+    assert "✔" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "✔" in runner.invoke(app, ["status", "--legend"]).output
+    shown = runner.invoke(app, ["task", "show", shipped.short_id, "--home", str(home)]).output
+    assert "pr state: merged (observed 2026-01-01T00:00:00Z)" in shown
+
+
+def test_a_task_with_no_observed_pr_state_is_not_badged(home: Path, tmp_path: Path):
+    """Absence means "never observed" — no gh, no PR — never "not merged"."""
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "✔" not in listing and "⊘" not in listing
+    short = json.loads(
+        runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output
+    )[0]["id_short"]
+    assert "pr state" not in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
 
 
 # -- one load-config fallback (#34) ------------------------------------------

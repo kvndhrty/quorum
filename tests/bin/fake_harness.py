@@ -23,8 +23,9 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     in prompts/manager.md: launch every queued task whose
                     digest line has no `waiting-on=`, and print a SKIP line
                     for the ones that have
-    manager_flood   echo + nudge the first task repeatedly until the CLI's
-                    per-run action cap refuses; print the refusal
+    manager_flood   echo + nudge the first task repeatedly, past the point
+                    where the CLI's per-run action cap starts refusing;
+                    print every refusal
     manager_remember  echo + write one standing note into the manager's
                     notebook (FAKE_HARNESS_NOTE), which the *next* tick's
                     digest must render back
@@ -214,11 +215,14 @@ def main() -> int:
             print("no task found to flood", file=sys.stderr)
             return 6
         target = m.group(1)
-        for i in range(10):
+        # Keeps going after the first refusal, the way a real harness that
+        # has not read the error would: the cap must stay a rate limit, and
+        # the cap.hit journal entry must be written once for the run, not
+        # once per refused command.
+        for i in range(6):
             r = quorum("task", "nudge", target, f"redundant nudge {i}")
             if r.returncode != 0:
                 print(f"REFUSED| {r.stderr.strip().splitlines()[0] if r.stderr.strip() else 'refused'}")
-                break
 
     return 0
 

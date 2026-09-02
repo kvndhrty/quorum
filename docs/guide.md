@@ -113,11 +113,16 @@ read it as relative spend, never as an invoice.
 
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
-That is all it does today — quorum will not kill, pause, or refuse a run
-over its budget. The mark reaches the manager, whose prompt tells it to ask
-whether the spend is buying progress and to nudge, decompose, or escalate if
-it is not. If you want a hard stop, that is your judgement to make from the
-flag.
+The budget also gates the **next** run: while a task's *last* run is over
+budget, `quorum task run` refuses it (`$! GATED` in `task list`, a `gated:`
+line in `task show`, and the TUI's `s` key says so) until you run it with
+`--force` or a run comes in under budget — a run that reports no usage
+counts as under, since silence is not spend. Quorum never kills a run in
+progress: a run past its budget finishes, and only the relaunch is held.
+The digest tells the manager the gate is on, and its prompt tells it not to
+reach for `--force` by reflex but to sharpen the nudge, split the task, or
+escalate to you first. With no budget set (the default) nothing is ever
+gated.
 
 ## Harnesses
 
@@ -233,7 +238,8 @@ defaults); every `[harness.*]` table — argv[0] on PATH, a template that can
 actually carry a prompt, `{session}` wherever a `resume` template promises
 one, and argv that speaks stream-json without `inject` set; `[tasks].default_harness`;
 git and each registered project directory; `gh` when `[ci]` is on, the herdr
-socket when `[herdr]` is, and nono-py when `[sandbox]` asks for it; each
+socket when `[herdr]` is, the `[notify]` command when there is one (`–` with
+a pointer when there is not), and nono-py when `[sandbox]` asks for it; each
 `prompts/` file against the packaged default (`default` / an unedited older
 seed `quorum init` would upgrade / your own edit over a default that has
 since moved); and the state earlier runs left behind — a supervisor lock
@@ -263,6 +269,20 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 quorum task add my-api "migrate the test suite to pytest" --harness codex
 quorum up                      # the manager launches queued tasks
 ```
+
+A prompt does not have to survive shell quoting. `-` reads it from stdin and
+`--prompt-file` reads it from a file, both verbatim — so queuing a GitHub
+issue is a one-liner, and quorum never has to learn about `gh`:
+
+```bash
+gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' \
+  | quorum task add my-api -
+
+quorum task add my-api --prompt-file ~/notes/migration-plan.md
+```
+
+Pass the prompt exactly one way — an argument, `-`, or `--prompt-file`; two
+at once is an error, and so is empty input.
 
 You can also drive runs by hand — no supervisor required:
 
@@ -491,19 +511,26 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
-- a `ci:` line for any task whose branch has a pull request — check counts,
-  the names of the failing checks, and `MERGE-CONFLICT` when the branch no
-  longer merges. A task that reported `done` over red checks is marked
+- a `ci:` line for any task whose branch has a pull request — its state
+  (`state=open` / `merged` / `closed`), check counts, the names of the
+  failing checks, and `MERGE-CONFLICT` when the branch no longer merges. A
+  task that reported `done` over red checks is marked
   `CI-FAILING`, the same way work left uncommitted is marked
-  `STRANDED-WORK`: pushed is not the same as working. This needs `gh` on
+  `STRANDED-WORK`: pushed is not the same as working. A **merged** task never
+  carries that mark — merged is delivered, and the default prompt reads it as
+  "needs nothing from you". This needs `gh` on
   PATH and authenticated; without it (or without a PR yet) the line is
   simply absent, and nothing else changes. Turn the probe off with
   `enabled = false` under `[ci]` in config.toml — it costs one `gh` call per
   task per tick (capped at 12 probed tasks and 10s each, so a hung network
-  delays a tick by a bounded couple of minutes at worst, never forever);
+  delays a tick by a bounded couple of minutes at worst, never forever).
+  Whatever state the probe sees is also written to the task's record, which
+  is what puts the `✔` on the row — see [below](#merged-pull-requests);
 - what each task has spent, when its harness reports usage, and a
-  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
-  observation, never a stop;
+  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — with
+  `(next run gated; --force to override)` when it was the last run, since
+  `task run` will refuse that task until a cheaper run clears it
+  (*What runs cost*, under [Setup](#setup) above); never a mid-run stop;
 - what the manager's **own** runs have cost, when its harness reports usage:
   supervision is not free, and in a busy home it is the steadiest recurring
   bill. The same figure shows up next to the agent in `quorum status`, the
@@ -547,7 +574,18 @@ as a user turn instead of waiting.
 
 Two things bound a bad run, neither of which second-guesses a decision: a
 per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
-the journal.
+the journal. The cap is not silent: when a run reaches it, the refusal is
+recorded in the journal as `cap.hit`, so the *next* run sees that the last
+one ran out of budget (and the default prompt tells it to escalate to you
+rather than try a third time).
+
+The manager also sees a few lines about *itself* at the top of every digest
+— what its recent runs have cost, how its last five runs ended
+(`ok 2m10s · TIMEOUT 15m00s · ...`), and the action budget for this run.
+They are observations, exactly like the ones it gets about tasks: nothing
+pauses, throttles or changes anything, and the prompt decides what to do
+about a run of timeouts. A prompt agent gets the same lines wherever its
+template writes `{notes}`.
 
 The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
@@ -573,12 +611,16 @@ nothing for you to do, so it does not add to the banner:
 ```
 $ quorum status
 supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
-⚠ 1 on #attention in the last 7d — `quorum board read attention`
+⚠ 1 on #attention in the last 7d — `quorum board read attention`, then
+`quorum board ack <id>` for each one you have handled
 
 $ quorum board read attention
-[2026-08-30 23:05:12] attention <supervisor> agent.failing: agent manager
-has failed 5 consecutive ticks and is not auto-paused (auto_pause = false),
-so it keeps retrying — last error: manager harness run 01K2… exited 1
+[2026-08-30 23:05:12] attention 7c1af2 <supervisor> agent.failing: agent
+manager has failed 5 consecutive ticks and is not auto-paused (auto_pause =
+false), so it keeps retrying — last error: manager harness run 01K2… exited 1
+
+$ quorum board ack 7c1af2
+acked 7c1af2 on #attention — archived, not deleted
 ```
 
 ### The notebook
@@ -615,7 +657,8 @@ several, then `forget` the rest.
 
 The same file exists for every agent (`quorum manager remember --agent
 <name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
-own notebook wherever its template writes `{notes}`. Both dashboards show an
+own notebook — and the same self-observation lines above it — wherever its
+template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it.
 
 ## Prompt customization
@@ -683,6 +726,71 @@ fluid: select a task, press `n`, type, enter. The web dashboard has the same
 nudge box on each task. The manager takes direction the same way, through
 its own inbox — `quorum manager tell "prioritise the release tasks"`, or `m`
 in the TUI.
+
+## Cleaning up
+
+Quorum accumulates on purpose — a finished task keeps its record, its
+worktree, and its `quorum/<short-id>` branch — but a long-lived home turns
+into a wall of `done` rows. Three commands tidy it, and **none of them
+delete a record**: a pruned task moves to `~/.quorum/tasks/.archive/<id>/`,
+and cleared messages join the same `messages/archive/YYYY-MM.jsonl.gz` the
+supervisor's janitor writes. The one thing that *is* destroyed, and only
+when you ask for it, is a branch: `--worktrees --force` runs `git branch -D`,
+and an unmerged branch's commits go with it.
+
+```bash
+quorum task prune --dry-run              # what would go (always start here)
+quorum task prune                        # archive done/blocked/cancelled tasks
+quorum task prune --older-than 7d        # ...only those untouched for a week
+quorum task prune --status done          # ...only the ones that finished well
+quorum task prune --worktrees            # also remove worktrees + merged branches
+quorum task prune --worktrees --dry-run  # ...naming each worktree and branch first
+```
+
+Getting a task back is one move in the other direction:
+
+```bash
+mv ~/.quorum/tasks/.archive/01J5R3…  ~/.quorum/tasks/
+```
+
+**What prune refuses.** It skips a task (and says why) when a runner still
+holds its lock, when it's attached to a live session, when another task
+still lists it under `--after`, and — the one that catches people — when its
+worktree holds uncommitted or unpushed work. That last one is the same
+stranded-work probe `quorum status` shows, and archiving the record would be
+the only thing that hid it. Commit and push, or pass `--force`.
+
+**Worktrees and branches.** `--worktrees` runs `git worktree remove` and then
+deletes the task branch *only if git agrees it is merged*. An unmerged branch
+is kept, with a note telling you the `git branch -D` to run.
+
+`--force` never forces the worktree removal — a worktree holding uncommitted
+or untracked files is left exactly as it is, and its task stays unarchived,
+because the record is what would have told you the work was there. Commit
+it, or `rm -rf` the worktree yourself if you truly meant to throw it away.
+What `--force` *does* do to git is run `git branch -D` instead of `-d`, so
+**an unmerged branch's commits are lost**. That is the one destructive thing
+in this section; `--worktrees --dry-run` names every worktree and branch
+first.
+
+**The board.** Escalations sit in the `attention` banner for seven days
+because the board has no read-state. When you've dealt with them:
+
+```bash
+quorum board ack 7c1af2                  # just this one — see Dashboards
+quorum board clear attention             # archive the topic, empty the banner
+quorum board ack --all attention         # the same sweep, other name
+quorum board clear tasks --before 30d    # or just the old part of one
+```
+
+And guidance queued for a task you've changed your mind about:
+
+```bash
+quorum task inbox a3f2k9 --clear         # archive what's waiting, undelivered
+```
+
+Both take `--dry-run`, and `--clear` only touches unclaimed mail — a message
+some run is already holding is left alone.
 
 ## Adopting a live session
 
@@ -760,7 +868,27 @@ same call the CLI makes.
 Escalations are surfaced everywhere: recent posts on the `attention` topic
 (the manager's ask-a-human channel) show up as a warning line in `status`,
 in the TUI banner, and as a badge in the web header, so a manager asking
-for you is never silent.
+for you is never silent. The banner is a seven-day window with no
+read-state, so an escalation you have already handled would otherwise sit
+there for the rest of the week. Say you have seen it:
+
+```bash
+quorum board read attention              # each line starts with its short id
+quorum board ack 7c1af2                  # that one leaves every banner
+quorum board ack --all attention         # all of them (= board clear)
+```
+
+Acking **archives** rather than marks: the message moves into
+`messages/archive/YYYY-MM.jsonl.gz` with the `created_at` it was posted
+with, so the history still says what was escalated when, and the board goes
+on carrying no read-state at all. Ids resolve like task ids — a full id, a
+unique prefix, or the short suffix `board read` prints — and an unknown or
+ambiguous one is refused rather than guessed at. `--topic <name>` narrows the
+search when two boards hand out the same short id. The same ack is a keystroke
+in the TUI (`a`) and a button in the browser; `--all` is the sledgehammer
+described under [Cleaning up](#cleaning-up) — there the argument *is* the
+topic, so `--all` and `--topic` together are refused rather than one of them
+quietly ignored.
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something
@@ -784,13 +912,17 @@ for you is never silent.
   | `m` | tell the manager — a directive for its next run, no task needed |
   | `s` | start a detached run of the highlighted task |
   | `c` | cancel the highlighted task (asks first) |
+  | `a` | open the `#attention` list and ack the highlighted escalation |
   | `r` | refresh now |
   | `q` | quit |
 
   `n`, `s` and `c` act on the row you're pointing at, so you never have to
   open a task to act on it; while you're reading one task's transcript they
-  act on that task. If the home directory has gone unwritable, they say so
-  and carry on rather than taking the dashboard down with them.
+  act on that task. `a` is the same idea one level over: the banner is a
+  count and the board pane is a log, so it opens the `#attention` list —
+  where a line *can* be highlighted — and acks the one you pick (`esc`
+  closes it without acking). If the home directory has gone unwritable, they
+  all say so and carry on rather than taking the dashboard down with them.
 
   `s` refuses a task that is already running or attached to a live session;
   `c` only marks the task cancelled — to also stop a live runner, use
@@ -806,7 +938,9 @@ for you is never silent.
   ports. It nudges tasks like the TUI does, and where the TUI stops it goes
   on: pause/resume/run-now an agent, create a prompt agent with the "new
   agent…" form, post to the board, and click a project's deadline to edit or
-  clear it — all without leaving the browser. It has no run, cancel or
+  clear it — all without leaving the browser. Live escalations get their own
+  Attention panel at the top, one **Ack** button each, archiving that
+  message exactly as the CLI and the TUI do. It has no run, cancel or
   manager directive; those live in the TUI and the CLI.
 
   <picture>
@@ -819,6 +953,71 @@ for you is never silent.
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
 - `quorum manager notes` — what it is carrying forward between runs.
+
+## Getting notified
+
+Everything above shows you an escalation when you look. The `[notify]`
+table is how one reaches you when you are not looking: an argv template
+that quorum runs once for every new message on the listed board topics —
+by default just `attention`, the manager's ask-a-human channel (and where
+the supervisor reports an agent that keeps failing).
+
+```toml
+[notify]
+command = ["terminal-notifier", "-title", "quorum", "-message", "{text}"]
+topics = ["attention"]        # board topics that fire it (default: attention)
+timeout_seconds = 10
+```
+
+Some other shapes, one per line of `command`:
+
+```toml
+# a phone, via ntfy.sh (or your own ntfy server)
+command = ["ntfy", "publish", "--title", "quorum: {from}", "my-quorum-topic", "{text}"]
+
+# a Slack incoming webhook (curl, no shell — every element is one argv)
+command = ["curl", "-sf", "-X", "POST", "-H", "Content-Type: application/json",
+           "-d", "{\"text\": \"{from}: {text}\"}", "https://hooks.slack.com/services/…"]
+
+# anything at all: a script of yours gets the text as its last argument
+command = ["/Users/you/bin/notify-me"]
+```
+
+`{text}`, `{from}`, `{topic}`, `{type}` and `{id}` are substituted inside
+each argument, exactly like `{prompt}` in a harness template — there is no
+shell, so a message containing quotes, spaces or `$` is still one argument.
+A template with no `{text}` gets the text appended as the final argument.
+Substitution is plain text replacement, though, so if an argument is itself
+structured — the JSON body in the Slack line above — a message containing a
+`"` or a backslash makes it malformed; prefer a small script of your own
+(the last shape) when the payload has to be escaped.
+
+Prove the wiring before an escalation does:
+
+```bash
+quorum notify test "hello from quorum"
+```
+
+That runs the template once, right now, and exits 1 with the reason if it
+could not (binary not on PATH, nonzero exit, timeout). `quorum doctor`
+also reports the table — `✗` when the command is not on PATH.
+
+The supervisor delivers for real: every ~15 seconds (and once at startup,
+before anything else it does) it sends out whatever landed on the listed
+topics since the last one it delivered, oldest first, keeping its place in
+`state/notify.json`. So an escalation posted while `quorum up` was stopped
+still goes out when it comes back, and nothing is ever sent twice: it
+writes its place down *before* running your command, so the one thing it
+will do under a crash or a full disk is skip a notification, never repeat
+one. Turning the hook on starts from *now* — it does not replay old
+messages the banner already showed.
+
+Delivery fails soft, like every other integration: a command that is
+missing, exits nonzero or hangs past `timeout_seconds` is one line in
+`logs/supervisor.log`, and the next message is still delivered. What is
+worth escalating stays where it was — in `prompts/manager.md` — because the
+hook fires on the *topic*, not on what the message says; list `system` or
+`tasks` too if you want the firehose.
 
 ## Controlling agents at runtime
 
@@ -913,6 +1112,40 @@ retune: change the two-strike rule, have it comment on the PR instead of
 relaunching, restrict it to one project, or make it open follow-up tasks
 with `quorum task add`. It runs under the ordinary prompt-agent rails — every
 action journaled to `state/agents/babysitter/journal.jsonl`, capped per run.
+
+### Merged pull requests
+
+A task ends at the harness's word — `done` — but the work is delivered when
+its pull request merges. Those are different facts and quorum keeps them
+apart: it never changes a status because a PR merged.
+
+What it does do is *remember* what the forge said. When the manager's tick
+probes a task's PR (above), it records the state it saw on the task's own
+record as `pr_state` (`open` / `merged` / `closed`) and `pr_state_at`. Every
+read-only surface then shows it without touching the network:
+
+```
+  ✓ k3n8qz  quorum  done ✔  claude  shipped the prune command  https://…/pull/71
+  ✓ w1r0gp  quorum  done ⊘  claude  superseded by #74
+```
+
+`✔` merged, `⊘` closed without merging. `quorum task show <id>` prints the
+same thing with its timestamp (`pr state: merged (observed 2026-09-02T…Z)`),
+and `quorum status --legend` explains the glyphs.
+
+Two things to keep in mind:
+
+- **No badge means nothing was ever observed** — no PR yet, no `gh`, `[ci]`
+  off, or the supervisor was never up while the PR was open. It never means
+  "not merged".
+- **The observation is as old as its timestamp.** Only the manager tick
+  writes it; a stopped supervisor means a merge that happened this morning
+  is not on the row yet.
+
+For the manager, a merged task needs nothing at all. A task that reported
+`done` whose PR was *closed unmerged* is the interesting case: something a
+human decided, which quorum cannot interpret — the default prompt tells the
+manager to say so in one line and leave it alone.
 
 ## Sandboxing
 
@@ -1133,6 +1366,7 @@ def test_milestone(tmp_path):
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
   tasks/<id>/runner.lock            pid of a live run
+  tasks/.archive/<id>/              pruned tasks (moved here whole, never deleted)
   worktrees/<id>/                   the task's git worktree
   messages/board/<topic>/*.json     public board (task lifecycle on `tasks`)
   messages/inbox/<name>/new|cur/    guidance & control (tasks, supervisor)
@@ -1143,8 +1377,10 @@ def test_milestone(tmp_path):
   state/manager/journal.jsonl       the manager's auto-recorded actions
   state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
-  state/manager/usage.jsonl         what each manager run cost (agents get
-                                    the same file under state/agents/<name>/)
+  state/manager/usage.jsonl         what each manager run cost and how it
+                                    ended (agents get the same file under
+                                    state/agents/<name>/)
+  state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
 ```

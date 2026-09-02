@@ -60,6 +60,13 @@ class Message(BaseModel):
     def created(self) -> datetime:
         return fsio.parse_iso(self.created_at)
 
+    @property
+    def short_id(self) -> str:
+        """The handle a human types: the ULID's random tail, like a task's
+        `short_id` (the head is a shared timestamp, so it discriminates
+        nothing)."""
+        return self.id[-6:].lower()
+
     def filename(self) -> str:
         return f"{fsio.compact_ts(self.created)}-{self.id}.json"
 
@@ -180,12 +187,43 @@ class MessageBus:
         This is how agents consume the board without marking it: each keeps
         its own cursor in its private state file.
         """
+        entries = self.entries_after_cursor(topic, cursor)
+        msgs = [m for _, m in entries if m]
+        new_cursor = entries[-1][0] if entries else cursor
+        return msgs, new_cursor
+
+    def entries_after_cursor(
+        self, topic: str, cursor: str | None, limit: int | None = None
+    ) -> list[tuple[str, Message | None]]:
+        """`(filename, message)` pairs newer than `cursor`, oldest first.
+
+        The filename is the *on-disk* name, which is the only safe cursor: a
+        message's own `filename()` is what `post()` writes, but a file copied
+        in by hand under another name would leave a cursor that never passes
+        it — a consumer that advances one message at a time (the notify hook)
+        needs the real name. An unreadable file rides along as `None` so the
+        cursor can step past it rather than re-reading it forever.
+
+        `limit` keeps the *oldest* that many (a consumer works forwards and
+        the rest wait for its next pass — the opposite end from
+        `read_topic`), and bounds the parsing too, not just the result.
+        """
         entries = fsio.sorted_entries(self.board_dir / topic)
         if cursor:
             entries = [p for p in entries if p.name > cursor]
-        msgs = [m for m in (_load(p) for p in entries) if m]
-        new_cursor = entries[-1].name if entries else cursor
-        return msgs, new_cursor
+        if limit is not None:
+            entries = entries[:limit]
+        return [(p.name, _load(p)) for p in entries]
+
+    def topic_tail(self, topic: str) -> str | None:
+        """The newest on-disk filename in `topic`, None when it is empty.
+
+        A consumer arming its cursor at "everything before now is history"
+        wants this and nothing else — reading the messages just to learn the
+        last name parses a whole backlog to throw it away.
+        """
+        entries = fsio.sorted_entries(self.board_dir / topic)
+        return entries[-1].name if entries else None
 
     # -- inbox claiming ---------------------------------------------------
 
@@ -215,6 +253,124 @@ class MessageBus:
                 target.unlink(missing_ok=True)
                 continue
             yield ClaimedMessage(msg, target, self.archive_dir)
+
+    # -- on-demand archival ----------------------------------------------
+    #
+    # The janitor's per-message path, exposed for `quorum board ack`,
+    # `quorum board clear` and `quorum task inbox --clear`. Same destination
+    # file, same "archive, never delete" rule: an acked or cleared message
+    # keeps its created_at in messages/archive/, it just stops being live.
+
+    def archive_board_message(self, path: Path) -> Message | None:
+        """Archive one board message file and remove it from its topic.
+
+        The reusable unit: `archive_topic` loops over it, and
+        `ack_board_message` resolves one id to a path and calls it once. A file
+        that will not parse is removed as the janitor removes it — it can be
+        read by nobody, so keeping it live only makes every scan trip on it.
+        """
+        msg = _load(path)
+        if msg is None:
+            path.unlink(missing_ok=True)
+            return None
+        _archive_one(self.archive_dir, msg.dump(), when=msg.created)
+        path.unlink(missing_ok=True)
+        return msg
+
+    def resolve_board_message(
+        self, handle: str, topic: str | None = None
+    ) -> tuple[Message, Path]:
+        """Find one *live* board message by full id, unique prefix or unique
+        suffix — the suffix form is what `short_id` hands out, and the whole
+        handle grammar is the one `TaskStore.resolve` uses, because a reader
+        who has learned to type six characters at a task should not have to
+        learn a second rule at a message.
+
+        Raises KeyError when nothing matches and ValueError when the handle is
+        ambiguous, exactly as task resolution does — a wrong ack is silent (the
+        banner just drops something else), so both fail loudly.
+        """
+        handle = handle.strip().upper()
+        if not handle:
+            raise KeyError(handle)
+        matches: list[tuple[Message, Path]] = []
+        for name in [topic] if topic else self.topics():
+            for path in fsio.sorted_entries(self.board_dir / name):
+                # the filename is <compact-ts>-<ULID>.json and the timestamp
+                # carries no "-", so this is the id without reading the file
+                candidate = path.stem.split("-", 1)[-1].upper()
+                if not (candidate.startswith(handle) or candidate.endswith(handle)):
+                    continue
+                msg = _load(path)
+                if msg is None:
+                    continue
+                if msg.id.upper() == handle:
+                    return msg, path  # an exact id is never ambiguous
+                matches.append((msg, path))
+        if not matches:
+            raise KeyError(handle)
+        if len(matches) > 1:
+            raise ValueError(
+                f"message handle {handle!r} is ambiguous: "
+                + ", ".join(m.short_id for m, _ in matches)
+            )
+        return matches[0]
+
+    def ack_board_message(self, handle: str, topic: str | None = None) -> Message:
+        """Archive the one board message `handle` names — the per-message half
+        of `archive_topic`, and what `quorum board ack` and both dashboards
+        call.
+
+        Ack is *archival*, not a flag on the message: the board still carries
+        no read-state, so acking only ever means "this one stops being live",
+        and every reader keeps coexisting without coordination.
+        """
+        msg, path = self.resolve_board_message(handle, topic)
+        return self.archive_board_message(path) or msg
+
+    def archive_topic(
+        self, topic: str, before: datetime | None = None, dry_run: bool = False
+    ) -> list[Message]:
+        """Archive a whole board topic (optionally only what predates
+        `before`), returning the messages archived — or, under `dry_run`,
+        the ones that would be."""
+        archived: list[Message] = []
+        for path in fsio.sorted_entries(self.board_dir / topic):
+            msg = _load(path)
+            if msg is None:
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                continue
+            if before is not None and msg.created >= before:
+                continue
+            if dry_run:
+                archived.append(msg)
+                continue
+            moved = self.archive_board_message(path)
+            if moved is not None:
+                archived.append(moved)
+        return archived
+
+    def clear_inbox(self, agent: str, dry_run: bool = False) -> list[Message]:
+        """Archive everything waiting unclaimed in `agent`'s inbox.
+
+        Only `new/` — a message in `cur/` is being processed by someone, and
+        pulling it out from under them is the one way this could lose work.
+        """
+        cleared: list[Message] = []
+        for path in fsio.sorted_entries(self.inbox_dir / agent / "new"):
+            msg = _load(path)
+            if msg is None:
+                if not dry_run:
+                    path.unlink(missing_ok=True)
+                continue
+            if dry_run:
+                cleared.append(msg)
+                continue
+            _archive_one(self.archive_dir, msg.dump(), when=msg.created)
+            path.unlink(missing_ok=True)
+            cleared.append(msg)
+        return cleared
 
     # -- janitor ----------------------------------------------------------
 
