@@ -331,6 +331,20 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
+**Where the prompt comes in.** `task add` takes the prompt from exactly one
+of three places: the positional argument, stdin (`-`), or `--prompt-file
+<path>`. Two at once is an error rather than a precedence rule, and empty
+(or whitespace-only) input is refused before anything is written — a task
+with nothing to do would still queue, launch, and spend a run. Both
+indirect paths read *bytes* and decode UTF-8 themselves instead of going
+through `read_text`, so what lands in `task.json` is byte-for-byte its
+source: the prompt is quoted verbatim into the harness's context, and
+universal-newline translation or a stripped trailing newline would make a
+queued task differ from the issue it was piped from. This is what keeps the
+issue-driven loop out of quorum: `gh issue view N --json title,body | quorum
+task add <project> -` leaves the forge on the user's side of the pipe, with
+`ci.py` still the only module that knows `gh` exists.
+
 ### Perpetual tasks
 
 (User-facing how-to: [guide.md](guide.md#perpetual-tasks).)

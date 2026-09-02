@@ -9,6 +9,15 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+- `quorum task add <project> -` reads the prompt from stdin, and
+  `--prompt-file <path>` reads it from a file — both byte-for-byte, so a
+  piped GitHub issue is stored exactly as it arrived. Exactly one of the
+  three sources is allowed, and empty input is refused. Makes the
+  issue-driven loop a one-liner without putting `gh` inside quorum:
+  `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
+  (#60)
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

@@ -256,6 +256,20 @@ quorum task add my-api "migrate the test suite to pytest" --harness codex
 quorum up                      # the manager launches queued tasks
 ```
 
+A prompt does not have to survive shell quoting. `-` reads it from stdin and
+`--prompt-file` reads it from a file, both verbatim — so queuing a GitHub
+issue is a one-liner, and quorum never has to learn about `gh`:
+
+```bash
+gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' \
+  | quorum task add my-api -
+
+quorum task add my-api --prompt-file ~/notes/migration-plan.md
+```
+
+Pass the prompt exactly one way — an argument, `-`, or `--prompt-file`; two
+at once is an error, and so is empty input.
+
 You can also drive runs by hand — no supervisor required:
 
 ```bash
