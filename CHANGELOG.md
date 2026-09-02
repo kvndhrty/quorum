@@ -9,6 +9,18 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Changed
+- `quorum status`, `task list`, `agent list` and `project list` render
+  Rich tables instead of concatenated lines: one headed column per field,
+  fitted to the terminal (id, status, harness, pr and usage never
+  truncate; the report and flags columns are ellipsized where the window
+  runs out — never wrapped mid-cell), the PR URL shortened to `#N`
+  (`task show` keeps the full URL), usage in its own `usage` column, and
+  columns nothing fills dropped. Piped or redirected, the same tables come
+  out plain and at full width, so grepping an id or status keeps working.
+  The guide now says where the `$` figure comes from: the harness CLI's
+  own reported cost, never a quorum estimate. (#52)
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

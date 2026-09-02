@@ -98,10 +98,18 @@ skips with a transcript note — rely on the stranded-work flag there.
 **What runs cost.** Most coding harnesses report their token and cost usage
 when they finish a turn (claude's `result` event, codex's `turn.completed`),
 and quorum records whatever it sees on the run's entry in `task.json`. It
-then shows up wherever tasks do — `$0.42 · 11.0k tok` on a `quorum status`
-row, broken out by `quorum task show`, summed per task in the manager's
-digest. A harness that reports nothing is fully supported: you simply see
-nothing, never a misleading `$0.00`.
+then shows up wherever tasks do — `$0.42 · 11.0k tok` in the `usage` column
+of `quorum status` and `task list`, broken out by `quorum task show`, summed
+per task in the manager's digest. A harness that reports nothing is fully
+supported: you simply see nothing, never a misleading `$0.00`.
+
+**Quorum prices nothing.** The `$` figure is the harness CLI's own reported
+cost, copied as-is: claude's `total_cost_usd` on its `result` event, next to
+its token counts. codex reports tokens only, so its rows show tokens and no
+`$`. Within a run the values are reduced by max (harnesses report cumulative
+totals), across runs by sum. For a subscription (OAuth) claude session the
+number is the CLI's *notional* API-rate cost, not what you were billed —
+read it as relative spend, never as an invoice.
 
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
@@ -414,6 +422,39 @@ quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
 quorum status                     # tasks alongside agents and projects
 ```
 
+Each section is a table fitted to the terminal: the id, status, harness,
+pr and usage columns never truncate, the report and flags columns are cut
+with `…` where the window runs out, and a pull request shows as `#53` (the
+URL itself, and the whole report, are in `task show`). Piped or redirected,
+the same tables come out plain and at full width, so `quorum task list |
+grep <id>` works:
+
+```
+$ quorum status
+supervisor: not running
+
+agents:
+name       status     schedule
+○ manager  never-ran  every 5m
+
+tasks:
+id        project  status     harness  report                                       pr   usage
+· xrxapw  quorum   pr         fake     opened the PR                                #53  $0.42 · 11.0k tok
+· 75htqx  quorum   executing  fake     running the suite before pushing the branch
+
+projects:
+slug    due
+quorum  2026-09-10 (8d)
+```
+
+The `$0.42` is what the harness CLI itself reported for the task's runs
+(claude's `total_cost_usd`, summed over runs), not a quorum estimate — and
+for a subscription claude session it is the CLI's notional API-rate figure,
+not a bill. A harness that reports only tokens (codex) shows tokens and no
+`$`; one that reports nothing shows no `usage` column at all. Columns
+nothing fills (`pr`, `flags`, `usage`) are left out, so the empty home
+above has no blank headers.
+
 **Finishing and undoing.** A task that opens a PR reports the URL, which
 shows up in every view. `quorum task cancel <id>` stops the manager's
 attention (`--kill` also SIGTERMs a live runner, and asks first on an
@@ -719,9 +760,10 @@ for you is never silent.
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something
-  needs you. `--legend` explains the glyphs; `--json` emits the whole
-  overview for scripting (so do `task list`, `project list`, and
-  `agent list`).
+  needs you. Each section is a table fitted to the terminal (long cells are
+  ellipsized, never wrapped) and plain, full-width text when piped.
+  `--legend` explains the glyphs; `--json` emits the whole overview for
+  scripting (so do `task list`, `project list`, and `agent list`).
 - `quorum tui` — live terminal dashboard, installed by default. Tasks on
   top; arrow around freely, press enter on a task to open its transcript
   and reports in the bottom pane (the header above the pane always says

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import typer
 
@@ -25,6 +27,9 @@ from .actor import (
     journal_path,
 )
 from .messages import MessageBus
+
+if TYPE_CHECKING:
+    from rich.table import Table
 
 app = typer.Typer(
     help="Quorum: orchestrate long-running coding tasks with your own harness.",
@@ -528,18 +533,7 @@ def status(
     rows = views.agent_rows(target)
     if rows:
         typer.echo("\nagents:")
-        for r in rows:
-            marker = {"idle": "●", "running": "◐", "error": "✗", "paused": "‖"}.get(r["status"], "○")
-            line = f"  {marker} {r['name']:<12} {r['status']:<10} schedule: {r['schedule']}"
-            if r["last_end"]:
-                line += f"  last: {r['last_end']}"
-            # Only when the agent's harness reported a spend — an agent that
-            # reports nothing (or isn't harness-driven) shows no figure.
-            if r.get("usage_text"):
-                line += f"  {r['usage_text']}"
-            if r["error"]:
-                line += f"  [{r['error']}]"
-            typer.echo(line)
+        _print_table(_agent_table(rows))
         # A failing agent is almost never a quorum bug; it is a harness, an
         # auth token or a config that went quietly wrong, which is exactly
         # what doctor enumerates.
@@ -549,36 +543,145 @@ def status(
     task_rows = views.task_rows(target)
     if task_rows:
         typer.echo("\ntasks:")
-        for t in task_rows:
-            _echo_task_row(t)
+        _print_table(_task_table(task_rows))
     else:
         typer.echo("\nno tasks — `quorum task add <project> \"<prompt>\"`")
 
     projects = views.project_rows(target)
     if projects:
         typer.echo("\nprojects:")
-        for p in projects:
-            dl = ""
-            if p["deadline"]:
-                dl = f"  due {p['deadline']}"
-                if p["days_left"] is not None:
-                    dl += f" ({p['days_left']}d)" if p["days_left"] >= 0 else f" (OVERDUE {-p['days_left']}d)"
-            typer.echo(f"  {p['slug']:<24}{dl}")
+        _print_table(_project_table(projects))
     else:
         typer.echo("no projects registered — `quorum project add <dir>`")
 
 
-def _echo_task_row(t: dict) -> None:
-    if t.get("attached"):
-        marker = "⚭"
-    else:
-        marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
-    status = t["status"] + (" ∞" if t.get("perpetual") else "")
-    line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {status:<12} {t['harness']}"
-    if t["last_report"]:
-        line += f"  {t['last_report'][:60]}"
-    if t["pr_url"]:
-        line += f"  {t['pr_url']}"
+# -- tables ----------------------------------------------------------------
+#
+# Every listing (`status`, `task list`, `agent list`, `project list`) is a
+# Rich table (typer already depends on rich): one column per field, so a
+# row stays a row instead of a string that grows a clause per feature and
+# wraps mid-cell past column 80. The same table renders two ways:
+#
+#   - on a terminal it is *fitted* to the window: id, status, harness, pr
+#     and usage never truncate, and the report/flags (or error/tags) columns
+#     absorb the shortfall with an ellipsis — a cut cell where a wrapped one
+#     used to be;
+#   - anywhere else (a pipe, a file, a test) it is laid out at its natural
+#     width, plain text, no ANSI, so `quorum task list | grep <id>` and a
+#     redirected `status` keep every id, status and URL reference whole.
+#
+# Columns that are empty on every row are dropped, so a home with no PRs,
+# flags or reported usage does not grow blank headers. Cells are built from
+# the same `views.*_rows` dicts the TUI, web app and `--json` read, so the
+# CLI renders and never re-derives.
+
+PLAIN_TABLE_WIDTH = 4096  # off-terminal render width: wide enough that no cell is cut
+REPORT_MAX_CHARS = 120  # a report is a one-line note by protocol; `task show` has all of it
+
+_NO_WRAP: dict[str, Any] = {"no_wrap": True}
+
+
+def _give_way(ratio: int) -> dict[str, Any]:
+    """Column options for a cell that yields width on a narrow terminal —
+    ellipsized rather than wrapped, sharing the shortfall by `ratio`."""
+    return {"no_wrap": True, "overflow": "ellipsis", "ratio": ratio}
+
+
+# (header, Rich column options) — headers match the `--json` keys where a key exists.
+_TASK_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("id", _NO_WRAP),
+    ("project", _NO_WRAP),
+    ("status", _NO_WRAP),
+    ("harness", _NO_WRAP),
+    ("report", _give_way(2)),
+    ("pr", _NO_WRAP),
+    ("flags", _give_way(1)),
+    ("usage", _NO_WRAP),
+]
+_AGENT_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("name", _NO_WRAP),
+    ("type", _NO_WRAP),
+    ("status", _NO_WRAP),
+    ("schedule", _NO_WRAP),
+    ("last", _NO_WRAP),
+    ("usage", _NO_WRAP),
+    ("error", _give_way(1)),
+]
+_PROJECT_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("slug", _NO_WRAP),
+    ("name", _NO_WRAP),
+    ("due", _NO_WRAP),
+    ("tags", _give_way(1)),
+]
+
+
+def _build_table(
+    columns: list[tuple[str, dict[str, Any]]],
+    cells: list[dict[str, str]],
+    *,
+    keep: frozenset[str],
+) -> Table:
+    """A borderless table over `cells` (one dict per row, keyed by header),
+    including a column when it is in `keep` or any row has text for it."""
+    from rich.table import Table
+
+    table = Table(box=None, show_header=True, pad_edge=False, padding=(0, 2, 0, 0))
+    shown = [
+        (header, opts)
+        for header, opts in columns
+        if header in keep or any(row.get(header) for row in cells)
+    ]
+    for header, opts in shown:
+        table.add_column(header, **opts)
+    for row in cells:
+        table.add_row(*(row.get(header, "") for header, _ in shown))
+    return table
+
+
+def _print_table(table: Table, *, width: int | None = None) -> None:
+    """Print a table fitted to `width` columns — a terminal's own when
+    stdout is one — or, off a terminal with no width asked for, at its
+    natural width so every cell is complete and the text is plain."""
+    from rich.console import Console
+
+    fit = width is not None or sys.stdout.isatty()
+    table.expand = fit  # fitted: the give-way columns absorb the shortfall
+    console = Console(
+        width=width if fit else PLAIN_TABLE_WIDTH,
+        force_terminal=None if fit else False,
+        markup=False,  # cell text is literal — a report may say "[harness.x]"
+        highlight=False,
+        emoji=False,
+    )
+    if fit:
+        console.print(table)
+        return
+    with console.capture() as capture:
+        console.print(table)
+    # Rows are padded out to the widest cell of the last column; a
+    # redirected listing should not carry that trailing whitespace.
+    typer.echo("\n".join(line.rstrip() for line in capture.get().splitlines()))
+
+
+def _one_line(text: object) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _pr_ref(url: str) -> str:
+    """`#49` for a pull-request URL, `!49` for a GitLab merge request, else
+    the URL as given. `task show` always prints the full URL."""
+    m = re.search(r"/pulls?/(\d+)/?$", url)
+    if m:
+        return f"#{m.group(1)}"
+    m = re.search(r"/merge_requests/(\d+)/?$", url)
+    if m:
+        return f"!{m.group(1)}"
+    return url
+
+
+def _task_flags(t: dict) -> str:
+    """The stranded-work and dependency observations, as the legend names them."""
+    flags = []
     git = t.get("git")
     if git and (git["dirty"] or git["unpushed"]):
         risks = []
@@ -586,20 +689,96 @@ def _echo_task_row(t: dict) -> None:
             risks.append(f"{git['dirty']} uncommitted")
         if git["unpushed"]:
             risks.append(f"{git['unpushed']} unpushed")
-        line += "  ⚠ " + ", ".join(risks)
+        flags.append("⚠ " + ", ".join(risks))
     if t.get("waiting_on"):
-        line += f"  waiting-on {','.join(t['waiting_on'])}"
+        flags.append(f"waiting-on {','.join(t['waiting_on'])}")
     if t.get("dep_failed"):
-        line += f"  DEP-FAILED {','.join(t['dep_failed'])}"
+        flags.append(f"DEP-FAILED {','.join(t['dep_failed'])}")
     if t.get("dep_missing"):
-        line += f"  DEP-MISSING {','.join(t['dep_missing'])}"
+        flags.append(f"DEP-MISSING {','.join(t['dep_missing'])}")
     if t.get("dep_cycle"):
-        line += "  DEP-CYCLE"
-    if t.get("usage_text"):
-        line += f"  {t['usage_text']}"
+        flags.append("DEP-CYCLE")
+    return "  ".join(flags)
+
+
+def _task_cells(t: dict) -> dict[str, str]:
+    if t.get("attached"):
+        marker = "⚭"
+    elif t["running"]:
+        marker = "▶"
+    else:
+        marker = {"done": "✓", "blocked": "✗"}.get(t["status"], "·")
+    report = _one_line(t.get("last_report"))
+    if len(report) > REPORT_MAX_CHARS:
+        report = report[: REPORT_MAX_CHARS - 1] + "…"
+    usage_text = t.get("usage_text") or ""
     if t.get("budget_overages"):
-        line += "  $!"
-    typer.echo(line)
+        usage_text = f"{usage_text} $!".strip()
+    return {
+        "id": f"{marker} {t['id_short']}",
+        "project": t["project"],
+        "status": t["status"] + (" ∞" if t.get("perpetual") else ""),
+        "harness": t["harness"],
+        "report": report,
+        "pr": _pr_ref(t["pr_url"]) if t.get("pr_url") else "",
+        "flags": _task_flags(t),
+        "usage": usage_text,
+    }
+
+
+def _task_table(rows: list[dict]) -> Table:
+    return _build_table(
+        _TASK_COLUMNS,
+        [_task_cells(t) for t in rows],
+        keep=frozenset({"id", "project", "status", "harness", "report"}),
+    )
+
+
+def _agent_cells(r: dict, *, with_type: bool) -> dict[str, str]:
+    marker = {"idle": "●", "running": "◐", "error": "✗", "paused": "‖"}.get(r["status"], "○")
+    return {
+        "name": f"{marker} {r['name']}",
+        "type": r["type"] if with_type else "",
+        "status": r["status"] + ("" if r["enabled"] else " (disabled)"),
+        "schedule": r["schedule"],
+        "last": r.get("last_end") or "",
+        # Only when the agent's harness reported a spend — an agent that
+        # reports nothing (or isn't harness-driven) shows no figure.
+        "usage": r.get("usage_text") or "",
+        "error": _one_line(r.get("error")),
+    }
+
+
+def _agent_table(rows: list[dict], *, with_type: bool = False) -> Table:
+    return _build_table(
+        _AGENT_COLUMNS,
+        [_agent_cells(r, with_type=with_type) for r in rows],
+        keep=frozenset({"name", "status", "schedule"}),
+    )
+
+
+def _project_cells(p: dict) -> dict[str, str]:
+    due = ""
+    if p["deadline"]:
+        due = str(p["deadline"])
+        if p["days_left"] is not None:
+            due += (
+                f" ({p['days_left']}d)"
+                if p["days_left"] >= 0
+                else f" (OVERDUE {-p['days_left']}d)"
+            )
+    return {
+        "slug": p["slug"],
+        "name": p["name"] if p["name"] != p["slug"] else "",
+        "due": due,
+        "tags": ", ".join(p["tags"] or []),
+    }
+
+
+def _project_table(rows: list[dict]) -> Table:
+    return _build_table(
+        _PROJECT_COLUMNS, [_project_cells(p) for p in rows], keep=frozenset({"slug"})
+    )
 
 
 # -- tasks -----------------------------------------------------------------
@@ -905,8 +1084,7 @@ def task_list(
     if not rows:
         typer.echo("no tasks — `quorum task add <project> \"<prompt>\"`")
         return
-    for t in rows:
-        _echo_task_row(t)
+    _print_table(_task_table(rows))
 
 
 @task_app.command("show")
@@ -1261,10 +1439,7 @@ def project_list(
     if not rows:
         typer.echo("no projects registered — `quorum project add <dir>`")
         return
-    for p in rows:
-        dl = f"  due {p['deadline']} ({p['days_left']}d)" if p["deadline"] else ""
-        tags = f"  [{', '.join(p['tags'])}]" if p["tags"] else ""
-        typer.echo(f"{p['slug']:<24} {p['name']}{dl}{tags}")
+    _print_table(_project_table(rows))
 
 
 @project_app.command("set")
@@ -1471,9 +1646,10 @@ def agent_list(
     if json_out:
         typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
-    for r in rows:
-        state = r["status"] + ("" if r["enabled"] else " (disabled)")
-        typer.echo(f"{r['name']:<14} type={r['type']:<20} {r['schedule']:<18} {state}")
+    if not rows:
+        typer.echo("no agents configured")
+        return
+    _print_table(_agent_table(rows, with_type=True))
 
 
 @agent_app.command("run-once")
