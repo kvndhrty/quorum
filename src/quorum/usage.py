@@ -273,7 +273,8 @@ def agent_runs(home: Any, name: str, limit: int = RECENT_RUNS) -> list[dict[str,
     """
     entries = fsio.read_jsonl_tail(actor.usage_path(home, name), limit=AGENT_USAGE_TAIL)
     out = []
-    for e in entries[-max(0, limit) :]:
+    # `entries[-0:]` is the whole list, so ask for nothing explicitly
+    for e in entries[-limit:] if limit > 0 else []:
         if not isinstance(e, dict):
             continue  # a torn or hand-edited line is silence, like everywhere else
         outcome = e.get("outcome")

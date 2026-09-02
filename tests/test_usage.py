@@ -235,6 +235,8 @@ def test_only_the_last_few_runs_are_described(tmp_path):
     assert len(runs) == usage.RECENT_RUNS
     assert runs[-1]["run"] == f"r{usage.RECENT_RUNS + 3}"  # newest last
     assert usage.describe_runs([]) == ""
+    # a caller asking for no runs gets none — `entries[-0:]` would be all of them
+    assert usage.agent_runs(home, "manager", limit=0) == []
 
 
 def test_durations_stay_legible_past_an_hour():

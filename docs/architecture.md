@@ -724,7 +724,10 @@ template that writes `{notes}` gets its notebook *and*, above it, the same
 self-observation header the manager's digest opens with (spend, recent run
 outcomes, action budget): there is deliberately no second `{self}`
 placeholder, so an agent's memory of itself is one block and a template
-written before #59 gets the header without being rewritten. Prompt
+that already writes `{notes}` gets the header without being rewritten. A
+template that writes neither sees neither — including the shipped
+`babysitter.md`, which keeps its policy in prompt text and asks for no
+notebook. Prompt
 agents are usually file-defined (`agents/<name>.toml`, created by
 `quorum agent create` or the web dashboard, hot-added via `agent.reload`)
 but a `[agents.<name>]` table in config.toml works identically.

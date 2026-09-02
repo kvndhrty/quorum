@@ -133,8 +133,13 @@ def _actor_guard(
             cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
         except ValueError:
             cap = DEFAULT_MAX_ACTIONS_PER_RUN
-        # this run's entries sit at the journal's end, well inside the tail window
-        mine = [e for e in fsio.read_jsonl_tail(journal) if e.get("run") == run]
+        # this run's entries sit at the journal's end, well inside the tail window;
+        # a torn or hand-edited line is skipped, never a crashed CLI call
+        mine = [
+            e
+            for e in fsio.read_jsonl_tail(journal)
+            if isinstance(e, dict) and e.get("run") == run
+        ]
         # a cap.hit is a record of the refusal, not an action the agent took
         used = len([e for e in mine if e.get("action") != "cap.hit"])
         if used >= cap:
