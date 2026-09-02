@@ -220,6 +220,32 @@ def test_run_refuses_an_attached_task(home: Path, monkeypatch):
     drive(home, script)
 
 
+def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
+    """The runner's budget gate, surfaced as a notice instead of a silent
+    failure in runner.log; a cheaper last run lifts it."""
+    ids = populate(home)
+    (home / "config.toml").write_text("[tasks]\nmax_cost_per_run = 0.10\n")
+    over = {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+            "usage": {"cost_usd": 0.42, "total_tokens": 100, "events": 1}}
+    TaskStore(home).update(ids[0], runs=[over])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "quorum.runner.launch_detached", lambda h, task_id: launched.append(task_id) or 1
+    )
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == []
+        TaskStore(home).update(ids[0], runs=[over, {**over, "usage": {"cost_usd": 0.01}}])
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == [ids[0]]
+
+    drive(home, script)
+
+
 def test_cancel_confirms_first_and_only_then_cancels(home: Path):
     ids = populate(home)
 

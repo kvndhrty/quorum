@@ -714,6 +714,75 @@ def test_force_overrides_the_dependency_refusal(home: Path, project: str):
     assert len(store.get(dependent.id).runs) == 1
 
 
+def test_run_refuses_a_task_whose_last_run_blew_its_budget(
+    home: Path, project: str, monkeypatch
+):
+    """The budget gate (#19): with a `[tasks]` budget set, a task whose last
+    run reported more than it is refused its next run — the rate-limit-class
+    rail beside the dependency refusal, checked before anything is spent."""
+    harness_config(home, tasks_extra="max_cost_per_run = 0.10\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "spendy work", "fake")
+
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    assert run_task(home, config, task.id) == 0  # the first run is never gated
+    with pytest.raises(RunnerError, match="exceeded its budget .*cost \\$0.42 > max_cost_per_run"):
+        run_task(home, config, task.id)
+    fresh = store.get(task.id)
+    assert len(fresh.runs) == 1  # refused before spending anything
+    assert fresh.status == "queued"  # a rail never sets status
+    assert not runner.runner_lock_path(home, task.id).exists()
+
+
+def test_force_overrides_the_budget_gate_and_a_cheaper_run_clears_it(
+    home: Path, project: str, monkeypatch
+):
+    harness_config(home, tasks_extra="max_tokens_per_run = 1000\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "spendy work", "fake")
+
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")  # 11k tokens: over
+    assert run_task(home, config, task.id) == 0
+    with pytest.raises(RunnerError, match="next run gated"):
+        run_task(home, config, task.id)
+
+    # --force waives the gate for one run; the harness then reports nothing,
+    # and silence is not evidence of spend — so the gate is clear again
+    monkeypatch.delenv("FAKE_HARNESS_USAGE")
+    assert run_task(home, config, task.id, force=True) == 0
+    assert run_task(home, config, task.id) == 0
+    assert len(store.get(task.id).runs) == 3
+
+    # over again, then a forced run that comes in under budget clears it too
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    assert run_task(home, config, task.id) == 0
+    with pytest.raises(RunnerError, match="tokens 11.0k > max_tokens_per_run 1.0k"):
+        run_task(home, config, task.id)
+    assert runner.budget_blockers(config.tasks, store.get(task.id)) == [
+        "tokens 11.0k > max_tokens_per_run 1.0k"
+    ]
+    # a lighter run: same fake, so patch the recorded usage instead of the harness
+    last = store.get(task.id).runs
+    last[-1].usage = {"total_tokens": 10, "events": 1}
+    store.update(task.id, runs=[r.model_dump() for r in last])
+    assert runner.budget_blockers(config.tasks, store.get(task.id)) == []
+    assert run_task(home, config, task.id) == 0
+
+
+def test_budget_gate_is_off_at_zero(home: Path, project: str, monkeypatch):
+    """No budget (the default) means no gate, whatever a run cost."""
+    harness_config(home)
+    config = load_config(home)
+    assert config.tasks.max_cost_per_run == 0 and config.tasks.max_tokens_per_run == 0
+    task = TaskStore(home).add(project, "expensive by design", "fake")
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "250.00")
+    assert run_task(home, config, task.id) == 0
+    assert run_task(home, config, task.id) == 0
+    assert len(TaskStore(home).get(task.id).runs) == 2
+
+
 def test_a_satisfied_dependency_runs_and_reaches_the_prompt(
     home: Path, project: str, monkeypatch
 ):

@@ -49,7 +49,7 @@ from pathlib import Path
 
 from . import fsio, prompts, usage
 from .actor import strip_actor_env
-from .config import Config, HarnessConfig
+from .config import Config, HarnessConfig, TasksConfig
 from .messages import Message, MessageBus
 from .projects import ProjectRegistry
 from .tasks import (
@@ -529,8 +529,8 @@ def stream_transcript(
 def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) -> int:
     """Execute one run of a task in the foreground. Returns the harness exit code.
 
-    `force` waives the dependency refusal below; nothing else about a run
-    changes.
+    `force` waives the dependency and budget refusals below; nothing else
+    about a run changes.
     """
     home = Path(home)
     store = TaskStore(home)
@@ -559,6 +559,16 @@ def run_task(home: Path, config: Config, task_prefix: str, force: bool = False) 
             f"task {task.short_id} is waiting on {', '.join(blockers)} — "
             "unfinished dependencies; `--force` to run anyway"
         )
+    over = budget_blockers(config.tasks, task) if not force else []
+    if over:
+        # The third substrate rail, and the second of the rate-limit class
+        # the per-run action cap belongs to: a task whose *last* run went
+        # past the configured budget is not relaunched until someone says
+        # so. It gates the next run only — never a mid-run kill, never a
+        # veto of any particular choice — and the manager (or the user)
+        # decides what the task deserves instead: a sharper nudge, a
+        # decomposition, an escalation, or `--force`.
+        raise RunnerError(budget_refusal(task, over))
     harness = resolve_harness(config, task.harness)
 
     lock = runner_lock_path(home, task.id)
@@ -638,6 +648,26 @@ def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
         return []
     by_id = {t.id: t for t in store.list()}
     return dependency_state(task, by_id)["waiting_on"]
+
+
+def budget_blockers(budget: TasksConfig, task: Task) -> list[str]:
+    """How the task's last run exceeded the `[tasks]` budget — the notes the
+    budget gate refuses on; empty (and free) whenever no budget is set, the
+    task has no runs, or its last run came in under budget or reported no
+    usage at all."""
+    return usage.last_run_overages(
+        task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+    )
+
+
+def budget_refusal(task: Task, over: list[str]) -> str:
+    """The one message the budget gate speaks with, wherever it is checked
+    (here, and mirrored in `quorum task run` so `--detach` fails in the
+    parent too)."""
+    return (
+        f"task {task.short_id}'s last run exceeded its budget ({'; '.join(over)}) — "
+        "next run gated; `--force` to run anyway"
+    )
 
 
 def launch_detached(home: Path, task_id: str, force: bool = False) -> int:

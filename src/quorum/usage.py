@@ -37,7 +37,7 @@ Three properties this module is built around:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from . import actor, fsio
@@ -334,3 +334,20 @@ def run_overages(runs: Iterable[Any], max_cost: float = 0.0, max_tokens: int = 0
         for note in overages(getattr(run, "usage", None), max_cost, max_tokens):
             out.append(f"run {i}: {note}")
     return out
+
+
+def last_run_overages(
+    runs: Sequence[Any], max_cost: float = 0.0, max_tokens: int = 0
+) -> list[str]:
+    """How the task's *last* run exceeded the budget — the condition the
+    runner's budget gate reads (`runner.budget_blockers`).
+
+    Only the last run counts: the gate is a rate limit on relaunching a task
+    that just blew its budget, not a sentence for a task that once did. So a
+    later run that came in under budget — or reported nothing, since silence
+    is not evidence of spend — clears it, and a task with no runs is never
+    gated. Both limits off (0) means an empty list for any history.
+    """
+    if not runs:
+        return []
+    return overages(getattr(runs[-1], "usage", None), max_cost, max_tokens)

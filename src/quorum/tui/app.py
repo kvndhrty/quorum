@@ -187,7 +187,16 @@ class QuorumTUI(App):
         if runner_alive(self.home, task.id):
             self.notify(f"task {task.short_id} is already running", severity="warning")
             return
-        from ..runner import launch_detached
+        from ..config import load_config_or_default
+        from ..runner import budget_blockers, budget_refusal, launch_detached
+
+        # the runner's budget gate, checked here so the refusal is a notice
+        # on screen rather than a line in runner.log nobody reads; the TUI
+        # has no --force — that is a CLI decision
+        over = budget_blockers(load_config_or_default(self.home).tasks, task)
+        if over:
+            self.notify(budget_refusal(task, over), severity="warning")
+            return
 
         pid = self._write("start the run", lambda: launch_detached(self.home, task.id))
         if pid is FAILED:

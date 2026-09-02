@@ -9,6 +9,24 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+### Added
+
+- The task budget gates the next run (the enforcement half of #19): with
+  `[tasks].max_cost_per_run` / `max_tokens_per_run` set, a task whose
+  *last* run reported more than the budget is refused by `run_task`,
+  `quorum task run` (and `--detach`, in the parent) and the TUI's `s`
+  key until `--force` or a run that comes in under budget — a run that
+  reports no usage counts as under. A rail of the rate-limit class the
+  per-run action cap belongs to: it never kills a run in progress, never
+  sets status, and never vetoes a choice. `task list` marks a gated task
+  `$! GATED`, `task show` adds a `gated:` line, `task_rows` carries
+  `budget_gated`, and the digest's `BUDGET-EXCEEDED` line now ends
+  `(next run gated; --force to override)` on the last run (`(an earlier
+  run; a later one cleared the gate)` on older ones) so the manager knows
+  why a relaunch failed. The packaged `manager.md` says what to do instead
+  of relaunching as-is — sharpen the nudge, decompose, escalate — and
+  `quorum init` upgrades unedited copies.
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

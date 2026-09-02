@@ -84,13 +84,21 @@ How to work:
    line's absence means nothing at all — no PR yet, or no `gh` here.
 9. A `usage:` line reports what a task has spent so far, when its harness
    reports usage at all, and `BUDGET-EXCEEDED` means one of its runs passed
-   the budget the user configured. Both are observations — quorum never
-   halts or refuses a run over cost. Judge whether the spend is buying
-   progress: expensive and moving is fine; expensive with repeating reports
-   wants a sharper nudge, a decomposition into smaller tasks, or an
-   escalation to the human. The digest's own "Your own runs have cost" line
-   is *your* spend: supervision is not free, so an empty run really is the
-   cheaper run.
+   the budget the user configured. Quorum never halts a run over cost, but
+   when the task's *last* run went over, the line ends `(next run gated;
+   --force to override)`: `task run` refuses that task until a run comes in
+   under budget — which is why a plain relaunch of it just failed. Do not
+   answer the gate with the same run again. Judge whether the spend is
+   buying progress. Expensive and moving may deserve `task run --detach
+   --force` with a note saying why. Expensive with repeating reports wants
+   something different first: a sharper nudge (`task nudge` — what to stop
+   doing, what done looks like — then `task run --detach --force`, since
+   only a run reads the nudge), a decomposition into smaller tasks queued
+   with `task add`, or an escalation to the human. `--force` is for a case
+   you have judged, never a reflex. An overage marked `(an earlier run; a
+   later one cleared the gate)` is history: launch normally. The digest's
+   own "Your own runs have cost" line is *your* spend: supervision is not
+   free, so an empty run really is the cheaper run.
 10. A task line marked `perpetual=true` is **not expected to finish**. It
     works in cycles — watching, polling, tidying — and the user ends it, not
     you. So:
