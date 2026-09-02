@@ -235,3 +235,44 @@ def test_topic_scopes_the_cli_ack(home: Path):
     )
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
+
+
+def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypatch):
+    """Resolution hands back a path; between that and the archive the janitor
+    (or a second `board ack`, or the web panel) can take the file. Acking the
+    path we already have makes that a no-op instead of a traceback from a
+    second resolution — and the message is archived once, not twice."""
+    bus = MessageBus(home)
+    msg = bus.post("manager", "attention", "escalation", text="handled elsewhere")
+    real = MessageBus.resolve_board_message
+
+    def racing(self, handle, topic=None):
+        found = real(self, handle, topic)
+        MessageBus(home).archive_topic("attention")  # someone else got there first
+        return found
+
+    monkeypatch.setattr(MessageBus, "resolve_board_message", racing)
+
+    result = runner.invoke(app, ["board", "ack", msg.short_id, "--home", str(home)])
+    assert result.exit_code == 0, result.output
+    assert views.attention_summary(home)["count"] == 0
+    assert [m["payload"]["text"] for m in archive_lines(home)] == ["handled elsewhere"]
+
+
+def test_ack_all_refuses_a_topic_option(home: Path):
+    """With `--all` the argument *is* the topic, so a `--topic` next to it can
+    only be a misunderstanding — and silently sweeping the wrong board is the
+    one outcome an ack must never have."""
+    bus = MessageBus(home)
+    bus.post("manager", "attention", "escalation", text="still here")
+    bus.post("manager", "notes", "note", text="also still here")
+
+    result = runner.invoke(
+        app,
+        ["board", "ack", "--all", "attention", "--topic", "notes", "--yes", "--home", str(home)],
+    )
+    assert result.exit_code != 0
+    assert "--topic does not apply to --all" in result.output
+    assert views.attention_summary(home)["count"] == 1
+    assert len(MessageBus(home).read_topic("notes")) == 1
+    assert archive_lines(home) == []

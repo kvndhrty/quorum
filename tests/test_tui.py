@@ -441,3 +441,26 @@ def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path):
         assert [n.severity for n in app._notifications] == ["error"]
 
     drive(home, script)
+
+
+def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
+    """The attention list is a snapshot: the janitor, a second `board ack` or
+    the web panel can archive the line between the render and the keystroke.
+    That failure arrives as the KeyError board resolution raises, not as an
+    OSError — and `_write` has to cover it, or the dashboard dies at the very
+    keystroke you pressed to tidy up."""
+    populate(home)
+    MessageBus(home).post("manager", "attention", "escalation", text="handled elsewhere")
+
+    async def script(app, pilot):
+        await pilot.press("a")
+        await pilot.pause()
+        assert attention_rows(app) == ["handled elsewhere"]
+        MessageBus(home).archive_topic("attention")  # out of band, as the janitor does
+        await pilot.press("a")
+        await pilot.pause()
+        assert app.is_running
+        assert [n.severity for n in app._notifications] == ["error"]
+        assert MessageBus(home).read_topic("attention") == []
+
+    drive(home, script)

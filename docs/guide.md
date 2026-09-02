@@ -789,9 +789,12 @@ Acking **archives** rather than marks: the message moves into
 with, so the history still says what was escalated when, and the board goes
 on carrying no read-state at all. Ids resolve like task ids — a full id, a
 unique prefix, or the short suffix `board read` prints — and an unknown or
-ambiguous one is refused rather than guessed at. The same ack is a keystroke
+ambiguous one is refused rather than guessed at. `--topic <name>` narrows the
+search when two boards hand out the same short id. The same ack is a keystroke
 in the TUI (`a`) and a button in the browser; `--all` is the sledgehammer
-described under [Cleaning up](#cleaning-up).
+described under [Cleaning up](#cleaning-up) — there the argument *is* the
+topic, so `--all` and `--topic` together are refused rather than one of them
+quietly ignored.
 
 - `quorum status` — one-shot text: supervisor liveness, agent heartbeats,
   tasks, project deadlines, and the `#attention` warning when something

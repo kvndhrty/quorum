@@ -37,7 +37,12 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   list and acks the highlighted line, notifying rather than crashing on an
   unwritable home) and an **Ack** button per escalation in the web
   dashboard's new Attention panel — both thin calls to one shared
-  `MessageBus.ack_board_message`.
+  `MessageBus.ack_board_message`. Every list an ack acts on is a snapshot, so
+  a message archived out of band (the janitor, a second `board ack`, the web
+  panel) between the render and the keystroke is reported, never a traceback:
+  the TUI notifies and stays up, and the CLI archives the path it already
+  resolved instead of resolving twice. `--topic` alongside `--all` is refused
+  — the `--all` argument is itself the topic.
 
 ## [0.2.0] - 2026-09-01
 

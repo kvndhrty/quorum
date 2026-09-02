@@ -1358,6 +1358,11 @@ def board_ack(
     """
     home_path = get_home(home)
     if all_:
+        if topic:
+            raise _fail(
+                "--topic does not apply to --all; the argument is the topic "
+                f"(`quorum board ack --all {topic}`)"
+            )
         _clear_topic(
             home_path, target_id, before=before, dry_run=dry_run, yes=yes, action="board.ack.all"
         )
@@ -1366,7 +1371,7 @@ def board_ack(
         raise _fail("--before applies to --all; a single ack names one message")
     bus = MessageBus(home_path)
     try:
-        msg, _path = bus.resolve_board_message(target_id, topic=topic)
+        msg, path = bus.resolve_board_message(target_id, topic=topic)
     except KeyError:
         where = f" on {topic}" if topic else ""
         raise _fail(
@@ -1379,7 +1384,10 @@ def board_ack(
         typer.echo(f"would ack #{msg.topic} {msg.short_id} <{msg.sender}> {text[:70]}")
         return
     _actor_guard(home_path, "board.ack", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
-    bus.ack_board_message(msg.id, topic=msg.topic)
+    # archive the path resolution already handed us: resolving a second time
+    # could miss (the janitor, another `board ack`, the web panel) and raise
+    # where a tidy line belongs, and archiving a gone file is a no-op anyway
+    bus.archive_board_message(path)
     typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
 
 

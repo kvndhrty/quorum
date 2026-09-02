@@ -345,11 +345,19 @@ class QuorumTUI(App):
         """Run one write, or say why it did not happen. Every affordance goes
         through here: QUORUM_HOME can be read-only, full, or on a dead mount,
         and a dashboard that dies at the keystroke is the worst moment to lose
-        the view of what is going on."""
+        the view of what is going on.
+
+        Every row the dashboard offers is a *snapshot*, so the thing a write
+        names can also be gone by the time the key is pressed — an escalation
+        the janitor, another `board ack` or the web panel archived out of band.
+        That surfaces as the KeyError/ValueError board resolution raises, not
+        as OSError, and it is the same class of disappointment: say so and keep
+        the view up."""
         try:
             return do()
-        except OSError as e:
-            self.notify(f"could not {what}: {e}", severity="error")
+        except (OSError, KeyError, ValueError) as e:
+            detail = e.args[0] if isinstance(e, KeyError) else e
+            self.notify(f"could not {what}: {detail}", severity="error")
             return FAILED
 
     def _open_input(self, target: str, placeholder: str) -> None:

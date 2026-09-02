@@ -509,8 +509,9 @@ follow the bus's rule: **archive, never delete.**
   immediately for one topic (and `quorum board ack --all <topic>` is the same
   sweep under the name a reader who has been acking one at a time reaches
   for — one command implemented on top of the other, so the alias cannot
-  drift); `inbox --clear` touches `new/` only, because a message in `cur/`
-  has a claimant.
+  drift, and since its argument is the topic, a `--topic` alongside `--all`
+  is an error rather than a silently ignored flag); `inbox --clear` touches
+  `new/` only, because a message in `cur/` has a claimant.
 
 `prune.py` splits into three total readers and two doers — `select()` (pure,
 over an already-loaded task list), `refusal()`, `plan()`, then
