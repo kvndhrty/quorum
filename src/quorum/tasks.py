@@ -71,6 +71,20 @@ class TaskRun(BaseModel):
     # counts and cost, or None when it reported nothing — most harnesses
     # say nothing, and every reader treats absence as "unknown", never zero.
     usage: dict[str, Any] | None = None
+    # How this run ended, when it did not simply exit. Three independent
+    # facts, all *observations* the manager reads back (`stopped=` /
+    # `fresh_sessions=` / `last-run=stalled` in the digest); none of them is
+    # a status, because only the harness sets status:
+    #   stopped        a human or the manager ended it with `task stop` —
+    #                  the record is written by the stopping process, since
+    #                  the killed runner never gets to write its own,
+    #   stalled        the runner's own stall watchdog ended it after
+    #                  `[tasks].run_stall_timeout_seconds` without output,
+    #   fresh_session  it was launched with `--fresh-session`, so it did not
+    #                  resume the previously captured session id.
+    stopped: bool = False
+    stalled: bool = False
+    fresh_session: bool = False
 
 
 class Task(BaseModel):

@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import actor, ci, fsio, herdr, notes, tasks, usage
@@ -46,6 +46,7 @@ __all__ = [
     "build_digest",
     "journal_path",
     "loop_signal",
+    "stall_minutes",
     "overlap_signal",
     "transcript_path",
 ]
@@ -60,6 +61,21 @@ RECENT_TERMINAL_HOURS = 24
 # recently finished — so a home with more tasks than budget still sees its
 # live work.
 CI_MAX_PROBES = 12
+
+# --- stall observation -------------------------------------------------------
+# A live runner whose transcript has not grown for this long is probably hung:
+# the process is alive and the lock is fresh, so every other liveness signal
+# says "working". Like `possible-loop` this is a plain constant and an
+# observation the manager judges — never a rail. (The *rail-shaped* version of
+# this is `[tasks].run_stall_timeout_seconds`, the runner's own watchdog, which
+# is off by default and kills the run rather than reporting it.)
+#
+# Tuned to prefer false negatives, and by a wide margin: real harnesses go
+# quiet for a long time inside one tool call (a full test suite, a cold build,
+# a long provider turn), and a stall flag that fires on healthy work teaches
+# the manager to ignore it. 30 minutes is far past any of those and still far
+# inside the "cost a whole night" failure this exists to catch.
+STALL_QUIET_MINUTES = 30
 
 # --- possible-loop heuristic -------------------------------------------------
 # The action journal remembers what the *manager* did; nothing else watches a
@@ -313,6 +329,66 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
     return lines
 
 
+def stall_minutes(home: Path, task: tasks.Task, now: datetime) -> int | None:
+    """Minutes since this task's transcript last grew — or, when there is no
+    transcript at all, minutes since the live run started. None only when
+    neither is readable.
+
+    Deliberately the transcript's own mtime rather than `last_activity`: the
+    question a stall asks is "has the *harness* said anything", and
+    last_activity also counts the runner lock and the reports file, both of
+    which a hung run can leave fresh.
+
+    The fallback to the run's own start is the case that matters most: a
+    *first* run that hangs before printing anything (the stream-json stdin
+    block of #24) has no transcript, and reading that as "no answer" would
+    hide the loudest hang there is behind the one thing it cannot produce.
+    The lock's `started_at` is when this run began; its mtime is the
+    fallback's fallback, for a lock written before the field existed.
+    """
+    try:
+        mtime = tasks.transcript_path(home, task.id).stat().st_mtime
+    except OSError:
+        started = _run_started_at(home, task)
+        if started is None:
+            return None
+        return int((now - started).total_seconds() // 60)
+    return int((now - datetime.fromtimestamp(mtime, UTC)).total_seconds() // 60)
+
+
+def _run_started_at(home: Path, task: tasks.Task) -> datetime | None:
+    """When the live run acquired its lock, from the lock itself."""
+    lock = tasks.runner_lock_path(home, task.id)
+    try:
+        return fsio.parse_iso(str(fsio.read_json(lock)["started_at"]))
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        return datetime.fromtimestamp(lock.stat().st_mtime, UTC)
+    except OSError:
+        return None
+
+
+def _restart_marks(task: tasks.Task) -> str:
+    """What has already been done to this task's runs — `stopped=` and
+    `fresh_sessions=` counts, and whether the last run ended stalled.
+
+    The manager has no memory between ticks beyond its journal (a bounded
+    tail) and its notebook, so "have I restarted this before?" has to be
+    readable off the task line. Empty for a task nobody has intervened on.
+    """
+    marks = ""
+    stopped = sum(1 for r in task.runs if r.stopped)
+    fresh = sum(1 for r in task.runs if r.fresh_session)
+    if stopped:
+        marks += f" stopped={stopped}"
+    if fresh:
+        marks += f" fresh_sessions={fresh}"
+    if task.runs and task.runs[-1].stalled:
+        marks += " last-run=stalled"
+    return marks
+
+
 def _dependency_marks(state: dict | None) -> str:
     """The greppable part of a dependency observation, appended to the task
     line: `waiting-on=<short ids>` while a prerequisite is unfinished, plus
@@ -458,17 +534,40 @@ def build_digest(
         alive = tasks.runner_alive(home, t.id)
         seen = tasks.last_activity(home, t.id)
         quiet = f"{int((now - seen).total_seconds() // 60)}m" if seen else "never-ran"
+        # Only a *live* runner can be stalled: a dead one is just a task to
+        # relaunch, which the manager already handles.
+        silent = stall_minutes(home, t, now) if alive else None
+        stalled = silent if silent is not None and silent >= STALL_QUIET_MINUTES else None
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
             f"runner={'alive' if alive else 'dead'} runs={len(t.runs)} quiet={quiet}"
             # Only when true: an ordinary task's line stays as it was, and
             # the marker reads as the exception it is.
             + (" perpetual=true" if t.perpetual else "")
+            + _restart_marks(t)
+            + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
             + _overlap_marks(overlaps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
+        if stalled is not None:
+            lines.append(
+                f"  STALLED: runner=alive but the harness has printed nothing for "
+                f"{stalled}m — the hang a `quiet=` line alone cannot tell from slow "
+                "work. An observation, not a verdict: read the tail, and if nothing "
+                f"is happening `task stop {t.short_id}` then relaunch it"
+            )
+        # The mark stays on the line either way (a relaunched task still had
+        # a run stall), but this reads the situation, so it only fires while
+        # that stalled run is the current state of the task.
+        if not alive and t.runs and t.runs[-1].stalled:
+            lines.append(
+                "  last run ended stalled: the runner's own stall watchdog "
+                "([tasks].run_stall_timeout_seconds) stopped a silent harness, so the "
+                "runner is already dead — relaunch it (with --fresh-session if it "
+                "keeps happening)"
+            )
         lines.extend(_dependency_lines(deps.get(t.id)))
         lines.extend(_overlap_lines(overlaps.get(t.id)))
         git = tasks.workdir_git_state(t)

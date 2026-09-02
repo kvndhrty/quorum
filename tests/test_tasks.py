@@ -4,7 +4,9 @@ injection, session capture/resume, and the cooperative report channel."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -637,6 +639,222 @@ def test_second_concurrent_run_is_refused(home: Path, project: str):
             run_task(home, config, task.id)
     finally:
         lock.unlink()
+
+
+# -- stopping a hung run --------------------------------------------------
+
+
+def start_detached_run(
+    home: Path, task_id: str, fresh_session: bool = False
+) -> subprocess.Popen:
+    """Launch a real detached run, in its own session, and never reap it.
+
+    Deliberately unreaped: the test process stays alive, so a killed run
+    lingers as a zombie in its group — exactly what a long-lived caller
+    (the TUI) used to leave behind, and what every liveness answer here has
+    to survive.
+    """
+    return subprocess.Popen(
+        [
+            sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home),
+            *(["--fresh-session"] if fresh_session else []),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env={**os.environ, "QUORUM_HOME": str(home)},
+    )
+
+
+def wait_for_zombie(pid: int, timeout: float = 20.0) -> None:
+    """Block until `pid` has exited without being waited on. Asks `ps` by
+    hand rather than `Popen.poll()`, which would reap the very zombie the
+    caller wants."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if state.upper().startswith("Z"):
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"pid {pid} never became a zombie")
+
+
+def wait_for_live_run(home: Path, task_id: str, timeout: float = 20.0) -> None:
+    """Block until the run holds its lock and the harness has said something."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if tasks.runner_alive(home, task_id) and tasks.transcript_path(home, task_id).exists():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"no live run for {task_id} within {timeout}s")
+
+
+def test_stop_ends_the_run_and_leaves_the_task_alone(home: Path, project: str):
+    """`task stop` is the non-terminal kill: the run dies, the task does not."""
+    harness_config(home, extra='env = { FAKE_HARNESS_MODE = "stall" }\n')
+    task = TaskStore(home).add(project, "x", "fake")
+    proc = start_detached_run(home, task.id)
+    wait_for_live_run(home, task.id)
+
+    result = runner.stop_run(home, task.short_id, grace_seconds=5)
+
+    assert result["signal"] == "SIGTERM" and result["pid"] == proc.pid
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "queued"  # stop never sets status
+    assert Path(fresh.workdir).is_dir()  # nor touches the work
+    assert len(fresh.runs) == 1
+    run = fresh.runs[0]
+    assert run.stopped and run.exit_code == -signal.SIGTERM and run.ended_at
+    assert not tasks.runner_lock_path(home, task.id).exists()  # the dead runner's lock
+    assert "run.stopped" in transcript_text(home, task.id)
+
+
+def test_stop_sigkills_a_harness_that_ignores_sigterm(home: Path, project: str):
+    harness_config(home, extra='env = { FAKE_HARNESS_MODE = "ignore_sigterm" }\n')
+    task = TaskStore(home).add(project, "x", "fake")
+    proc = start_detached_run(home, task.id)
+    wait_for_live_run(home, task.id)
+    group = os.getpgid(proc.pid)
+
+    result = runner.stop_run(home, task.short_id, grace_seconds=1)
+
+    # SIGTERM kills the runner but not the harness, so the group check is what
+    # notices and escalates — nothing is left running in the group afterwards
+    # (the unreaped runner is still *in* it, which is why the question has to
+    # be `group_alive` and not a bare killpg).
+    assert result["signal"] == "SIGKILL"
+    assert not fsio.group_alive(group)
+    assert TaskStore(home).get(task.id).runs[0].stopped
+
+
+def test_stop_closes_a_run_whose_runner_is_a_zombie(home: Path, project: str):
+    """A runner nobody reaped is a process-table entry, not a run.
+
+    `launch_detached`'s caller may keep running (the TUI's `s` binding), and
+    then the killed runner stays a zombie in its group. Reading that as
+    "alive" made `task stop` raise "survived SIGKILL" — no run record, and a
+    stale lock that also refused the next `task run`.
+    """
+    harness_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    dead = subprocess.Popen([sys.executable, "-c", ""], start_new_session=True)
+    wait_for_zombie(dead.pid)
+    lock = tasks.runner_lock_path(home, task.id)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fsio.atomic_write_json(
+        lock,
+        {"role": "task-runner", "task": task.id, "pid": dead.pid,
+         "started_at": fsio.iso(fsio.utc_now()), "fresh_session": True},
+    )
+
+    try:
+        result = runner.stop_run(home, task.short_id, grace_seconds=1)
+    finally:
+        dead.wait()  # reap it: the test leaves no zombie behind
+
+    assert result["signal"] is None and result["run_recorded"]
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "queued"  # stop is still not cancel
+    run = fresh.runs[-1]
+    assert run.stopped and run.fresh_session and run.ended_at
+    assert not lock.exists()  # ...and the next run may start
+
+
+def test_a_stopped_fresh_run_is_recorded_as_fresh(home: Path, project: str):
+    """The digest counts fresh restarts off the run records, so the record
+    `stop_run` writes for the run it killed has to know which kind it was —
+    otherwise stop/--fresh-session/stop never reaches the escalation rung."""
+    harness_config(home, extra='env = { FAKE_HARNESS_MODE = "stall" }\n')
+    task = TaskStore(home).add(project, "x", "fake")
+    start_detached_run(home, task.id, fresh_session=True)
+    wait_for_live_run(home, task.id)
+
+    runner.stop_run(home, task.short_id, grace_seconds=5)
+
+    run = TaskStore(home).get(task.id).runs[0]
+    assert run.stopped and run.fresh_session
+
+
+def test_stop_refuses_an_attached_task_and_a_task_with_no_run(home: Path, project: str):
+    harness_config(home)
+    store = TaskStore(home)
+    idle = store.add(project, "x", "fake")
+    with pytest.raises(RunnerError, match="no live run"):
+        runner.stop_run(home, idle.id)
+    live = store.add(project, "x", "fake", attached=True)
+    tasks.runner_lock_path(home, live.id).parent.mkdir(parents=True, exist_ok=True)
+    tasks.runner_lock_path(home, live.id).write_text('{"pid": 1}\n')
+    with pytest.raises(RunnerError, match="never kills your session"):
+        runner.stop_run(home, live.id)  # the user's own session, not ours to kill
+
+
+# -- the stall watchdog ---------------------------------------------------
+
+
+def test_stall_watchdog_ends_a_silent_run(home: Path, project: str):
+    """A harness that prints one line and hangs becomes a dead runner with a
+    non-terminal status — the situation the manager already handles."""
+    harness_config(
+        home,
+        extra='env = { FAKE_HARNESS_MODE = "stall" }\n',
+        tasks_extra="run_stall_timeout_seconds = 1.0\n",
+    )
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) != 0
+
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "queued"  # the watchdog is mechanical: no status
+    run = fresh.runs[0]
+    assert run.stalled and run.exit_code != 0
+    assert "run stalled" in transcript_text(home, task.id)
+
+
+def test_the_watchdog_is_off_by_default_and_a_healthy_run_is_never_stalled(
+    home: Path, project: str
+):
+    from quorum.config import TasksConfig
+
+    assert TasksConfig().run_stall_timeout_seconds == 0.0
+    harness_config(home)
+    config = load_config(home)
+    assert config.tasks.run_stall_timeout_seconds == 0.0
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0
+
+    assert TaskStore(home).get(task.id).runs[0].stalled is False
+
+
+def test_stall_watchdog_context_is_a_no_op_when_disabled(tmp_path: Path):
+    with runner.stall_watchdog(None, 0.0, tmp_path / "t.jsonl") as watchdog:
+        assert watchdog is None  # no thread, no timer, nothing to go wrong
+
+
+# -- fresh sessions -------------------------------------------------------
+
+
+def test_fresh_session_drops_the_resume_argv_and_is_recorded(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    run_task(home, config, task.id)  # captures sess-fake-123
+    assert TaskStore(home).get(task.id).session == "sess-fake-123"
+    run_task(home, config, task.id)  # resumes it
+
+    run_task(home, config, task.id, fresh_session=True)
+
+    entries = fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    argvs = [e["event"]["argv"] for e in entries if "argv" in e.get("event", {})]
+    assert argvs[1][0] == "--resumed"  # the ordinary relaunch resumed
+    assert "--resumed" not in argvs[2]  # the fresh one did not
+    runs = TaskStore(home).get(task.id).runs
+    assert [r.fresh_session for r in runs] == [False, False, True]
+    assert "fresh session" in transcript_text(home, task.id)
 
 
 def test_workdir_git_state_tracks_dirty_and_unpushed(home: Path, tmp_path: Path):

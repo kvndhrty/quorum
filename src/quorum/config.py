@@ -88,12 +88,20 @@ class TasksConfig(BaseModel):
     # (runner.budget_blockers). Nothing is ever killed mid-run or vetoed.
     max_cost_per_run: float = 0.0
     max_tokens_per_run: int = 0
+    # Stall watchdog (runner.py). 0 = off, the default. When set, a run whose
+    # harness writes no output for this many seconds is stopped by the runner
+    # itself and recorded `stalled` — a hang becomes a dead runner with a
+    # non-terminal status, which the manager already knows how to relaunch.
+    # Mechanical, not a judgement: it counts silence, not progress, so set it
+    # well above the longest silent step your harness has (a full test run, a
+    # cold build) or it will kill healthy work.
+    run_stall_timeout_seconds: float = 0.0
 
-    @field_validator("max_cost_per_run", "max_tokens_per_run")
+    @field_validator("max_cost_per_run", "max_tokens_per_run", "run_stall_timeout_seconds")
     @classmethod
     def _nonnegative(cls, v, info):
         if v < 0:
-            raise ValueError(f"{info.field_name} must be >= 0 (0 disables the budget)")
+            raise ValueError(f"{info.field_name} must be >= 0 (0 disables it)")
         return v
 
 

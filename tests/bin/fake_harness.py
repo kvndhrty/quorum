@@ -41,6 +41,17 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     message provably lands *during* the run, yet before the
                     runner could close an idle stdin.
     hang            sleep far past any test timeout (exercises run timeouts)
+    stall           print one line, then go silent forever — the shape of a
+                    hung session, and what the stall watchdog must end
+    ignore_sigterm  print one line, ignore SIGTERM, then sleep forever: the
+                    harness `task stop` has to escalate to SIGKILL for
+    manager_restart echo + act like a manager following the hung-session
+                    policy in prompts/manager.md, one step per run, reading
+                    which step it is at off the digest's own marks: STALLED
+                    with no restarts yet -> `task stop` then relaunch; after
+                    that -> relaunch `--fresh-session` with a summarizing
+                    nudge; after two fresh sessions -> escalate to the
+                    attention board
     fail            exit 3 without output
 
   FAKE_HARNESS_USAGE   cost in USD (e.g. "0.42"); makes the harness report
@@ -61,6 +72,7 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -140,6 +152,14 @@ def main() -> int:
     if mode == "hang":
         time.sleep(120)
         return 0
+    if mode in ("stall", "ignore_sigterm"):
+        if mode == "ignore_sigterm":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # One line, so the run provably started and streamed, then silence —
+        # exactly what a hung harness looks like from the runner's side.
+        print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
+        time.sleep(600)
+        return 0
     if mode == "inject":
         return inject_main()
     prompt = max(sys.argv[1:], key=len) if len(sys.argv) > 1 else ""
@@ -208,6 +228,35 @@ def main() -> int:
         print(f"ACT| remember -> exit {r.returncode}")
         if r.returncode != 0 and r.stderr.strip():
             print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+
+    elif mode == "manager_restart":
+        # Only the active-task section: the journal below it uses the same
+        # `- [...]` line shape.
+        section = prompt.split("## Active tasks", 1)[-1]
+        m = re.search(r"- \[[^\]]+\] (\S+)([^\n]*)", section)
+        if not m:
+            print("no task line in the digest", file=sys.stderr)
+            return 6
+        target, marks = m.group(1), m.group(2)
+        fresh = int((re.search(r"fresh_sessions=(\d+)", marks) or [0, 0])[1])
+        stopped = int((re.search(r"stopped=(\d+)", marks) or [0, 0])[1])
+        if fresh >= 2:
+            r = quorum("board", "post", "attention",
+                       f"{target} stalled again after two fresh sessions — needs a human")
+            print(f"ACT| escalate -> exit {r.returncode}")
+        elif "STALLED" in marks and stopped == 0:
+            r = quorum("task", "stop", target)
+            print(f"ACT| task stop {target} -> exit {r.returncode}")
+            if r.returncode != 0:
+                print(f"REFUSED| {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''}")
+            ran = quorum("task", "run", target)  # foreground, for determinism
+            print(f"ACT| task run {target} -> exit {ran.returncode}")
+        else:
+            nudged = quorum("task", "nudge", target,
+                            "previous session had already written the parser; continue there")
+            print(f"ACT| task nudge {target} -> exit {nudged.returncode}")
+            ran = quorum("task", "run", target, "--fresh-session")
+            print(f"ACT| task run {target} --fresh-session -> exit {ran.returncode}")
 
     elif mode == "manager_flood":
         m = re.search(r"- \[\w+\] (\S+)", prompt)

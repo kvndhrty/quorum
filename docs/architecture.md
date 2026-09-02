@@ -384,6 +384,97 @@ queued task differ from the issue it was piped from. This is what keeps the
 issue-driven loop out of quorum: `gh issue view N --json title,body | quorum
 task add <project> -` leaves the forge on the user's side of the pipe, with
 `ci.py` still the only module that knows `gh` exists.
+### Stopping and restarting a run
+
+(User-facing how-to: [guide.md](guide.md#when-a-session-hangs).)
+
+Harness sessions hang: a stream-json CLI blocked forever on stdin (#24), a
+provider turn that never returns, a wedged tool. The process is alive and
+the lock is fresh, so every liveness signal quorum has says "working", and
+the only kill quorum used to offer was `task cancel --kill` — **terminal**,
+losing the task along with the hung run. Three pieces, deliberately split
+between mechanism and judgement:
+
+**`quorum task stop <id>` (`runner.stop_run`)** ends the *run* and nothing
+else. Status untouched (the runner never sets one; neither does this),
+worktree untouched, the task still queued exactly where it was. The signal
+goes to the runner's **process group**: `launch_detached` starts a run with
+`start_new_session`, so the runner leads a group that contains the harness
+and everything it spawned, and the group is the only handle that reaches the
+whole tree. SIGTERM, then SIGKILL after `STOP_GRACE_SECONDS` for a harness
+that ignores it — and liveness is asked of the group (`fsio.group_alive`),
+not the runner's pid, because SIGTERM kills the runner instantly while the
+harness ignoring it keeps running; a pid check would call that a clean stop.
+A run sharing quorum's *own* process group (a foreground `task run`) is
+signalled by pid instead, since killing that group would take the caller
+with it.
+
+**Zombies are not runs.** A process that has exited but that its parent has
+not waited on is still a process-table entry, so `kill(pid, 0)` succeeds and
+`killpg(pgid, 0)` answers "alive" (EPERM on macOS, plain success on Linux)
+for a group holding nothing but a corpse. That is not exotic: it is what
+every killed run looks like to a caller that stays alive after
+`launch_detached` (the TUI's `s` binding), and read as "alive" it makes
+`task stop` report a run that *survived SIGKILL* and makes the next
+`task run` refuse to start. Both ends are fixed: `launch_detached` waits on
+its child from a daemon thread, so nothing lingers unreaped in the first
+place, and `fsio.pid_alive` / `fsio.group_alive` ask `ps` for the state
+letter (`Z`) whenever the cheap signal probe says something is there, so a
+zombie counts as dead either way. `fsio._ps_rows` is the only place quorum
+shells out to `ps`, and it fails soft *conservatively*: no `ps`, no answer,
+and the caller keeps the process table's word rather than calling a live run
+dead.
+
+The killed runner never gets to write its own record, so `stop` writes it: a
+`quorum: run.stopped` transcript line, a `TaskRun` with `stopped = true`,
+the signal as a negative exit code and the killed run's own `fresh_session`
+(recorded in the lock at acquisition, since this record is that run's only
+trace and the digest counts fresh restarts off it), and the
+now-provably-stale lock removed. `fsio.clear_stale_pid_lock` re-reads the
+pid immediately before unlinking, which *narrows but does not close* the
+window — `acquire_pid_lock` takes a stale lock over by unlink-and-create, so
+a new runner can still claim the file in between; there is no
+compare-and-unlink without the flock the pid-lock deliberately avoids, and
+the residue (a live run whose lock file is gone, recreated by the next
+acquisition) is not worth one. If the runner did manage to record the run
+itself, that record stands and nothing is duplicated. A lock whose runner is
+*already* dead gets the same tidying without a signal — only a task with no
+lock at all has "no live run to stop". An **attached** task is refused
+outright — the same substrate rail as the runner's, and the sharpest one:
+the "runner" of an attached task is the user's own interactive session.
+
+**`quorum task run <id> --fresh-session`** clears the captured
+`session`/`thread_id` before composing the argv, so the harness starts a new
+session instead of resuming a damaged one (a thread that errors on every
+turn, a context the provider will not take back). The worktree — the actual
+durable state — is untouched; the session was only ever a convenience. The
+new session remembers nothing, so the caller is expected to nudge in a
+summary, and the run records `fresh_session = true`.
+
+**`[tasks].run_stall_timeout_seconds`** (0 = off, the default) is the
+mechanical version, and needs no manager at all: `runner.StallWatchdog`
+watches the stdout stream the runner is already reading, and when no line
+arrives for N seconds it notes the stall in the transcript, SIGTERMs the
+harness (SIGKILL after the same grace) and lets the run end the ordinary way
+— so the run record, auto-commit and lock release all still happen, with
+`stalled = true` on the record. That turns a hang into a **dead runner with
+a non-terminal status**, which supervision already handles well. It counts
+silence, not progress, so the threshold has to sit above the longest silent
+step a real run takes (a full test suite, a cold build); that is why it is
+off by default and why quorum never picks a value.
+
+The watchdog signals the **harness only**, never the group: the runner leads
+that group, so a `killpg` from inside would kill the run's own bookkeeping.
+That leaves one known limitation — a *grandchild* that inherited the
+harness's stdout and outlived it holds the pipe open, so the runner's
+`stream_transcript` stays blocked and the watchdog's kill does not by itself
+end the run (closing the read end under a thread already blocked in `read()`
+does not reliably wake it). The cure for that case is the group-wide one,
+`quorum task stop`, which is why the mechanical watchdog does not replace it.
+
+All three are visible in the digest as `stopped=N` / `fresh_sessions=N` /
+`last-run=stalled` on the task line, which is how the manager knows what it
+has already tried without relying on its bounded journal window.
 
 ### Perpetual tasks
 
@@ -643,7 +734,10 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    task with declared dependencies (see *Task dependencies* above); a
    `possible-loop:` line
    when a task's transcript tail is dominated by one repeated tool call
-   (see below); `overlaps=<short-id> paths=N` on both lines of a pair of
+   (see below); `STALLED` when a live runner has printed nothing for
+   `STALL_QUIET_MINUTES`, with `stopped=` / `fresh_sessions=` /
+   `last-run=stalled` counting what has already been done about it (see
+   below); `overlaps=<short-id> paths=N` on both lines of a pair of
    live worktree tasks on one project whose branches change the same files,
    with an `overlap:` line naming up to three of them (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
@@ -819,6 +913,27 @@ fast-forward, and report `blocked` naming the conflicting files when the
 rebase cannot complete.
 Views never show it (they stay pure file readers; the read happens at digest
 build only, alongside the CI probe, and nothing is materialized to disk).
+
+**Stall observation (`STALLED`).** The other half of *Stopping and
+restarting a run* (above), and the half that judges. `stall_minutes` reads
+the mtime of a task's transcript — deliberately not `last_activity`, which
+also counts the runner lock and the reports file, both of which a hung run
+leaves fresh — falling back to when the live run acquired its lock when
+there is no transcript at all, because a *first* run that hangs before
+printing anything (#24's stdin block) is the loudest hang there is and it is
+the one with nothing to age. A live runner silent for longer than
+`STALL_QUIET_MINUTES` (30) gets the flag. Only a *live* runner: a dead one
+is simply a task to relaunch, which the manager already handles. Like
+`possible-loop` the threshold is a plain module constant tuned to prefer
+false negatives, because a flag that fires on a long test run teaches the
+manager to ignore it, and like `possible-loop` it is an **observation, not a
+rail** — quorum ends no run on its account. `prompts/manager.md` holds the
+policy: look at the tail once, `task stop` then relaunch, then relaunch
+`--fresh-session` with a summarizing nudge, then escalate to `attention`
+after two fresh restarts, reading which step it is at off the task line's
+own `stopped=` / `fresh_sessions=` counts. The *rail-shaped* answer to the
+same failure is the runner's stall watchdog, which is opt-in config rather
+than supervision.
 
 **CI observation (`ci:`).** `workdir_git_state` follows work as far as
 "pushed" and stops; `ci.py` — the only module that shells out to `gh` —
