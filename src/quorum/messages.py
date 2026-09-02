@@ -180,12 +180,43 @@ class MessageBus:
         This is how agents consume the board without marking it: each keeps
         its own cursor in its private state file.
         """
+        entries = self.entries_after_cursor(topic, cursor)
+        msgs = [m for _, m in entries if m]
+        new_cursor = entries[-1][0] if entries else cursor
+        return msgs, new_cursor
+
+    def entries_after_cursor(
+        self, topic: str, cursor: str | None, limit: int | None = None
+    ) -> list[tuple[str, Message | None]]:
+        """`(filename, message)` pairs newer than `cursor`, oldest first.
+
+        The filename is the *on-disk* name, which is the only safe cursor: a
+        message's own `filename()` is what `post()` writes, but a file copied
+        in by hand under another name would leave a cursor that never passes
+        it — a consumer that advances one message at a time (the notify hook)
+        needs the real name. An unreadable file rides along as `None` so the
+        cursor can step past it rather than re-reading it forever.
+
+        `limit` keeps the *oldest* that many (a consumer works forwards and
+        the rest wait for its next pass — the opposite end from
+        `read_topic`), and bounds the parsing too, not just the result.
+        """
         entries = fsio.sorted_entries(self.board_dir / topic)
         if cursor:
             entries = [p for p in entries if p.name > cursor]
-        msgs = [m for m in (_load(p) for p in entries) if m]
-        new_cursor = entries[-1].name if entries else cursor
-        return msgs, new_cursor
+        if limit is not None:
+            entries = entries[:limit]
+        return [(p.name, _load(p)) for p in entries]
+
+    def topic_tail(self, topic: str) -> str | None:
+        """The newest on-disk filename in `topic`, None when it is empty.
+
+        A consumer arming its cursor at "everything before now is history"
+        wants this and nothing else — reading the messages just to learn the
+        last name parses a whole backlog to throw it away.
+        """
+        entries = fsio.sorted_entries(self.board_dir / topic)
+        return entries[-1].name if entries else None
 
     # -- inbox claiming ---------------------------------------------------
 

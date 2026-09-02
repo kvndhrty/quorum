@@ -77,7 +77,9 @@ tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
                                    note, reported token/cost usage) + the
                                   attached / perpetual flags + depends_on:
-                                  full ids this task waits on
+                                  full ids this task waits on + pr_state /
+                                  pr_state_at: what the forge last said about
+                                  the PR, the one materialized probe result
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -104,7 +106,10 @@ state/manager/notes.jsonl         the notebook: standing notes a future run
                                   reads, plus retirement tombstones
 state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
-                                  spent ({at, run, usage|null})
+                                  spent and how it went ({at, run,
+                                  usage|null, outcome, duration_seconds})
+state/notify.json                 the [notify] hook's private board cursors
+                                  (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
@@ -269,10 +274,17 @@ transcript. So capture is one more look at each parsed event
   the same parsed events — but an agent has no `task.json` to hang it on, so
   each run appends one line to `state/manager/usage.jsonl` (or
   `state/agents/<name>/usage.jsonl`, the same split as `journal_path`):
-  `{"at": ..., "run": <run id>, "usage": {...}|null}`. Every run is
+  `{"at": ..., "run": <run id>, "usage": {...}|null, "outcome":
+  "ok"|"raised"|"timeout", "duration_seconds": <float>}`. Every run is
   recorded, including the ones that reported nothing and the ones that
   timed out or exited nonzero — a spent-and-then-died run still spent, and a
-  run count only means something if it counts every run. Writing it can
+  run count only means something if it counts every run. The line is
+  therefore the record of *how a run went*, not only of what it cost:
+  `outcome` and `duration_seconds` ride it deliberately (#59) rather than
+  getting a file of their own, because the run that reports no usage at all
+  — the timeout — is exactly the one an agent most needs to see about
+  itself. A line written before they existed reads back as outcome `None`
+  (rendered `?`), never as `ok`. Writing it can
   never fail a tick (`usage.record_agent_run` swallows `OSError`). The file
   is append-only and unbounded, so readers take a bounded tail
   (`usage.agent_usage`, `AGENT_USAGE_TAIL` = 200 runs; a total over a full
@@ -283,17 +295,36 @@ transcript. So capture is one more look at each parsed event
   manager digest opens with the same figure for the manager itself — the one
   recurring cost nothing else in the digest accounts for, and in a live home
   usually the largest.
-- **The budget is an observation, not (yet) a rail.** `[tasks]
-  max_cost_per_run` / `max_tokens_per_run` (validated non-negative, 0 =
-  off) turn an over-budget run into a `BUDGET-EXCEEDED` digest line and a
-  `$!` mark in the views. Quorum kills nothing and refuses nothing for
-  cost; the manager reads the flag and decides, exactly as it does with
-  `possible-loop`. Enforcement — gating the *next* run of a task that blew
-  its budget — is a deliberate follow-up (issue #19 step 3): it would join
-  the **rate-limit family** the per-run action cap belongs to (bound a
-  bad run's blast radius, never veto a particular choice), and mid-run
-  enforcement is only even expressible for pumped runs, where stdin can be
-  closed at a turn boundary.
+- **The budget gate is a rail of the rate-limit class — the next run,
+  never the current one.** `[tasks] max_cost_per_run` /
+  `max_tokens_per_run` (validated non-negative, 0 = off) turn an
+  over-budget run into a `BUDGET-EXCEEDED` digest line and a `$!` mark in
+  the views, and — the enforcement half of issue #19 — a task whose
+  **last** run went over is refused its next run: `run_task` raises before
+  taking `runner.lock` or spending anything, `quorum task run` mirrors the
+  check so `--detach` fails in the parent, and the TUI's `s` key shows the
+  refusal as a notice. `--force` waives it for one run. Only the last run
+  counts (`usage.last_run_overages` → `runner.budget_blockers`): a later
+  run that came in under budget, or reported nothing (silence is not
+  evidence of spend), clears the gate on its own — a rate limit on
+  relaunching a task that just blew its budget, not a sentence for one that
+  once did. It is the fourth substrate refusal, beside `runner.lock`, the
+  attached-task refusal and the dependency refusal (*Task dependencies*
+  below), and the second rail of the **rate-limit family** the per-run
+  action cap belongs to: it bounds a bad task's blast radius and never
+  vetoes a particular choice. What to do instead of relaunching — a sharper
+  nudge, a decomposition, an escalation — lives in `prompts/manager.md`,
+  and the digest line says `(next run gated; --force to override)` on the
+  last run (`(an earlier run; a later one cleared the gate)` on older ones)
+  so the manager knows why a relaunch failed. Deliberately **not** a
+  mid-run kill: that is only even expressible for pumped runs (stdin closed
+  at a turn boundary), and a detached run past budget finishes its turn
+  and is gated afterwards. The gate never sets status, never cancels, and
+  never touches the views' `$!` mark (`budget_gated` on `task_rows` is the
+  same read, rendered).
+  usually the largest. `usage.agent_runs` reads the outcomes back over the
+  same bounded tail, separately from `agent_usage` (which stays `None` when
+  no run in the window reported spend, and a timed-out run never does).
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
@@ -310,7 +341,11 @@ stdin closes, the pump also owns ending the run: the protocol emits one
 `result` event per completed user turn (the prompt turn is the first), so
 the pump closes stdin once every delivered turn has its result and `new/`
 is empty — a run extends while guidance keeps arriving and ends at the
-first idle turn boundary. A message
+first idle turn boundary. The claim of a message (its rename out of
+`new/`) and its count as a delivered turn happen under the same lock the
+close check takes, so a `result` arriving mid-claim sees the message
+either still pending or already owed an answer, never neither — the gap
+that once let a run end with a nudge in flight. A message
 that arrives after close, or lands on a harness without `inject`, waits in
 `new/` for the next run start, exactly as before; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgment: a message
@@ -332,6 +367,20 @@ still gets passive monitoring (transcript mtimes, lock liveness, exit
 codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
+
+**Where the prompt comes in.** `task add` takes the prompt from exactly one
+of three places: the positional argument, stdin (`-`), or `--prompt-file
+<path>`. Two at once is an error rather than a precedence rule, and empty
+(or whitespace-only) input is refused before anything is written — a task
+with nothing to do would still queue, launch, and spend a run. Both
+indirect paths read *bytes* and decode UTF-8 themselves instead of going
+through `read_text`, so what lands in `task.json` is byte-for-byte its
+source: the prompt is quoted verbatim into the harness's context, and
+universal-newline translation or a stripped trailing newline would make a
+queued task differ from the issue it was piped from. This is what keeps the
+issue-driven loop out of quorum: `gh issue view N --json title,body | quorum
+task add <project> -` leaves the forge on the user's side of the pipe, with
+`ci.py` still the only module that knows `gh` exists.
 
 ### Perpetual tasks
 
@@ -414,20 +463,24 @@ Cross-project chains work by construction, since ids are global.
 - **The digest observes** (`waiting-on=<short ids>` on the task line while a
   dependency is unfinished; `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE` flags
   with a line of explanation). These are observations of the same class as
-  `possible-loop` and `BUDGET-EXCEEDED` — the manager judges them (nudge the
-  dependency, cancel the dependent, escalate) and quorum does nothing on its
-  own.
+  `possible-loop` and a `BUDGET-EXCEEDED` on an earlier run — the manager
+  judges them (nudge the dependency, cancel the dependent, escalate) and
+  quorum does nothing on its own.
 - **One narrow substrate refusal**: `run_task` (and `quorum task run`, so
   `--detach` fails in the parent too) refuses a task with unfinished
   dependencies unless `--force`. This is the third rail of that class, next
-  to `runner.lock` and the attached-task refusal — a deliberate bend of "the
-  action cap is the only rail", justified the same way: a dependent launched
+  to `runner.lock` and the attached-task refusal (the budget gate under
+  *Token/cost usage* is the fourth) — a deliberate bend of "the action cap
+  is the only rail", justified the same way: a dependent launched
   early is pure waste (it reviews a PR that does not exist yet), and the
   manager is the only caller that would ever do it by accident. It refuses
   the launch; it never cancels, re-queues or reorders anything.
 - **Views** (`quorum status` / `task list` / `task show`, TUI, web) render
   `waiting_on` / `dep_failed` / `dep_missing` / `dep_cycle` straight off
-  `views.task_rows`. Nothing is materialized to disk for them.
+  `views.task_rows`. Nothing is materialized to disk for them (unlike the
+  merged observation, [below](#the-merged-observation) — dependencies are
+  derivable from files quorum already holds, so materializing them would buy
+  nothing).
 - **Reading the upstream outcome**: the dependent task's composed prompt
   gains a *Tasks this one depends on* block listing each dependency's short
   id, status and `pr_url` (`runner.dependency_note` — fields already in
@@ -585,9 +638,15 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    when a task's transcript tail is dominated by one repeated tool call
    (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
-   configured `[tasks]` budget (both observations — see *Token/cost usage*
-   above); a header line with what the manager's *own* recent runs have
-   cost, read from its usage ledger; its **notebook** (see below); the manager's own
+   configured `[tasks]` budget, the last run's marked `next run gated` (see
+   *Token/cost usage* above); a three-line **self-observation header** (`agents/harness_run.py
+   ::self_observations`) — what the manager's own recent runs have cost,
+   `Your last N runs: ok 2m10s · TIMEOUT 15m00s · …` off the same ledger,
+   and `Actions this run: 0 of <cap> (cap)` (always `0`: the digest is built
+   before the run starts, so the line reports the budget, and what happened
+   to it lands in the journal as `cap.hit`) — all three observations the
+   prompt judges, none of them a rail: nothing pauses, throttles or changes
+   the cap; its **notebook** (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -613,9 +672,14 @@ target's status at action time, run id) *before* it executes — ground truth,
 not model self-report. The journal serves two purposes: fed back into the
 next digest, it lets the manager see which interventions changed nothing and
 avoid degenerate loops (its prompt forbids repeating an intervention marked
-UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
+UNCHANGED); and it enforces the one supervision rail quorum keeps — a per-run action cap
 (`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
-without ever second-guessing a choice.
+without ever second-guessing a choice. A refused action appends one
+`cap.hit` entry per run (its `args` naming the action refused), so the run
+that ran out of budget is visible in the *next* digest's journal section
+rather than only as an error the model saw mid-run; the entry is not itself
+an action and does not count against the cap. The task budget
+gate (*Token/cost usage* above) is the only other rail of that class.
 
 **The notebook (`notes.py`).** The journal is what the manager *did* this
 run, read back as a bounded tail; a note meant for next week is pushed out
@@ -698,7 +762,8 @@ That last part is the point, and the deliberate divergence from OpenHands'
 stuck detector (which auto-halts): `possible-loop` is an **observation, not a
 rail**. Python makes no decision; the flag is data, the default manager prompt
 tells the manager to read the tail and judge (nudge, relaunch, cancel, or
-ignore), and the per-run action cap remains the only rail.
+ignore), and the only rails stay rate limits that never read the flag (the
+per-run action cap, the task budget gate).
 
 **CI observation (`ci:`).** `workdir_git_state` follows work as far as
 "pushed" and stops; `ci.py` — the only module that shells out to `gh` —
@@ -711,7 +776,9 @@ the human is on for an adopted one). The rollup mixes CheckRun (Actions:
 `status` + `conclusion`) and StatusContext (classic: `state`) shapes;
 `_verdict` classifies each as pass/fail/pending and treats anything it does
 not recognize as pending, because an unknown shape must never read as a
-pass. The line is `key=value` like the rest of the digest — check counts,
+pass. The line is `key=value` like the rest of the digest — the PR's own
+state (`state=open` / `merged` / `closed`, normalized by
+`ci.normalize_state` from whatever the forge calls it), check counts,
 up to five failing check *names*, `MERGE-CONFLICT` when `mergeable` is
 `CONFLICTING`, and the PR url.
 
@@ -745,9 +812,59 @@ diagnostic never has to grow a gh subprocess of its own.
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
 says how to read the line, and the shipped `prompts/babysitter.md` (below)
-is a whole reactive policy written as prompt text. Views stay pure file
-readers — the probe runs during digest build only, and nothing materializes
-its result to disk, so `views.py` never acquires a network call.
+is a whole reactive policy written as prompt text.
+
+#### The merged observation
+
+A task's lifecycle ends at the harness's word (`done`); its work is
+delivered when the PR merges. Quorum keeps the two apart — `done` is the
+harness's word, merged is the forge's, and **nothing in Python turns one
+into the other**. But the second fact has to survive the probe that saw it,
+because the surfaces that would show it never make network calls.
+
+So there is exactly one materialized probe result. When `build_digest`'s
+probe returns a state in `tasks.PR_STATES` (`open` / `merged` / `closed`),
+`tasks.record_pr_state` writes it — with `pr_state_at` — onto
+`tasks/<id>/task.json`. Every reader then gets it for free off the file:
+`quorum status` / `task list` / `task show`, the TUI and the web dashboard
+badge `✔` merged and `⊘` closed-unmerged straight out of
+`views.task_rows`, and `views.py` still never acquires a `gh` subprocess.
+
+This is a deliberate revision of the rule this section used to state
+outright ("nothing materializes its result to disk"). The rule was there to
+stop views from growing network calls; it did not anticipate a fact that is
+*durable* — a merge is final, unlike a check rollup, which is only ever true
+as of now. The narrow exception is fenced by five properties, and a second
+materialized probe result would have to earn all of them again:
+
+- **one writer**, `record_pr_state`, called from **one place**, the
+  digest's probe closure. Never from a view, a CLI command or the runner.
+- **closed vocabulary**: only the three known states are written. `unknown`
+  writes nothing, so a forge shape quorum does not understand can never
+  badge a task as delivered — and nothing re-probes a task once its worktree
+  is gone.
+- **never a status**: `status` and `pr_state` are separate fields, and no
+  code path derives one from the other.
+- **`updated_at` untouched**. It means "someone acted on this task", and the
+  digest's recently-finished window is measured from it; a probe that bumped
+  it would pin every merged task in that section forever. The record is also
+  re-read from disk rather than dumped from the in-memory `Task`, so a
+  status a live run reported meanwhile is never rolled back.
+- **fail-soft to the end**: an unreadable or unwritable `task.json` is a
+  lost observation, re-made on the next tick, never a failed digest.
+
+Absence stays uninformative, exactly as the missing `ci:` line is: no
+`pr_state` means no PR, no `gh`, `[ci]` off, or a supervisor that was never
+up while the PR was open — never "not merged". And a recorded state is only
+as fresh as `pr_state_at`, which every surface that has room prints next to
+it.
+
+Two consequences elsewhere: a merged PR suppresses `CI-FAILING`
+explicitly (a forge may keep serving a stale red rollup after the merge, and
+that must never send the manager to relaunch finished work), and the manager
+prompt gains the reading — a merged task needs nothing; a `done` task whose
+PR was closed unmerged is a human decision quorum cannot interpret, worth
+one line to the human and nothing else.
 
 Failure story: missing harness config, nonzero exit, or timeout → the tick
 raises. Crash isolation records it (heartbeat, board); the manager's
@@ -769,7 +886,15 @@ mechanics (`agents/harness_run.py`): actor-tagged env, per-agent journal and
 action cap, transcript at `state/agents/<name>/transcript.jsonl`, mid-run
 directives via the agent's own inbox when the harness supports injection.
 There is deliberately no wake condition and no digest — a prompt agent runs
-every scheduled tick, and anything conditional belongs in its prompt. Prompt
+every scheduled tick, and anything conditional belongs in its prompt. A
+template that writes `{notes}` gets its notebook *and*, above it, the same
+self-observation header the manager's digest opens with (spend, recent run
+outcomes, action budget): there is deliberately no second `{self}`
+placeholder, so an agent's memory of itself is one block and a template
+that already writes `{notes}` gets the header without being rewritten. A
+template that writes neither sees neither — including the shipped
+`babysitter.md`, which keeps its policy in prompt text and asks for no
+notebook. Prompt
 agents are usually file-defined (`agents/<name>.toml`, created by
 `quorum agent create` or the web dashboard, hot-added via `agent.reload`)
 but a `[agents.<name>]` table in config.toml works identically.
@@ -865,6 +990,56 @@ outage is informational, and the time-windowed banner has no read-state to
 dismiss) fire exactly once. Nothing here pauses, retries or throttles the
 agent; the post is an observation, in the same class as `possible-loop`
 and `ci:`.
+
+### Board consumers: the notification hook
+
+The board carries no read marks, so *reaching* someone is a consumer's job,
+and `notify.py` is the one consumer quorum ships for a person rather than
+an agent. An optional `[notify]` table holds an argv template — the same
+shape as `[harness.<name>]`, substituted element-wise (`{text}`, `{from}`,
+`{topic}`, `{type}`, `{id}`; a template with no `{text}` gets it appended,
+like a harness template with no `{prompt}`), so there is no shell and
+nothing to quote — and the topics that fire it (default `attention`, the
+one topic meant for a human). The supervisor runs `_notify` on the control
+cadence (15 s, and once at startup, that startup catch-up running *before*
+the scheduler and the janitor so it can neither race the job's first fire
+nor lose an escalation the janitor is about to archive): it reads each
+listed topic past a private cursor kept in `state/notify.json` (the last
+on-disk filename processed, per topic — `MessageBus.entries_after_cursor`
+hands back real filenames, because a message's own `filename()` is only
+what `post()` happened to write) and runs the template once per message,
+oldest first, advancing and persisting the cursor *before* each delivery.
+Delivery is therefore **at-most-once** by design: a crash — or a failed
+cursor write — mid-hook loses one notification, where the other order
+would repeat it every 15 seconds for as long as the disk stayed full.
+Nothing is ever delivered twice, including across a restart or between
+the startup drain and the job (`drain` takes a process-wide lock, since
+APScheduler's `max_instances` guards a job only against itself). That is
+the documented board-consumer pattern and nothing more: no queue, no retry
+store, no second transport, and a message posted while the supervisor is
+down goes out on the next start.
+
+Three stances hold it in shape. **It fires on topic membership, never on
+content**: what is escalation-worthy stays prompt policy, and the hook
+would deliver a `note` on `attention` as readily as an `escalation`. **It
+fails soft** in herdr's mold, not sandbox.py's: a missing binary, a
+nonzero exit or a hang past `[notify].timeout_seconds` is one line in
+`logs/supervisor.log` and an advanced cursor — a notification that cannot
+be delivered must not block the ones behind it, and nothing here can fail
+a tick, a board post or the supervisor (`drain` catches everything,
+including an unwritable cursor file; an unreadable one is re-initialized
+with a log line rather than raised at every tick). **Enabling it starts
+from now**: the first drain arms each topic's cursor at its current tail
+without delivering, so turning the hook on does not replay a month of
+old escalations the banner already showed. A per-tick cap
+(`MAX_PER_TICK`) keeps a suddenly busy listed topic from wedging the job
+thread; the rest waits for the next tick. The template runs with the
+supervisor's environment, as a harness does — not a security boundary.
+
+`quorum notify test "…"` runs the template once, directly and loudly (exit
+1 with the reason), without touching the board or the cursor; `quorum
+doctor` reports the table (`–` when absent, `✗` when `command[0]` is not
+on PATH, `–` when the template has no `{text}`).
 
 ### Design seam: outboxes and a router
 
@@ -1023,7 +1198,10 @@ Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
 `ci.auth_status` (the module that owns every gh subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
-seeds by), sandbox support through `sandbox.availability()`.
+seeds by), sandbox support through `sandbox.availability()`. The
+`[notify]` line is static (argv[0] on PATH, `{text}` in the template);
+actually running the template is `quorum notify test`, which is loud
+where the supervisor's delivery is deliberately not.
 
 One small function per check, each taking only what it needs (a `Config`, a
 `HarnessConfig`, a home path), so every check has both a passing and a

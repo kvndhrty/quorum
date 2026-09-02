@@ -409,6 +409,45 @@ def check_herdr(config: Config) -> Check:
     )
 
 
+def check_notify(config: Config) -> Check:
+    """The `[notify]` template can be run and can carry the text.
+
+    No table is a `–`, not a `✗`: a home whose escalations reach nobody is a
+    decision the user may not have made yet, and the line says what it
+    costs. A table whose argv[0] is not on PATH is a `✗` — every delivery
+    would be a `not found` line in supervisor.log and nothing else, which is
+    exactly the failure that looks like silence. A template without
+    `{text}` is a `–`: quorum appends the text as the final argument, the
+    same convention as a harness template without `{prompt}`, so it works,
+    but the user probably meant to place it.
+    """
+    cfg = config.notify
+    if cfg is None:
+        return na(
+            "notify",
+            "no [notify] table — attention posts reach no one until you look "
+            "(docs/guide.md#getting-notified)",
+        )
+    exe = cfg.command[0]
+    found = shutil.which(exe)
+    topics = ", ".join(cfg.topics)
+    if not found:
+        return problem(
+            "notify",
+            f"[notify].command starts with {exe!r}, which is not on PATH — every "
+            "notification would fail (one line each in logs/supervisor.log)",
+            "install it, give an absolute path in [notify].command, or remove the table",
+        )
+    if not any("{text}" in element for element in cfg.command):
+        return na(
+            "notify",
+            f"notify: {exe} on PATH ({found}), fires on {topics}; no {{text}} in the "
+            "template — quorum appends the text as the final argument",
+            "add {text} to [notify].command to place it explicitly",
+        )
+    return ok("notify", f"notify: {exe} on PATH ({found}), fires on {topics}")
+
+
 def check_sandbox(config: Config) -> Check:
     """[sandbox].use_nono is backed by an importable, supported nono-py.
 
@@ -954,6 +993,7 @@ def run_checks(
     checks += check_projects(home)
     checks.append(check_gh(home, config))
     checks.append(check_herdr(config))
+    checks.append(check_notify(config))
     checks.append(check_sandbox(config))
     checks += check_prompts(home)
     checks.append(check_supervisor(home))
