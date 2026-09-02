@@ -315,6 +315,16 @@ class StallWatchdog:
             f"run stalled — no harness output for {int(quiet)}s "
             f"(>= [tasks].run_stall_timeout_seconds = {self._timeout:g}); stopping the harness",
         )
+        # Only the harness is signalled, never the group: the runner shares
+        # that group (`launch_detached` makes the runner, not the harness,
+        # the leader) and killpg would take the runner down with it. The
+        # limitation that leaves: a *grandchild* that inherited the harness's
+        # stdout and outlived it keeps the pipe open, so the run's
+        # `stream_transcript` stays blocked and the watchdog's kill does not
+        # by itself end the run. There is no cheap fix from here — closing
+        # the read end under a thread already blocked in read() does not
+        # reliably wake it — so the escape hatch is the group-wide one:
+        # `quorum task stop` (see docs/architecture.md).
         with contextlib.suppress(OSError):
             self._proc.terminate()
         deadline = self._monotonic() + self._grace
@@ -706,7 +716,14 @@ def run_task(
 
     lock = runner_lock_path(home, task.id)
     try:
-        fsio.acquire_pid_lock(lock, meta={"role": "task-runner", "task": task.id})
+        # `fresh_session` rides the lock so that a `task stop` closing this
+        # run's record for it can say what kind of run it killed — otherwise
+        # a stopped fresh restart reads as an ordinary one and the digest's
+        # `fresh_sessions=` count never moves.
+        fsio.acquire_pid_lock(
+            lock,
+            meta={"role": "task-runner", "task": task.id, "fresh_session": fresh_session},
+        )
     except fsio.LockError as e:
         raise RunnerError(f"task {task.short_id} already has a live run ({e})") from None
     try:
@@ -823,12 +840,18 @@ def stop_run(
     would kill the caller.
 
     The killed runner never gets to write its own record, so this writes it:
-    a `run.stopped` transcript note and a `TaskRun` with `stopped = true` and
-    the signal as the exit code, so views and the digest say a run ended
-    here rather than showing one that never closed. If the runner did manage
-    to record the run itself (a harness that exits cleanly on SIGTERM), that
-    record stands and nothing is duplicated. The stale lock is cleared too,
-    since its pid is now provably gone.
+    a `run.stopped` transcript note and a `TaskRun` with `stopped = true`,
+    the signal as the exit code and the killed run's `fresh_session` (read
+    back off the lock the runner wrote), so views and the digest say a run
+    ended here rather than showing one that never closed — and so a stopped
+    fresh restart still counts as one. If the runner did manage to record
+    the run itself (a harness that exits cleanly on SIGTERM), that record
+    stands and nothing is duplicated. The stale lock is cleared too, since
+    its pid is now provably gone.
+
+    A lock whose runner is *already* dead — a crashed run, or a zombie its
+    parent never reaped — gets the same tidying without a signal: only a
+    task with no lock at all has "no live run to stop".
 
     Refuses an attached task: the same substrate rail as the runner's, and
     the sharpest one here — the "runner" of an attached task is the user's
@@ -853,21 +876,29 @@ def stop_run(
         pid = int(meta.get("pid", -1))
     except (OSError, ValueError):
         meta, pid = {}, -1
-    if pid <= 0 or not fsio.pid_alive(pid):
+    if pid <= 0:
         raise RunnerError(
             f"task {task.short_id} has no live run to stop "
             "(`quorum task run` to start one)"
         )
     runs_before = len(task.runs)
-    sent, alive = _terminate_process_group(pid, grace_seconds)
-    if alive:
-        raise RunnerError(
-            f"the run of task {task.short_id} (runner pid {pid}) survived SIGKILL — "
-            "something in it is stuck in the kernel; check the processes by hand"
-        )
+    if fsio.pid_alive(pid):
+        sent, alive = _terminate_process_group(pid, grace_seconds)
+        if alive:
+            raise RunnerError(
+                f"the run of task {task.short_id} (runner pid {pid}) survived SIGKILL — "
+                "something in it is stuck in the kernel; check the processes by hand"
+            )
+        ended = f"ended with {sent.name} by `quorum task stop`"
+    else:
+        # The lock outlived its runner: the process died (or is a zombie its
+        # parent has not reaped) without closing its own run. There is
+        # nothing to kill, but the tidying below is exactly what this
+        # command is for, so do it rather than send the caller away.
+        sent, ended = None, "was already gone when `quorum task stop` looked"
     note_transcript(
         transcript_path(home, task.id),
-        f"run.stopped — runner pid {pid} ended with {sent.name} by `quorum task stop`; "
+        f"run.stopped — runner pid {pid} {ended}; "
         "the task keeps its status and its worktree",
     )
     fsio.clear_stale_pid_lock(lock)
@@ -880,12 +911,21 @@ def stop_run(
         run = TaskRun(
             started_at=str(meta.get("started_at") or fresh.updated_at),
             ended_at=fsio.iso(now()),
-            exit_code=-int(sent),
+            exit_code=-int(sent) if sent is not None else None,
             stopped=True,
+            # Read back off the lock the killed runner wrote: this record is
+            # the only trace of that run, and the digest counts fresh
+            # restarts off exactly this field.
+            fresh_session=bool(meta.get("fresh_session")),
         )
         store.update(task.id, runs=[*[r.model_dump() for r in fresh.runs], run.model_dump()])
         recorded = True
-    return {"task": task.id, "pid": pid, "signal": sent.name, "run_recorded": recorded}
+    return {
+        "task": task.id,
+        "pid": pid,
+        "signal": sent.name if sent is not None else None,
+        "run_recorded": recorded,
+    }
 
 
 def _terminate_process_group(
@@ -899,8 +939,11 @@ def _terminate_process_group(
     Liveness is asked of the *group*, not of the runner's pid: SIGTERM kills
     the runner (a plain python process) instantly, while the harness that
     ignores SIGTERM keeps running — checking only the pid would call that a
-    clean stop and leave the hung harness behind. `killpg(group, 0)` answers
-    "is anyone left in this group", which is the question worth asking.
+    clean stop and leave the hung harness behind. `_run_alive` answers "is
+    anyone *live* left in this group", which is the question worth asking:
+    the runner we just killed stays in its own group as a zombie until
+    something reaps it, and a bare `killpg(group, 0)` cannot tell the two
+    apart.
     """
     try:
         pgid = os.getpgid(pid)
@@ -934,17 +977,19 @@ def _terminate_process_group(
 
 
 def _run_alive(pid: int, group: int) -> bool:
-    """Whether any process of a run survives — the group when we have one
-    (so a harness outliving its runner still counts), else the runner's pid."""
+    """Whether any *live* process of a run survives — the group when we have
+    one (so a harness outliving its runner still counts), else the runner's
+    pid.
+
+    Both answers are zombie-aware (`fsio.group_alive` / `fsio.pid_alive`).
+    A runner we just killed becomes a zombie until its parent reaps it, and
+    a parent that stays alive without waiting — the TUI's `s` binding, before
+    `launch_detached` learned to reap — leaves it that way; reading that as
+    "still alive" is what made a stop report a run that survived SIGKILL.
+    """
     if not group:
         return fsio.pid_alive(pid)
-    try:
-        os.killpg(group, 0)
-    except PermissionError:
-        return True  # someone else's now, but it exists
-    except OSError:
-        return False
-    return True
+    return fsio.group_alive(group)
 
 
 def unmet_dependencies(store: TaskStore, task: Task) -> list[str]:
@@ -967,6 +1012,13 @@ def launch_detached(
     makes the child a session (and process-group) leader, which is what lets
     `stop_run` later signal the harness and everything it spawned as one
     group.
+
+    A daemon thread waits on the child so that a caller which keeps running
+    (the TUI's `s` binding; anything long-lived) reaps it instead of leaving
+    a zombie behind — an unreaped runner is still a process-table entry, and
+    every liveness question quorum asks about a run would have to work
+    around it. A caller that exits first loses the thread with the process
+    and init does the reaping, as before.
     """
     home = Path(home)
     log_path = runner_log_path(home, task_id)
@@ -987,6 +1039,7 @@ def launch_detached(
             start_new_session=True,
             env=env,
         )
+    threading.Thread(target=proc.wait, daemon=True, name=f"reap-{proc.pid}").start()
     return proc.pid
 
 

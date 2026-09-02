@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import threading
 import time
 import unicodedata
@@ -201,17 +202,101 @@ def sorted_entries(dirpath: Path, suffix: str = ".json") -> list[Path]:
     )
 
 
+# `ps` answers a liveness question quorum asks rarely (a lock take-over, a
+# stop, a dashboard refresh with a live run), so it may block briefly, but a
+# hung `ps` must never hang a tick.
+PS_TIMEOUT_SECONDS = 5.0
+
+
 class LockError(RuntimeError):
     pass
 
 
+def _ps_rows(*selector: str) -> list[tuple[int, str]] | None:
+    """`(id, state letter)` rows from `ps`, or None when it cannot answer.
+
+    The id is whatever the first `-o` column selects (a pid or a pgid); the
+    second is the process state.
+
+    The one place quorum shells out to `ps`. `os.kill(pid, 0)` cannot tell a
+    running process from a *zombie* — an exited child its parent has not
+    reaped is still a process-table entry — and the state letter is the
+    portable way to ask. Verified on macOS 15 (`ps -o pid=,stat= -p <pid>`
+    and `ps -A -o pgid=,stat=` both report `Z`) and used in the same form on
+    Linux, where procps accepts both.
+
+    Fail-soft in the *conservative* direction: any disappointment (no ps, a
+    timeout, output we cannot parse) answers None, and every caller then
+    keeps the old "the process table has it, so it is alive" reading rather
+    than declaring a live run dead.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", *selector], capture_output=True, text=True, timeout=PS_TIMEOUT_SECONDS
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    rows = []
+    for line in proc.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        try:
+            rows.append((int(fields[0]), fields[1]))
+        except ValueError:
+            continue
+    # A non-zero exit with rows parsed is still an answer (`ps -p` exits 1
+    # when *some* pid is gone); a non-zero exit with nothing means the
+    # selected process is gone, which is an answer too.
+    if proc.returncode != 0 and not rows and proc.stderr.strip():
+        return None
+    return rows
+
+
+def _zombie(state: str) -> bool:
+    return state.upper().startswith("Z")
+
+
 def pid_alive(pid: int) -> bool:
-    """Whether `pid` still exists. EPERM means it does, just owned by someone else."""
+    """Whether `pid` is a live process — a zombie does not count.
+
+    EPERM means it exists, just owned by someone else (and is therefore not
+    our unreaped child). A pid we *can* signal may still be a zombie: the
+    process exited and its parent has not waited on it yet, which is exactly
+    what a `launch_detached` run looks like to a caller that stays alive.
+    Reading that as "the run is still going" would refuse the next run and
+    make `task stop` report a runner that survived SIGKILL, so the state
+    letter decides.
+    """
     try:
         os.kill(pid, 0)
     except OSError as e:
         return e.errno == errno.EPERM
-    return True
+    rows = _ps_rows("-o", "pid=,stat=", "-p", str(pid))
+    if rows is None:
+        return True  # ps could not answer: keep the process table's word
+    return any(not _zombie(state) for row_pid, state in rows if row_pid == pid)
+
+
+def group_alive(pgid: int) -> bool:
+    """Whether any *live* process is left in a process group.
+
+    `killpg(pgid, 0)` alone is not enough at either end: on macOS a group
+    holding only zombies answers EPERM (which for a single pid means "alive,
+    someone else's"), and on Linux it succeeds outright. So the cheap signal
+    probe only rules the group out — anything else asks `ps` for the group's
+    members and their states.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except PermissionError:
+        pass  # exists, but nothing we may signal — possibly all zombies
+    except OSError:
+        return False  # ESRCH: nobody left
+    rows = _ps_rows("-A", "-o", "pgid=,stat=")
+    if not rows:
+        return True  # ps could not answer (an empty listing cannot be true)
+    return any(not _zombie(state) for row_pgid, state in rows if row_pgid == pgid)
 
 
 def acquire_pid_lock(path: Path, meta: dict[str, Any] | None = None) -> None:
@@ -265,15 +350,26 @@ def clear_stale_pid_lock(path: Path) -> bool:
     The counterpart to `release_pid_lock` for a lock this process does not
     own: `quorum task stop` kills someone else's runner, and only after the
     pid is confirmed dead may it clear the file the runner never got to.
-    Re-reads under the same rule the take-over path uses, so it can never
-    unlink a lock that a new run has meanwhile acquired. Returns whether it
-    removed anything.
+    Returns whether it removed anything.
+
+    Re-reads the pid immediately before unlinking, which *narrows* but does
+    not close the window: `acquire_pid_lock` takes a stale lock over by
+    unlink-and-create, so a new runner can still claim the file between that
+    last read and this unlink, and its lock would be the one removed. There
+    is no compare-and-unlink to be had without the flock the pid-lock
+    deliberately avoids; the residue is a run holding a lock file that is
+    gone, which the next acquisition simply recreates.
     """
     try:
         pid = int(read_json(path).get("pid", -1))
     except (OSError, ValueError):
         return False
     if pid > 0 and pid_alive(pid):
+        return False
+    try:
+        if int(read_json(path).get("pid", -1)) != pid:
+            return False  # somebody else's lock now — leave it alone
+    except (OSError, ValueError):
         return False
     try:
         path.unlink(missing_ok=True)

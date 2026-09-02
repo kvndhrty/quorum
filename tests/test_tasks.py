@@ -9,7 +9,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -577,24 +576,42 @@ def test_second_concurrent_run_is_refused(home: Path, project: str):
 # -- stopping a hung run --------------------------------------------------
 
 
-def start_detached_run(home: Path, task_id: str) -> subprocess.Popen:
-    """Launch a real detached run and reap it as soon as it dies.
+def start_detached_run(
+    home: Path, task_id: str, fresh_session: bool = False
+) -> subprocess.Popen:
+    """Launch a real detached run, in its own session, and never reap it.
 
-    The reaper thread matters: a killed child that nobody waits on stays a
-    zombie in its process group, and `stop_run` asks the *group* whether
-    anything survived. In production the runner's parent (the CLI process)
-    exits and init reaps it; here the test process is the parent.
+    Deliberately unreaped: the test process stays alive, so a killed run
+    lingers as a zombie in its group — exactly what a long-lived caller
+    (the TUI) used to leave behind, and what every liveness answer here has
+    to survive.
     """
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home)],
+    return subprocess.Popen(
+        [
+            sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home),
+            *(["--fresh-session"] if fresh_session else []),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         env={**os.environ, "QUORUM_HOME": str(home)},
     )
-    threading.Thread(target=proc.wait, daemon=True).start()
-    return proc
+
+
+def wait_for_zombie(pid: int, timeout: float = 20.0) -> None:
+    """Block until `pid` has exited without being waited on. Asks `ps` by
+    hand rather than `Popen.poll()`, which would reap the very zombie the
+    caller wants."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if state.upper().startswith("Z"):
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"pid {pid} never became a zombie")
 
 
 def wait_for_live_run(home: Path, task_id: str, timeout: float = 20.0) -> None:
@@ -637,11 +654,60 @@ def test_stop_sigkills_a_harness_that_ignores_sigterm(home: Path, project: str):
     result = runner.stop_run(home, task.short_id, grace_seconds=1)
 
     # SIGTERM kills the runner but not the harness, so the group check is what
-    # notices and escalates — the whole tree is gone afterwards.
+    # notices and escalates — nothing is left running in the group afterwards
+    # (the unreaped runner is still *in* it, which is why the question has to
+    # be `group_alive` and not a bare killpg).
     assert result["signal"] == "SIGKILL"
-    with pytest.raises(ProcessLookupError):
-        os.killpg(group, 0)
+    assert not fsio.group_alive(group)
     assert TaskStore(home).get(task.id).runs[0].stopped
+
+
+def test_stop_closes_a_run_whose_runner_is_a_zombie(home: Path, project: str):
+    """A runner nobody reaped is a process-table entry, not a run.
+
+    `launch_detached`'s caller may keep running (the TUI's `s` binding), and
+    then the killed runner stays a zombie in its group. Reading that as
+    "alive" made `task stop` raise "survived SIGKILL" — no run record, and a
+    stale lock that also refused the next `task run`.
+    """
+    harness_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+    dead = subprocess.Popen([sys.executable, "-c", ""], start_new_session=True)
+    wait_for_zombie(dead.pid)
+    lock = tasks.runner_lock_path(home, task.id)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fsio.atomic_write_json(
+        lock,
+        {"role": "task-runner", "task": task.id, "pid": dead.pid,
+         "started_at": fsio.iso(fsio.utc_now()), "fresh_session": True},
+    )
+
+    try:
+        result = runner.stop_run(home, task.short_id, grace_seconds=1)
+    finally:
+        dead.wait()  # reap it: the test leaves no zombie behind
+
+    assert result["signal"] is None and result["run_recorded"]
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.status == "queued"  # stop is still not cancel
+    run = fresh.runs[-1]
+    assert run.stopped and run.fresh_session and run.ended_at
+    assert not lock.exists()  # ...and the next run may start
+
+
+def test_a_stopped_fresh_run_is_recorded_as_fresh(home: Path, project: str):
+    """The digest counts fresh restarts off the run records, so the record
+    `stop_run` writes for the run it killed has to know which kind it was —
+    otherwise stop/--fresh-session/stop never reaches the escalation rung."""
+    harness_config(home, extra='env = { FAKE_HARNESS_MODE = "stall" }\n')
+    task = TaskStore(home).add(project, "x", "fake")
+    start_detached_run(home, task.id, fresh_session=True)
+    wait_for_live_run(home, task.id)
+
+    runner.stop_run(home, task.short_id, grace_seconds=5)
+
+    run = TaskStore(home).get(task.id).runs[0]
+    assert run.stopped and run.fresh_session
 
 
 def test_stop_refuses_an_attached_task_and_a_task_with_no_run(home: Path, project: str):

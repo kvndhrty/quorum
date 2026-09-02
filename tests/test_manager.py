@@ -12,8 +12,8 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -663,14 +663,13 @@ def hold_the_runner_lock(home: Path, task_id: str) -> subprocess.Popen:
 
     `task stop` kills process *groups* for real, so a stub pid (the pid-1
     trick the passive-observation tests use) would be both a lie and a
-    disaster. The reaper thread keeps the killed process from lingering as a
-    zombie in a group the stop then reads as still alive.
+    disaster. Nothing reaps it: the killed process lingers as a zombie in its
+    group, which the stop has to read as dead all the same.
     """
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(600)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
     )
-    threading.Thread(target=proc.wait, daemon=True).start()
     lock = tasks.runner_lock_path(home, task_id)
     lock.parent.mkdir(parents=True, exist_ok=True)
     fsio.atomic_write_json(
@@ -715,6 +714,39 @@ def test_a_dead_runner_is_never_stalled_only_relaunchable(home: Path, clock, pro
 
     assert "STALLED" not in digest
     assert manager.stall_minutes(home, task, clock()) >= STALL_QUIET_MINUTES
+
+
+def test_a_first_run_that_never_printed_can_still_be_stalled(
+    home: Path, clock, project: str
+):
+    """The hang that motivated all this (#24: a stream-json harness blocked on
+    stdin) produces no output at all, so there is no transcript to age. The
+    live run's own start answers instead — otherwise the loudest hang there is
+    would be the one stall the digest cannot see."""
+    store = TaskStore(home)
+    task = store.add(project, "hung on its first turn", "tasktool")
+    started = clock() - timedelta(minutes=STALL_QUIET_MINUTES + 5)
+    lock = tasks.runner_lock_path(home, task.id)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fsio.atomic_write_json(
+        lock,
+        {"role": "task-runner", "task": task.id, "pid": 1, "started_at": fsio.iso(started)},
+    )
+    assert not tasks.transcript_path(home, task.id).exists()
+
+    assert manager.stall_minutes(home, task, clock()) == STALL_QUIET_MINUTES + 5
+    digest = build_digest(home, store.list(), clock(), [])
+
+    assert "STALLED" in digest_line(digest, task.short_id, f"- [queued] {task.short_id}")
+
+
+def test_a_young_run_with_no_transcript_is_not_stalled(home: Path, clock, project: str):
+    store = TaskStore(home)
+    task = store.add(project, "just launched", "tasktool")
+    mark_runner_alive(home, task.id)  # no started_at: the lock's own mtime, now
+
+    assert manager.stall_minutes(home, task, clock()) < STALL_QUIET_MINUTES
+    assert "STALLED" not in build_digest(home, store.list(), clock(), [])
 
 
 def test_digest_counts_stops_fresh_sessions_and_a_stalled_run(home: Path, clock, project: str):

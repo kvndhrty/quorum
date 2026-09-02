@@ -223,19 +223,43 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
 
 
 def stall_minutes(home: Path, task: tasks.Task, now: datetime) -> int | None:
-    """Minutes since this task's transcript last grew, or None when there is
-    no transcript at all (a task that has never produced a line).
+    """Minutes since this task's transcript last grew — or, when there is no
+    transcript at all, minutes since the live run started. None only when
+    neither is readable.
 
     Deliberately the transcript's own mtime rather than `last_activity`: the
     question a stall asks is "has the *harness* said anything", and
     last_activity also counts the runner lock and the reports file, both of
     which a hung run can leave fresh.
+
+    The fallback to the run's own start is the case that matters most: a
+    *first* run that hangs before printing anything (the stream-json stdin
+    block of #24) has no transcript, and reading that as "no answer" would
+    hide the loudest hang there is behind the one thing it cannot produce.
+    The lock's `started_at` is when this run began; its mtime is the
+    fallback's fallback, for a lock written before the field existed.
     """
     try:
         mtime = tasks.transcript_path(home, task.id).stat().st_mtime
     except OSError:
-        return None
+        started = _run_started_at(home, task)
+        if started is None:
+            return None
+        return int((now - started).total_seconds() // 60)
     return int((now - datetime.fromtimestamp(mtime, UTC)).total_seconds() // 60)
+
+
+def _run_started_at(home: Path, task: tasks.Task) -> datetime | None:
+    """When the live run acquired its lock, from the lock itself."""
+    lock = tasks.runner_lock_path(home, task.id)
+    try:
+        return fsio.parse_iso(str(fsio.read_json(lock)["started_at"]))
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        return datetime.fromtimestamp(lock.stat().st_mtime, UTC)
+    except OSError:
+        return None
 
 
 def _restart_marks(task: tasks.Task) -> str:

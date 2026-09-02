@@ -1167,9 +1167,13 @@ def task_stop(
         result = stop_run(target, task.id)
     except RunnerError as e:
         raise _fail(str(e)) from None
+    how = (
+        f"{result['signal']} to pid {result['pid']}"
+        if result["signal"]
+        else f"pid {result['pid']} was already gone"
+    )
     typer.secho(
-        f"task {task.short_id}: run stopped ({result['signal']} to pid {result['pid']}) — "
-        f"status is still {task.status!r}",
+        f"task {task.short_id}: run stopped ({how}) — status is still {task.status!r}",
         fg="green",
     )
     if result["run_recorded"]:

@@ -451,7 +451,10 @@ quorum task run a3f2k9 --detach --fresh-session   # start a new session instead
 group (SIGKILL if something refuses), records the interrupted run, and
 leaves the task's status, queue position and worktree exactly as they were.
 That is the difference from `task cancel --kill`, which ends the *task*. A
-stopped task is just a task waiting to be run again.
+stopped task is just a task waiting to be run again. It is also the tidy-up
+for a run that died without closing itself (a crashed runner, a killed
+terminal): the run gets its record, the stale lock goes, and the task is
+runnable again.
 
 `--fresh-session` is for when resuming is what keeps failing — a session the
 provider now errors on every turn. It forgets the stored session id and

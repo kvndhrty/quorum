@@ -18,19 +18,24 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   - `quorum task stop <id>` ends the *run* and nothing else: SIGTERM (then
     SIGKILL) to the runner's process group, so the harness and everything it
     spawned go with it, while the task keeps its status, its queue position
-    and its worktree. The interrupted run is recorded (`stopped`, a
-    `run.stopped` transcript note, the stale lock cleared) rather than left
-    looking live. Attached tasks are refused — quorum never kills your own
+    and its worktree. The interrupted run is recorded (`stopped`, its
+    `fresh_session` kind, a `run.stopped` transcript note, the stale lock
+    cleared) rather than left looking live — including for a runner that was
+    already dead when the stop looked, which gets the same tidying without a
+    signal. Attached tasks are refused — quorum never kills your own
     interactive session.
   - `quorum task run <id> --fresh-session` forgets the stored session id and
     starts a new session in the same worktree, for when *resuming* is what
-    keeps failing. Recorded as `fresh_session` on the run.
+    keeps failing. Recorded as `fresh_session` on the run — by the runner,
+    and by `task stop` for a fresh run it killed, so the manager's
+    "escalate after two fresh restarts" can actually count them.
   - `[tasks].run_stall_timeout_seconds` (0 = off, the default) is a runner
     watchdog: no harness output for that long ends the run, marks it
     `stalled`, and turns a hang into an ordinary dead runner. It counts
     silence, not progress — set it above your longest quiet step.
   - The manager digest gains a `STALLED` observation (a live runner whose
-    transcript has not grown for 30 minutes) plus `stopped=` /
+    transcript has not grown for 30 minutes — or, for a run that hung before
+    printing anything at all, one that started that long ago) plus `stopped=` /
     `fresh_sessions=` / `last-run=stalled` marks, and `prompts/manager.md`
     gains the policy that reads them: look at the tail once, stop and
     resume, then restart with a fresh session and a summarizing nudge, then
@@ -39,6 +44,16 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ### Changed
 
+- **A zombie process no longer counts as a live run.** An exited process its
+  parent has not reaped is still a process-table entry, so `kill(pid, 0)`
+  and `killpg(pgid, 0)` both answered "alive" for one — which made
+  `quorum task stop` report a run that survived SIGKILL and left the next
+  `task run` refusing to start. `runner.launch_detached` now reaps its child
+  from a daemon thread (a caller that keeps running, such as the TUI's `s`
+  binding, no longer leaves one behind), and `fsio.pid_alive` /
+  `fsio.group_alive` confirm a live-looking pid or group against the process
+  state `ps` reports, so a corpse reads as dead. Fail-soft: where `ps`
+  cannot answer, the old reading stands.
 - `prompts/manager.md` — new hung-session section (item 7) and two new tools
   in its command list. An unedited copy is upgraded by `quorum init`; an
   edited one is not, so move house rules into `prompts/manager.local.md`
