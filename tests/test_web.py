@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from quorum import fsio, tasks
-from quorum.messages import MessageBus
+from quorum.messages import Message, MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore
 from quorum.web.app import create_app
@@ -154,3 +155,47 @@ def test_task_rows_expose_the_observed_pr_state(client: TestClient, home: Path):
 
     page = (Path(web_app.__file__).parent / "static" / "index.html").read_text()
     assert 't.pr_state === "merged"' in page and 't.pr_state === "closed"' in page
+def test_ack_drops_an_escalation_from_the_banner(client: TestClient, home: Path):
+    """The web Ack button: the same bus call the CLI and the TUI make, so the
+    banner drops the message and messages/archive/ keeps it."""
+    bus = MessageBus(home)
+    msg = bus.post("manager", "attention", text="stuck: need credentials")
+    assert client.get("/api/overview").json()["attention"]["count"] == 1
+
+    r = client.post(f"/api/board/attention/ack/{msg.id}")
+    assert r.status_code == 200
+    assert r.json()["short_id"] == msg.short_id
+    assert client.get("/api/overview").json()["attention"]["count"] == 0
+    archive = sorted((home / "messages" / "archive").glob("*.jsonl.gz"))
+    assert archive and msg.id in gzip.open(archive[0], "rt").read()
+
+
+def test_ack_of_an_unknown_or_ambiguous_id_fails_loudly(client: TestClient, home: Path):
+    for message_id in ("01SHAREDHEAD0000000000000A", "01SHAREDHEAD0000000000000B"):
+        m = Message.model_validate(
+            {"from": "manager", "topic": "attention", "id": message_id,
+             "payload": {"text": message_id}}
+        )
+        fsio.atomic_write_json(home / "messages" / "board" / "attention" / m.filename(), m.dump())
+
+    assert client.post("/api/board/attention/ack/ZZZZZZ").status_code == 404
+    r = client.post("/api/board/attention/ack/01SHAREDHEAD")
+    assert r.status_code == 422
+    assert "ambiguous" in r.json()["detail"]
+    assert client.get("/api/overview").json()["attention"]["count"] == 2
+
+
+def test_the_attention_summary_carries_the_id_an_ack_needs(client: TestClient, home: Path):
+    msg = MessageBus(home).post("manager", "attention", text="ack me")
+    attn = client.get("/api/overview").json()["attention"]
+    assert attn["recent"][0]["id"] == msg.id
+    assert attn["recent"][0]["short_id"] == msg.short_id
+
+
+def test_the_page_ships_the_attention_panel_and_its_ack_button(client: TestClient):
+    """The dashboard is one static file with no build step, so the only thing
+    that keeps its markup and the route it posts to in step is a test."""
+    page = client.get("/").text
+    assert 'id="attention-panel"' in page
+    assert "/api/board/attention/ack/" in page
+    assert "data-ack" in page

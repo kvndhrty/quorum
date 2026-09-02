@@ -75,6 +75,13 @@ so the record stays true.
   order is chronological) and maildir-style inboxes (`new/` → `cur/` claimed by
   `os.rename`, so exactly one claimant wins). Task guidance (`task-<id>` inboxes) and
   the supervisor control channel both ride this; no new transports.
+  On-demand archival is the janitor's per-message path exposed
+  (`archive_board_message`), with `ack_board_message` (one message, resolved
+  from a full id / unique prefix / `short_id` suffix — `TaskStore.resolve`'s
+  grammar, raising the same `KeyError`/`ValueError`), `archive_topic` and
+  `clear_inbox` on top. Acking is **archival, never a flag**: that is what
+  keeps the board free of read-state while still letting a handled
+  escalation leave `views.attention_summary`'s seven-day window.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
   `report()` (the harness's return channel), path helpers shared by runner/manager/
   views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`
@@ -137,8 +144,11 @@ so the record stays true.
   and upgrading `branch -d` to `-D` (which does lose commits, so the confirm
   prompt says so). One `_actor_guard` entry per *command*, not per task, so
   a sweep can't burn an agent's action cap half-way through. The board/inbox
-  half lives in `messages.py` (`archive_board_message` → `archive_topic`,
-  `clear_inbox`), behind `quorum board clear` and `task inbox --clear`.
+  half lives in `messages.py` (`archive_board_message` → `ack_board_message`,
+  `archive_topic`, `clear_inbox`), behind `quorum board ack`, `board clear`
+  and `task inbox --clear`. `board ack --all <topic>` and `board clear
+  <topic>` share one CLI helper (`_clear_topic`) so the alias cannot drift
+  from what it aliases.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the
@@ -236,9 +246,13 @@ so the record stays true.
   through `ConfirmScreen`) — all four target the *highlighted* row while the task
   table has focus (`enter` opens a transcript, it does not arm the write keys),
   falling back to the open task, and all four go through `_write`, so an unwritable
-  home notifies instead of taking the dashboard down. **Web**: nudge, board posts,
+  home notifies instead of taking the dashboard down. `a` is the fifth,
+  aimed at the banner rather than a task: `AttentionScreen` is a picker (the
+  banner is a count and the board pane is a log, so neither can be pointed
+  at) that dismisses with a message id, and the app acks it through `_write`. **Web**: nudge, board posts,
   project edits, and agent create (via `config.create_agent`) /
-  pause / resume / run-now / reload.
+  pause / resume / run-now / reload, plus an Ack button per live escalation
+  (`POST /api/board/{topic}/ack/{message_id}`) — the same shared bus call.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`

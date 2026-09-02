@@ -546,9 +546,9 @@ points.
 Quorum accumulates: a finished task keeps its directory, its worktree, and
 its `quorum/<short-id>` branch forever, and the board grows until the hourly
 janitor's retention window catches up with it. `quorum task prune`,
-`quorum board clear <topic>` and `quorum task inbox <id> --clear` are the
-three hand-driven tidies, and all of them follow the bus's rule: **archive,
-never delete.**
+`quorum board clear <topic>`, `quorum board ack <message-id>` and
+`quorum task inbox <id> --clear` are the hand-driven tidies, and all of them
+follow the bus's rule: **archive, never delete.**
 
 - A pruned task's `tasks/<id>/` directory is *moved* to `tasks/.archive/<id>/`
   by one `os.rename`. The name is dot-prefixed on purpose: `TaskStore.list`
@@ -559,8 +559,12 @@ never delete.**
 - Cleared board and inbox messages go into the same
   `messages/archive/YYYY-MM.jsonl.gz` the janitor writes, keeping their
   `created_at`. `board clear` is `archive_old`'s per-message path run
-  immediately for one topic; `inbox --clear` touches `new/` only, because a
-  message in `cur/` has a claimant.
+  immediately for one topic (and `quorum board ack --all <topic>` is the same
+  sweep under the name a reader who has been acking one at a time reaches
+  for — one command implemented on top of the other, so the alias cannot
+  drift, and since its argument is the topic, a `--topic` alongside `--all`
+  is an error rather than a silently ignored flag); `inbox --clear` touches
+  `new/` only, because a message in `cur/` has a claimant.
 
 `prune.py` splits into total readers and two doers — `select()` (pure, over
 an already-loaded task list), `refusal()`, `dependents_first()` (pure batch
@@ -948,10 +952,27 @@ One `Message` schema serves two channels:
   `messages/archive/YYYY-MM.jsonl.gz`.
 - The same archive is where **on-demand** clearing goes: `MessageBus`
   exposes the janitor's per-message path as `archive_board_message`, with
-  `archive_topic` (behind `quorum board clear`) and `clear_inbox` (behind
-  `quorum task inbox --clear`) on top of it. Clearing is archival, not a
-  flag on the message, so the board keeps carrying no read-state and any
-  number of readers still coexist.
+  `ack_board_message` (behind `quorum board ack <id>`), `archive_topic`
+  (behind `quorum board clear` and its `board ack --all <topic>` alias) and
+  `clear_inbox` (behind `quorum task inbox --clear`) on top of it. Clearing
+  and acking are archival, not a flag on the message, so the board keeps
+  carrying no read-state and any number of readers still coexist.
+- **Acknowledgement** is that per-message path aimed at the attention banner.
+  `views.attention_summary` is a seven-day window over the `attention` topic,
+  so without an ack an escalation the human has already handled sits in
+  `quorum status`, the TUI header and the web header for a week; acking
+  archives that one message, which drops it from every view (they are all
+  pure readers of the live topic) while the history keeps it with its
+  original `created_at`. `resolve_board_message` accepts a full message id, a
+  unique prefix, or the unique suffix `Message.short_id` prints — the grammar
+  `TaskStore.resolve` already taught — and raises `KeyError`/`ValueError` for
+  unknown and ambiguous, because a silently-wrong ack archives someone else's
+  escalation. `board read` prints that short id so there is something to type.
+  The affordance repeats in both dashboards as one shared bus call and no
+  view-local write logic: the TUI's `a` opens the attention list and acks the
+  highlighted line through `_write` (an unwritable home notifies, it never
+  takes the dashboard down), and the web dashboard's per-escalation **Ack**
+  button posts to `/api/board/{topic}/ack/{message_id}`.
 
 The **control channel** rides the same machinery: `quorum agent
 pause|resume|run-now|reload` sends to the `supervisor` inbox, which the

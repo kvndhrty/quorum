@@ -553,7 +553,8 @@ def status(
     if attention["count"]:
         typer.secho(
             f"⚠ {attention['count']} on #attention in the last {attention['days']}d "
-            "— `quorum board read attention`",
+            "— `quorum board read attention`, then `quorum board ack <id>` "
+            "for each one you have handled",
             fg="yellow",
         )
 
@@ -1459,7 +1460,11 @@ def board_read(
                 typer.echo(json.dumps(msg.dump(), ensure_ascii=False))
             else:
                 created = msg.created_at.replace("T", " ").rstrip("Z")
-                typer.echo(f"[{created}] {t} <{msg.sender}> {msg.type}: {msg.payload.get('text', '')}")
+                # the short id is here so `board ack` has something to name
+                typer.echo(
+                    f"[{created}] {t} {msg.short_id} <{msg.sender}> "
+                    f"{msg.type}: {msg.payload.get('text', '')}"
+                )
     if empty and not as_json:
         typer.echo(f"no messages in the last {since}")
 
@@ -1481,9 +1486,81 @@ def board_clear(
     hourly janitor writes — nothing is lost, it just stops being live.
     `quorum board clear attention` is the one that empties the banner.
     """
-    target = get_home(home)
+    _clear_topic(get_home(home), topic, before=before, dry_run=dry_run, yes=yes, action="board.clear")
+
+
+@board_app.command("ack")
+def board_ack(
+    target_id: str = typer.Argument(
+        ..., metavar="MESSAGE_ID",
+        help="A message id, prefix or short suffix — or, with --all, a topic.",
+    ),
+    all_: bool = typer.Option(
+        False, "--all", help="Ack a whole topic instead of one message (`board clear`)."
+    ),
+    topic: str | None = typer.Option(
+        None, "--topic", help="Only look in this topic (default: every topic)."
+    ),
+    before: str | None = typer.Option(
+        None, "--before", help="With --all: only messages older than this (7d, 2026-09-01)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="With --all: skip the confirmation."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Say "I have seen this one": archive a single board message.
+
+    The banner (`quorum status`, the TUI header, the web header) is a time
+    window over #attention, not a read-state — so an escalation you have
+    already handled sits there for a week. Acking archives that one message
+    into `messages/archive/YYYY-MM.jsonl.gz`, which drops it from every view
+    while the history keeps its original `created_at`.
+
+    `quorum board ack --all attention` is `quorum board clear attention`:
+    the same sweep, spelled the way you were already thinking about it.
+    """
+    home_path = get_home(home)
+    if all_:
+        if topic:
+            raise _fail(
+                "--topic does not apply to --all; the argument is the topic "
+                f"(`quorum board ack --all {topic}`)"
+            )
+        _clear_topic(
+            home_path, target_id, before=before, dry_run=dry_run, yes=yes, action="board.ack.all"
+        )
+        return
+    if before:
+        raise _fail("--before applies to --all; a single ack names one message")
+    bus = MessageBus(home_path)
+    try:
+        msg, path = bus.resolve_board_message(target_id, topic=topic)
+    except KeyError:
+        where = f" on {topic}" if topic else ""
+        raise _fail(
+            f"no live board message matching {target_id!r}{where} — `quorum board read`"
+        ) from None
+    except ValueError as e:
+        raise _fail(str(e)) from None
+    text = msg.payload.get("text", "")
+    if dry_run:
+        typer.echo(f"would ack #{msg.topic} {msg.short_id} <{msg.sender}> {text[:70]}")
+        return
+    _actor_guard(home_path, "board.ack", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
+    # archive the path resolution already handed us: resolving a second time
+    # could miss (the janitor, another `board ack`, the web panel) and raise
+    # where a tidy line belongs, and archiving a gone file is a no-op anyway
+    bus.archive_board_message(path)
+    typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
+
+
+def _clear_topic(
+    home: Path, topic: str, before: str | None, dry_run: bool, yes: bool, action: str
+) -> None:
+    """The sweep behind both `board clear <topic>` and `board ack --all <topic>`
+    — one implementation, so the alias can never drift from what it aliases."""
     floor = _parse_before(before) if before else None
-    bus = MessageBus(target)
+    bus = MessageBus(home)
     doomed = bus.archive_topic(topic, before=floor, dry_run=True)
     if not doomed:
         typer.echo(f"nothing to clear on {topic}")
@@ -1494,10 +1571,9 @@ def board_clear(
             typer.echo(f"  [{msg.created_at}] <{msg.sender}> {msg.payload.get('text', '')[:70]}")
         return
     _confirm(yes, f"archive {len(doomed)} message(s) from {topic}?")
-    _actor_guard(target, "board.clear", args=f"{topic}: {len(doomed)} message(s)")
+    _actor_guard(home, action, args=f"{topic}: {len(doomed)} message(s)")
     archived = bus.archive_topic(topic, before=floor)
     typer.secho(f"archived {len(archived)} message(s) from {topic}", fg="green")
-
 
 
 # -- projects --------------------------------------------------------------

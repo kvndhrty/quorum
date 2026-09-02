@@ -60,6 +60,13 @@ class Message(BaseModel):
     def created(self) -> datetime:
         return fsio.parse_iso(self.created_at)
 
+    @property
+    def short_id(self) -> str:
+        """The handle a human types: the ULID's random tail, like a task's
+        `short_id` (the head is a shared timestamp, so it discriminates
+        nothing)."""
+        return self.id[-6:].lower()
+
     def filename(self) -> str:
         return f"{fsio.compact_ts(self.created)}-{self.id}.json"
 
@@ -249,16 +256,16 @@ class MessageBus:
 
     # -- on-demand archival ----------------------------------------------
     #
-    # The janitor's per-message path, exposed for `quorum board clear` and
-    # `quorum task inbox --clear`. Same destination file, same "archive,
-    # never delete" rule: a cleared message keeps its created_at in
-    # messages/archive/, it just stops being live.
+    # The janitor's per-message path, exposed for `quorum board ack`,
+    # `quorum board clear` and `quorum task inbox --clear`. Same destination
+    # file, same "archive, never delete" rule: an acked or cleared message
+    # keeps its created_at in messages/archive/, it just stops being live.
 
     def archive_board_message(self, path: Path) -> Message | None:
         """Archive one board message file and remove it from its topic.
 
-        The reusable unit: `archive_topic` loops over it, and a future
-        per-message ack (#56) resolves an id to a path and calls it. A file
+        The reusable unit: `archive_topic` loops over it, and
+        `ack_board_message` resolves one id to a path and calls it once. A file
         that will not parse is removed as the janitor removes it — it can be
         read by nobody, so keeping it live only makes every scan trip on it.
         """
@@ -269,6 +276,57 @@ class MessageBus:
         _archive_one(self.archive_dir, msg.dump(), when=msg.created)
         path.unlink(missing_ok=True)
         return msg
+
+    def resolve_board_message(
+        self, handle: str, topic: str | None = None
+    ) -> tuple[Message, Path]:
+        """Find one *live* board message by full id, unique prefix or unique
+        suffix — the suffix form is what `short_id` hands out, and the whole
+        handle grammar is the one `TaskStore.resolve` uses, because a reader
+        who has learned to type six characters at a task should not have to
+        learn a second rule at a message.
+
+        Raises KeyError when nothing matches and ValueError when the handle is
+        ambiguous, exactly as task resolution does — a wrong ack is silent (the
+        banner just drops something else), so both fail loudly.
+        """
+        handle = handle.strip().upper()
+        if not handle:
+            raise KeyError(handle)
+        matches: list[tuple[Message, Path]] = []
+        for name in [topic] if topic else self.topics():
+            for path in fsio.sorted_entries(self.board_dir / name):
+                # the filename is <compact-ts>-<ULID>.json and the timestamp
+                # carries no "-", so this is the id without reading the file
+                candidate = path.stem.split("-", 1)[-1].upper()
+                if not (candidate.startswith(handle) or candidate.endswith(handle)):
+                    continue
+                msg = _load(path)
+                if msg is None:
+                    continue
+                if msg.id.upper() == handle:
+                    return msg, path  # an exact id is never ambiguous
+                matches.append((msg, path))
+        if not matches:
+            raise KeyError(handle)
+        if len(matches) > 1:
+            raise ValueError(
+                f"message handle {handle!r} is ambiguous: "
+                + ", ".join(m.short_id for m, _ in matches)
+            )
+        return matches[0]
+
+    def ack_board_message(self, handle: str, topic: str | None = None) -> Message:
+        """Archive the one board message `handle` names — the per-message half
+        of `archive_topic`, and what `quorum board ack` and both dashboards
+        call.
+
+        Ack is *archival*, not a flag on the message: the board still carries
+        no read-state, so acking only ever means "this one stops being live",
+        and every reader keeps coexisting without coordination.
+        """
+        msg, path = self.resolve_board_message(handle, topic)
+        return self.archive_board_message(path) or msg
 
     def archive_topic(
         self, topic: str, before: datetime | None = None, dry_run: bool = False

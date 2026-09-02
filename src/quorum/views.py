@@ -264,6 +264,8 @@ def board_tail(home: Path, limit: int = 20) -> list[dict[str, Any]]:
         for m in bus.read_topic(topic, limit=limit):
             msgs.append(
                 {
+                    "id": m.id,
+                    "short_id": m.short_id,
                     "at": m.created_at,
                     "topic": topic,
                     "from": m.sender,
@@ -281,7 +283,11 @@ def recent_actions(home: Path, limit: int = 20) -> list[dict[str, Any]]:
 
 # The board has no read-state, so "needs a look" is time-bounded rather than
 # tracked: recent posts on the escalation topic. Old escalations age out of
-# the summary (and are eventually archived by the janitor).
+# the summary (and are eventually archived by the janitor); a handled one is
+# dropped early by acking it (`quorum board ack`, TUI `a`, the web Ack button),
+# which archives the message rather than marking it — see
+# `MessageBus.ack_board_message`. Each entry therefore carries its id, because
+# that is the handle every ack affordance needs.
 ATTENTION_WINDOW_DAYS = 7
 
 
@@ -294,6 +300,8 @@ def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int 
         "days": days,
         "recent": [
             {
+                "id": m.id,
+                "short_id": m.short_id,
                 "at": m.created_at,
                 "from": m.sender,
                 "text": m.payload.get("text", ""),

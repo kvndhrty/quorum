@@ -27,6 +27,9 @@
   #sup.alive .dot { background: var(--ok); }
   #attn { display: none; font-size: 13px; font-weight: 600; color: var(--warn); }
   li.attn { border-left: 3px solid var(--warn); padding-left: 8px; }
+  #attention-panel { display: none; }
+  #attention li { border-left: 3px solid var(--warn); padding-left: 8px; }
+  #attention button { float: right; }
   li.attn .meta { color: var(--warn); }
   main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
          gap: 16px; padding: 16px 24px 40px; max-width: 1500px; }
@@ -91,6 +94,10 @@
   <span id="attn"></span>
 </header>
 <main>
+  <section class="wide" id="attention-panel">
+    <h2>Attention</h2>
+    <ul id="attention"></ul>
+  </section>
   <section class="wide">
     <h2>Tasks</h2>
     <table id="tasks"><tr><td class="muted">loading…</td></tr></table>
@@ -176,9 +183,16 @@ async function refresh() {
   $("sup-text").textContent = sup.alive
     ? `supervisor running (pid ${sup.pid})` : "supervisor not running";
 
+  // #attention: a time window, not a read-state — so each escalation carries
+  // an Ack button that archives that one message (POST .../ack/<id>), which
+  // is how a handled escalation leaves the banner before the window expires.
   const attn = data.attention || {};
   $("attn").style.display = attn.count ? "inline" : "none";
   $("attn").textContent = attn.count ? `⚠ ${attn.count} on #attention` : "";
+  $("attention-panel").style.display = attn.count ? "block" : "none";
+  setSection("attention", (attn.recent || []).slice().reverse().map(m =>
+    `<li><button class="small" data-ack="${esc(m.id)}" title="archive this one — the history keeps it">Ack</button>${esc(m.text)}<br><span class="meta">${esc(m.from)} · ${esc(m.at.replace("T"," ").replace("Z",""))} · ${esc(m.short_id)}</span></li>`
+  ).join(""));
 
   setSection("tasks", (data.tasks || []).map(t => {
     const cls = t.attached ? "task-running" : (t.running ? "task-running" : `status-${esc(t.status)}`);
@@ -381,6 +395,15 @@ $("agent-create-form").addEventListener("submit", async (e) => {
   toast(`agent ${body.name} created`, true);
   $("agent-create").open = false;
   $("na-name").value = ""; $("na-prompt").value = "";
+  refresh();
+});
+
+$("attention").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-ack]");
+  if (!btn) return;
+  const r = await fetch(`/api/board/attention/ack/${btn.dataset.ack}`, { method: "POST" });
+  if (!r.ok) { toast((await r.json()).detail || "ack failed"); return; }
+  toast("acked — archived, not deleted", true);
   refresh();
 });
 

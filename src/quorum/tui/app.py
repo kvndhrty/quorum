@@ -3,14 +3,16 @@ timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
 web dashboard make: `n` sends guidance into a task's inbox, `m` sends a
 directive to the manager's inbox (`quorum manager tell`), `s` launches a
-detached run, and `c` cancels a task — the one destructive binding, so it
-confirms first.
+detached run, `c` cancels a task — the one destructive binding, so it confirms
+first — and `a` acks an escalation off the #attention banner
+(`quorum board ack`).
 
-Two rules hold for all four. They act on the row the reader is *looking at* —
+Two rules hold for all of them. They act on what the reader is *looking at* —
 the highlighted row while the task table has focus, the open task while
 reading its detail (`enter` opens a transcript; it does not arm the write
-keys) — and they all go through `_write`, because a keystroke on a dashboard
-must never take the dashboard down when QUORUM_HOME turns unwritable."""
+keys), the highlighted line in the attention list `a` opens — and they all go
+through `_write`, because a keystroke on a dashboard must never take the
+dashboard down when QUORUM_HOME turns unwritable."""
 
 from __future__ import annotations
 
@@ -54,6 +56,10 @@ TASK_STATUS_STYLE = {
 #: what `_write` returns when the write raised instead of happening
 FAILED = object()
 
+#: how many escalations the `a` list shows — deeper than the banner's own
+#: summary, because every line in it is one the reader may want to ack
+ATTENTION_LIST_LIMIT = 50
+
 
 class ConfirmScreen(ModalScreen[bool]):
     """A yes/no gate in front of the one destructive binding."""
@@ -82,6 +88,66 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class AttentionScreen(ModalScreen[str | None]):
+    """The #attention list, one escalation per row.
+
+    The banner is a count and the board pane is a log, so neither can be
+    pointed at; this screen exists to give `a` a *highlighted attention line*
+    to act on. It only picks — it dismisses with the message id and the app
+    does the write, so the ack goes through `_write` like every other one.
+    """
+
+    BINDINGS = [
+        ("a", "ack", "ack"),
+        ("escape", "close", "close"),
+        ("q", "close", "close"),
+    ]
+    CSS = """
+    AttentionScreen { align: center middle; }
+    #attention-box { width: 90%; height: auto; max-height: 80%; border: round $warning;
+                     padding: 1 2; background: $surface; }
+    #attention-help { color: $text-muted; }
+    #attention-list { height: auto; max-height: 20; }
+    """
+
+    def __init__(self, items: list[dict]):
+        super().__init__()
+        self.items = items
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="attention-box"):
+            yield Static("#attention — handled escalations", id="attention-title")
+            yield DataTable(id="attention-list")
+            yield Static("a / enter: ack the highlighted line    esc: close", id="attention-help")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#attention-list", DataTable)
+        table.add_columns("when", "from", "escalation")
+        table.cursor_type = "row"
+        for item in self.items:
+            table.add_row(
+                item["at"].replace("T", " ").rstrip("Z"),
+                item["from"],
+                item["text"][:80],
+                key=item["id"],
+            )
+        table.focus()
+
+    def action_ack(self) -> None:
+        table = self.query_one("#attention-list", DataTable)
+        row = Coordinate(table.cursor_row, 0)
+        if not table.row_count or not table.is_valid_coordinate(row):
+            self.dismiss(None)
+            return
+        self.dismiss(table.coordinate_to_cell_key(row).row_key.value)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self.dismiss(event.row_key.value if event.row_key else None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class QuorumTUI(App):
     TITLE = "quorum"
     BINDINGS = [
@@ -91,6 +157,7 @@ class QuorumTUI(App):
         ("m", "directive", "tell manager"),
         ("s", "run_task", "run task"),
         ("c", "cancel_task", "cancel task"),
+        ("a", "attention", "ack attention"),
         ("escape", "show_board", "board"),
     ]
     CSS = """
@@ -226,6 +293,32 @@ class QuorumTUI(App):
 
         self.push_screen(ConfirmScreen(question), cancel)
 
+    def action_attention(self) -> None:
+        """Open the #attention list and ack the line the reader picks.
+
+        Ack is archival, not destructive — the message keeps its created_at in
+        messages/archive/ — so unlike `c` it does not confirm; the list itself
+        is the deliberation.
+        """
+        items = views.attention_summary(self.home, limit=ATTENTION_LIST_LIMIT)["recent"]
+        if not items:
+            self.notify("nothing on #attention")
+            return
+
+        def acked(message_id: str | None) -> None:
+            if not message_id:
+                return
+            msg = self._write(
+                "ack the escalation",
+                lambda: MessageBus(self.home).ack_board_message(message_id, topic="attention"),
+            )
+            if msg is FAILED:
+                return
+            self.notify("acked — archived, not deleted")
+            self.refresh_data()
+
+        self.push_screen(AttentionScreen(items), acked)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         target = self._input_target
@@ -261,11 +354,19 @@ class QuorumTUI(App):
         """Run one write, or say why it did not happen. Every affordance goes
         through here: QUORUM_HOME can be read-only, full, or on a dead mount,
         and a dashboard that dies at the keystroke is the worst moment to lose
-        the view of what is going on."""
+        the view of what is going on.
+
+        Every row the dashboard offers is a *snapshot*, so the thing a write
+        names can also be gone by the time the key is pressed — an escalation
+        the janitor, another `board ack` or the web panel archived out of band.
+        That surfaces as the KeyError/ValueError board resolution raises, not
+        as OSError, and it is the same class of disappointment: say so and keep
+        the view up."""
         try:
             return do()
-        except OSError as e:
-            self.notify(f"could not {what}: {e}", severity="error")
+        except (OSError, KeyError, ValueError) as e:
+            detail = e.args[0] if isinstance(e, KeyError) else e
+            self.notify(f"could not {what}: {detail}", severity="error")
             return FAILED
 
     def _open_input(self, target: str, placeholder: str) -> None:
@@ -368,7 +469,7 @@ class QuorumTUI(App):
         attention = views.attention_summary(self.home)
         if attention["count"]:
             banner.append(
-                f"   ⚠ {attention['count']} on #attention — `quorum board read attention`",
+                f"   ⚠ {attention['count']} on #attention — a: ack one",
                 style="bold yellow",
             )
         top.update(banner)
@@ -457,7 +558,7 @@ class QuorumTUI(App):
             short = self.selected_task[-6:].lower()
             mode.update(
                 f"task {short} — transcript tail   "
-                "(esc: board · n: nudge · m: manager · s: run · c: cancel)"
+                "(esc: board · n: nudge · m: manager · s: run · c: cancel · a: ack)"
             )
             lines = self._task_log_lines(self.selected_task)
         elif self.selected_agent:
@@ -467,7 +568,7 @@ class QuorumTUI(App):
             mode.update(
                 "board — recent messages   "
                 "(enter on a task or agent: its detail · n/s/c act on the highlighted row · "
-                "m: tell manager · ⚭ attached · ▶ running)"
+                "m: tell manager · a: ack #attention · ⚭ attached · ▶ running)"
             )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
