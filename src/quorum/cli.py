@@ -133,9 +133,33 @@ def _actor_guard(
             cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
         except ValueError:
             cap = DEFAULT_MAX_ACTIONS_PER_RUN
-        # this run's entries sit at the journal's end, well inside the tail window
-        used = len([e for e in fsio.read_jsonl_tail(journal) if e.get("run") == run])
+        # this run's entries sit at the journal's end, well inside the tail window;
+        # a torn or hand-edited line is skipped, never a crashed CLI call
+        mine = [
+            e
+            for e in fsio.read_jsonl_tail(journal)
+            if isinstance(e, dict) and e.get("run") == run
+        ]
+        # a cap.hit is a record of the refusal, not an action the agent took
+        used = len([e for e in mine if e.get("action") != "cap.hit"])
         if used >= cap:
+            # The cap was silent from the agent's own point of view: it saw a
+            # command refused mid-run and its next run saw nothing at all.
+            # One journal line per run fixes that — the next digest's journal
+            # section shows the run that ran out of budget, and the prompt
+            # decides what to do about it. Still only a rate limit; nothing
+            # here pauses or throttles anything.
+            if not any(e.get("action") == "cap.hit" for e in mine):
+                fsio.append_jsonl(
+                    journal,
+                    {
+                        "at": fsio.iso(fsio.utc_now()),
+                        "run": run,
+                        "actor": actor,
+                        "action": "cap.hit",
+                        "args": f"refused {action} — action cap ({cap}) reached this run",
+                    },
+                )
             typer.secho(
                 f"action refused: {actor} action cap ({cap}) reached for this run — "
                 "remaining work waits for your next scheduled run",

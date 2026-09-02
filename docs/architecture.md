@@ -104,7 +104,8 @@ state/manager/notes.jsonl         the notebook: standing notes a future run
                                   reads, plus retirement tombstones
 state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
-                                  spent ({at, run, usage|null})
+                                  spent and how it went ({at, run,
+                                  usage|null, outcome, duration_seconds})
 logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
@@ -269,10 +270,17 @@ transcript. So capture is one more look at each parsed event
   the same parsed events — but an agent has no `task.json` to hang it on, so
   each run appends one line to `state/manager/usage.jsonl` (or
   `state/agents/<name>/usage.jsonl`, the same split as `journal_path`):
-  `{"at": ..., "run": <run id>, "usage": {...}|null}`. Every run is
+  `{"at": ..., "run": <run id>, "usage": {...}|null, "outcome":
+  "ok"|"raised"|"timeout", "duration_seconds": <float>}`. Every run is
   recorded, including the ones that reported nothing and the ones that
   timed out or exited nonzero — a spent-and-then-died run still spent, and a
-  run count only means something if it counts every run. Writing it can
+  run count only means something if it counts every run. The line is
+  therefore the record of *how a run went*, not only of what it cost:
+  `outcome` and `duration_seconds` ride it deliberately (#59) rather than
+  getting a file of their own, because the run that reports no usage at all
+  — the timeout — is exactly the one an agent most needs to see about
+  itself. A line written before they existed reads back as outcome `None`
+  (rendered `?`), never as `ok`. Writing it can
   never fail a tick (`usage.record_agent_run` swallows `OSError`). The file
   is append-only and unbounded, so readers take a bounded tail
   (`usage.agent_usage`, `AGENT_USAGE_TAIL` = 200 runs; a total over a full
@@ -310,6 +318,9 @@ transcript. So capture is one more look at each parsed event
   and is gated afterwards. The gate never sets status, never cancels, and
   never touches the views' `$!` mark (`budget_gated` on `task_rows` is the
   same read, rendered).
+  usually the largest. `usage.agent_runs` reads the outcomes back over the
+  same bounded tail, separately from `agent_usage` (which stays `None` when
+  no run in the window reported spend, and a timed-out run never does).
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
@@ -556,8 +567,14 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
    configured `[tasks]` budget, the last run's marked `next run gated` (see
-   *Token/cost usage* above); a header line with what the manager's *own* recent runs have
-   cost, read from its usage ledger; its **notebook** (see below); the manager's own
+   *Token/cost usage* above); a three-line **self-observation header** (`agents/harness_run.py
+   ::self_observations`) — what the manager's own recent runs have cost,
+   `Your last N runs: ok 2m10s · TIMEOUT 15m00s · …` off the same ledger,
+   and `Actions this run: 0 of <cap> (cap)` (always `0`: the digest is built
+   before the run starts, so the line reports the budget, and what happened
+   to it lands in the journal as `cap.hit`) — all three observations the
+   prompt judges, none of them a rail: nothing pauses, throttles or changes
+   the cap; its **notebook** (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
    `messages/inbox/manager/` (`quorum manager tell`). Directives are acked
@@ -583,9 +600,13 @@ target's status at action time, run id) *before* it executes — ground truth,
 not model self-report. The journal serves two purposes: fed back into the
 next digest, it lets the manager see which interventions changed nothing and
 avoid degenerate loops (its prompt forbids repeating an intervention marked
-UNCHANGED); and it enforces the one supervision rail quorum keeps — a
-per-run action cap (`max_actions_per_run`), a rate limit that bounds a bad
-run's blast radius without ever second-guessing a choice. The task budget
+UNCHANGED); and it enforces the one supervision rail quorum keeps — a per-run action cap
+(`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
+without ever second-guessing a choice. A refused action appends one
+`cap.hit` entry per run (its `args` naming the action refused), so the run
+that ran out of budget is visible in the *next* digest's journal section
+rather than only as an error the model saw mid-run; the entry is not itself
+an action and does not count against the cap. The task budget
 gate (*Token/cost usage* above) is the only other rail of that class.
 
 **The notebook (`notes.py`).** The journal is what the manager *did* this
@@ -793,7 +814,15 @@ mechanics (`agents/harness_run.py`): actor-tagged env, per-agent journal and
 action cap, transcript at `state/agents/<name>/transcript.jsonl`, mid-run
 directives via the agent's own inbox when the harness supports injection.
 There is deliberately no wake condition and no digest — a prompt agent runs
-every scheduled tick, and anything conditional belongs in its prompt. Prompt
+every scheduled tick, and anything conditional belongs in its prompt. A
+template that writes `{notes}` gets its notebook *and*, above it, the same
+self-observation header the manager's digest opens with (spend, recent run
+outcomes, action budget): there is deliberately no second `{self}`
+placeholder, so an agent's memory of itself is one block and a template
+that already writes `{notes}` gets the header without being rewritten. A
+template that writes neither sees neither — including the shipped
+`babysitter.md`, which keeps its policy in prompt text and asks for no
+notebook. Prompt
 agents are usually file-defined (`agents/<name>.toml`, created by
 `quorum agent create` or the web dashboard, hot-added via `agent.reload`)
 but a `[agents.<name>]` table in config.toml works identically.

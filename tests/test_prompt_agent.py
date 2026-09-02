@@ -135,7 +135,10 @@ def test_actions_journal_per_agent_and_cap_applies(home: Path, clock):
     make_agent(home, clock, max_actions_per_run=1).tick()
 
     entries = fsio.read_jsonl(journal_path(home, "standup"))
-    assert [e["action"] for e in entries] == ["board.post"]  # the note hit the cap
+    # the note hit the cap, and the refusal is journaled where the *next*
+    # run of this agent will read it (#59)
+    assert [e["action"] for e in entries] == ["board.post", "cap.hit"]
+    assert entries[1]["args"] == "refused note — action cap (1) reached this run"
     assert {e["actor"] for e in entries} == {"standup"}
     assert fsio.read_jsonl(journal_path(home)) == []  # manager journal untouched
     text = "\n".join(
@@ -251,3 +254,20 @@ def test_a_template_that_asks_for_notes_gets_its_own_notebook(home: Path, clock)
     text = "\n".join(e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "standup")))
     assert notes.SECTION_HEADER in text
     assert "the flaky test is tracked in #41" in text
+
+
+def test_a_template_that_asks_for_notes_also_sees_its_own_recent_runs(home: Path, clock):
+    """`{notes}` is an agent's whole memory of itself (#59): the notebook,
+    and above it the same self-observation header the manager's digest opens
+    with. There is deliberately no second `{self}` placeholder, so a template
+    written before this gets the header without being rewritten."""
+    write_config(home, usage_cost="0.25")
+    seed_agent(home, prompt="check on things\n\n{notes}\n")
+
+    make_agent(home, clock).tick()  # first run: nothing to look back on yet
+    make_agent(home, clock, max_actions_per_run=3).tick()
+
+    text = "\n".join(e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "standup")))
+    assert "Your own runs have cost: last $0.25 · 11.0k tok" in text
+    assert "Your last run: ok " in text
+    assert "Actions this run: 0 of 3 (cap)" in text

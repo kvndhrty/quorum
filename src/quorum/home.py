@@ -152,6 +152,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the budget-gate revision, replaced by the merged-observation
         # revision (#57): how to read `state=merged` / `state=closed`
         "e082bdb1588d389285bca08c991dd5b79da6af4be441a634460a09bec7ed2ef3",
+        # the merged-observation revision, replaced by the self-observation
+        # revision (#59): timing-out runs and a cap hit two runs running
+        "3b060014ec4fac03637df6c9185ea1fc8e3b3ab7065935ad36a8ace2388e3600",
     },
 }
 

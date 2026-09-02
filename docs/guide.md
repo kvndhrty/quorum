@@ -528,7 +528,18 @@ as a user turn instead of waiting.
 
 Two things bound a bad run, neither of which second-guesses a decision: a
 per-run action cap (`max_actions_per_run`, default 20), and your own eyes on
-the journal.
+the journal. The cap is not silent: when a run reaches it, the refusal is
+recorded in the journal as `cap.hit`, so the *next* run sees that the last
+one ran out of budget (and the default prompt tells it to escalate to you
+rather than try a third time).
+
+The manager also sees a few lines about *itself* at the top of every digest
+— what its recent runs have cost, how its last five runs ended
+(`ok 2m10s · TIMEOUT 15m00s · ...`), and the action budget for this run.
+They are observations, exactly like the ones it gets about tasks: nothing
+pauses, throttles or changes anything, and the prompt decides what to do
+about a run of timeouts. A prompt agent gets the same lines wherever its
+template writes `{notes}`.
 
 The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
@@ -596,7 +607,8 @@ several, then `forget` the rest.
 
 The same file exists for every agent (`quorum manager remember --agent
 <name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
-own notebook wherever its template writes `{notes}`. Both dashboards show an
+own notebook — and the same self-observation lines above it — wherever its
+template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it.
 
 ## Prompt customization
@@ -1157,8 +1169,9 @@ def test_milestone(tmp_path):
   state/manager/journal.jsonl       the manager's auto-recorded actions
   state/manager/notes.jsonl         its notebook (standing notes it reads)
   state/manager/transcript.jsonl    the manager harness's own output
-  state/manager/usage.jsonl         what each manager run cost (agents get
-                                    the same file under state/agents/<name>/)
+  state/manager/usage.jsonl         what each manager run cost and how it
+                                    ended (agents get the same file under
+                                    state/agents/<name>/)
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
 ```

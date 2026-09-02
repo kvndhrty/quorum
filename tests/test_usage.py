@@ -188,3 +188,79 @@ def test_last_run_overages_reads_only_the_last_run():
     assert usage.last_run_overages([Run({"total_tokens": 5_000})], max_tokens=1_000) == [
         "tokens 5.0k > max_tokens_per_run 1.0k"
     ]
+# -- the ledger as a run record, not only a spend record (#59) --------------
+
+
+def test_run_outcomes_and_durations_read_back_off_the_ledger(tmp_path):
+    from pathlib import Path
+
+    from quorum import fsio
+    from quorum.actor import usage_path
+
+    home = Path(tmp_path)
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    usage.record_agent_run(home, "manager", "r1", {"cost_usd": 0.5}, outcome="ok",
+                           duration_seconds=130.4)
+    usage.record_agent_run(home, "manager", "r2", None, outcome="timeout",
+                           duration_seconds=900)
+    usage.record_agent_run(home, "manager", "r3", None, outcome="raised", duration_seconds=3.2)
+
+    written = fsio.read_jsonl(path)
+    assert [e["outcome"] for e in written] == ["ok", "timeout", "raised"]
+    assert written[0]["duration_seconds"] == 130.4  # rounded, not truncated to int
+
+    runs = usage.agent_runs(home, "manager")
+    assert [r["outcome"] for r in runs] == ["ok", "timeout", "raised"]
+    assert usage.describe_runs(runs) == "ok 2m10s · TIMEOUT 15m00s · RAISED 0m03s"
+    # spend still reads back over the same tail, counting only what reported
+    assert usage.agent_usage(home, "manager")["runs"] == 1
+
+
+def test_a_ledger_line_without_the_new_fields_still_reads(tmp_path):
+    """Every home upgrading into #59 has a ledger of lines that predate it —
+    they are runs of unknown outcome, never runs that went fine."""
+    from pathlib import Path
+
+    from quorum import fsio
+    from quorum.actor import usage_path
+
+    home = Path(tmp_path)
+    path = usage_path(home, "manager")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fsio.append_jsonl(path, {"at": "x", "run": "old", "usage": {"cost_usd": 0.25}})
+    fsio.append_jsonl(path, {"at": "y", "run": "half", "usage": None, "outcome": "ok"})
+    fsio.append_jsonl(path, {"at": "z", "run": "junk", "usage": None,
+                             "outcome": "fine", "duration_seconds": "soon"})
+    path.write_text(path.read_text() + '"not even a dict"\n')
+
+    runs = usage.agent_runs(home, "manager")
+    assert [r["outcome"] for r in runs] == [None, "ok", None]
+    assert [r["duration_seconds"] for r in runs] == [None, None, None]
+    assert usage.describe_runs(runs) == "? · ok · ?"
+    assert usage.agent_usage(home, "manager")["total"]["cost_usd"] == 0.25
+
+
+def test_only_the_last_few_runs_are_described(tmp_path):
+    from pathlib import Path
+
+    from quorum.actor import usage_path
+
+    home = Path(tmp_path)
+    usage_path(home, "manager").parent.mkdir(parents=True, exist_ok=True)
+    for i in range(usage.RECENT_RUNS + 4):
+        usage.record_agent_run(home, "manager", f"r{i}", None, outcome="ok", duration_seconds=i)
+
+    runs = usage.agent_runs(home, "manager")
+    assert len(runs) == usage.RECENT_RUNS
+    assert runs[-1]["run"] == f"r{usage.RECENT_RUNS + 3}"  # newest last
+    assert usage.describe_runs([]) == ""
+    # a caller asking for no runs gets none — `entries[-0:]` would be all of them
+    assert usage.agent_runs(home, "manager", limit=0) == []
+
+
+def test_durations_stay_legible_past_an_hour():
+    assert usage.format_duration(0) == "0m00s"
+    assert usage.format_duration(52.9) == "0m52s"
+    assert usage.format_duration(900) == "15m00s"
+    assert usage.format_duration(3600 + 125) == "1h02m"

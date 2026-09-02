@@ -426,6 +426,29 @@ def test_non_manager_actor_journals_to_its_own_path_and_hits_cap(
     assert "alpha action cap (2) reached" in r.output
 
 
+def test_a_torn_journal_line_does_not_break_the_cap_count(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """The journal is read back to count this run's actions; a line that is
+    valid JSON but not an object must be skipped, not crash every action."""
+    from quorum import fsio
+    from quorum.actor import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    journal = journal_path(home, "alpha")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text('"not even a dict"\n')
+
+    monkeypatch.setenv("QUORUM_ACTOR", "alpha")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TORNRUN")
+    monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
+
+    r = runner.invoke(app, ["task", "add", slug, "after the torn line", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    entries = [e for e in fsio.read_jsonl(journal) if isinstance(e, dict)]
+    assert [e["action"] for e in entries] == ["task.add"]
+
+
 def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkeypatch):
     """The detached child re-invokes `quorum task run`; without stripping the
     actor env it would journal a second entry (and burn the manager's cap)."""
