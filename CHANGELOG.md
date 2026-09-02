@@ -12,9 +12,11 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 ### Changed
 - `quorum status`, `task list`, `agent list` and `project list` render
   Rich tables instead of concatenated lines: one headed column per field,
-  fitted to the terminal (id, status, harness, pr and usage never
-  truncate; the report and flags columns are ellipsized where the window
-  runs out — never wrapped mid-cell), the PR URL shortened to `#N`
+  fitted to the terminal (the report and flags columns are ellipsized
+  where the window runs out — never wrapped mid-cell — so id, status,
+  harness, pr and usage stay whole down to the width where the give-way
+  column has nothing left to give; narrower still, the id is the last
+  column clipped), the PR URL shortened to `#N`
   (`task show` keeps the full URL), usage in its own `usage` column, and
   columns nothing fills dropped. Piped or redirected, the same tables come
   out plain and at full width, so grepping an id or status keeps working.

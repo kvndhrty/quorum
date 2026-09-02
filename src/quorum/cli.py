@@ -562,10 +562,13 @@ def status(
 # row stays a row instead of a string that grows a clause per feature and
 # wraps mid-cell past column 80. The same table renders two ways:
 #
-#   - on a terminal it is *fitted* to the window: id, status, harness, pr
-#     and usage never truncate, and the report/flags (or error/tags) columns
-#     absorb the shortfall with an ellipsis — a cut cell where a wrapped one
-#     used to be;
+#   - on a terminal it is *fitted* to the window: the report/flags (or
+#     error/tags) columns absorb the shortfall with an ellipsis — a cut cell
+#     where a wrapped one used to be — so id, status, harness, pr and usage
+#     stay whole down to the width where the give-way column has nothing
+#     left to give (roughly 60 columns for a task listing). Below that floor
+#     Rich clips the fixed columns evenly, and the id, the cell you copy into
+#     `task run`, holds `ID_MIN_WIDTH` while the rest go first;
 #   - anywhere else (a pipe, a file, a test) it is laid out at its natural
 #     width, plain text, no ANSI, so `quorum task list | grep <id>` and a
 #     redirected `status` keep every id, status and URL reference whole.
@@ -577,8 +580,12 @@ def status(
 
 PLAIN_TABLE_WIDTH = 4096  # off-terminal render width: wide enough that no cell is cut
 REPORT_MAX_CHARS = 120  # a report is a one-line note by protocol; `task show` has all of it
+ID_MIN_WIDTH = 8  # marker + space + the 6-char short id: the handle you retype
 
 _NO_WRAP: dict[str, Any] = {"no_wrap": True}
+# The id is the cell you copy into `quorum task run`, so it is the last to be
+# clipped when the window is too narrow even for the give-way columns to cover.
+_ID: dict[str, Any] = {"no_wrap": True, "min_width": ID_MIN_WIDTH}
 
 
 def _give_way(ratio: int) -> dict[str, Any]:
@@ -589,7 +596,7 @@ def _give_way(ratio: int) -> dict[str, Any]:
 
 # (header, Rich column options) — headers match the `--json` keys where a key exists.
 _TASK_COLUMNS: list[tuple[str, dict[str, Any]]] = [
-    ("id", _NO_WRAP),
+    ("id", _ID),
     ("project", _NO_WRAP),
     ("status", _NO_WRAP),
     ("harness", _NO_WRAP),
@@ -645,7 +652,11 @@ def _print_table(table: Table, *, width: int | None = None) -> None:
     from rich.console import Console
 
     fit = width is not None or sys.stdout.isatty()
-    table.expand = fit  # fitted: the give-way columns absorb the shortfall
+    # Fitted only when a give-way column survived `_build_table`'s drop of the
+    # empty ones: with no ratio column to absorb it, Rich spreads a wide
+    # window's whole surplus evenly over the no_wrap columns and leaves the
+    # fields acres apart. Narrower than natural, Rich collapses either way.
+    table.expand = fit and any(column.ratio for column in table.columns)
     console = Console(
         width=width if fit else PLAIN_TABLE_WIDTH,
         force_terminal=None if fit else False,
@@ -730,7 +741,7 @@ def _task_table(rows: list[dict]) -> Table:
     return _build_table(
         _TASK_COLUMNS,
         [_task_cells(t) for t in rows],
-        keep=frozenset({"id", "project", "status", "harness", "report"}),
+        keep=frozenset({"id", "project", "status", "harness"}),
     )
 
 

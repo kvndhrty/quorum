@@ -813,10 +813,18 @@ until a row with a report and a PR URL wrapped mid-cell past column 80
 (#52). One table builder per row kind in `cli.py` (`_task_table`,
 `_agent_table`, `_project_table`) turns the `views.*_rows` dicts into cells
 — rendering only, never re-deriving — and one `_print_table` renders the
-result two ways. On a terminal the table is fitted to the window: id,
-status, harness, pr and usage columns never truncate, and the report and
-flags (agents: error; projects: tags) columns absorb the shortfall with an
-ellipsis. Off a terminal (a pipe, a file, `CliRunner`) it is laid out at
+result two ways. On a terminal the table is fitted to the window: the
+report and flags (agents: error; projects: tags) columns absorb the
+shortfall with an ellipsis, so the id, status, harness, pr and usage
+columns stay whole down to the width at which the give-way column has
+nothing left to give (around 60 columns for a task listing). Below that
+floor Rich clips the fixed columns too, and only the id — the handle you
+retype into `task run` — holds a `min_width` (`ID_MIN_WIDTH`), so it is the
+last cell to be cut. Fitting is conditional on a give-way column having
+survived the drop: a table of nothing but fixed columns (the usual `agent
+list`) is rendered at its natural width rather than expanded, or a wide
+window's slack would be spread evenly over the columns and leave the fields
+acres apart. Off a terminal (a pipe, a file, `CliRunner`) it is laid out at
 its natural width, plain text, no ANSI and no trailing padding, so every
 id, status and `#N` reference is whole and greppable. Columns empty on
 every row are dropped; a PR URL is shortened to `#N` (`!N` for a GitLab

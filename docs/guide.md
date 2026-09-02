@@ -422,9 +422,12 @@ quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
 quorum status                     # tasks alongside agents and projects
 ```
 
-Each section is a table fitted to the terminal: the id, status, harness,
-pr and usage columns never truncate, the report and flags columns are cut
-with `…` where the window runs out, and a pull request shows as `#53` (the
+Each section is a table fitted to the terminal: the report and flags
+columns are the ones cut with `…` where the window runs out, so the id,
+status, harness, pr and usage columns stay whole on any window wide enough
+for the report to absorb the shortfall (about 60 columns). Squeeze it
+narrower and the fixed columns are clipped too — the id last of all, since
+it is the handle you retype. A pull request shows as `#53` (the
 URL itself, and the whole report, are in `task show`). Piped or redirected,
 the same tables come out plain and at full width, so `quorum task list |
 grep <id>` works:
@@ -452,8 +455,9 @@ The `$0.42` is what the harness CLI itself reported for the task's runs
 for a subscription claude session it is the CLI's notional API-rate figure,
 not a bill. A harness that reports only tokens (codex) shows tokens and no
 `$`; one that reports nothing shows no `usage` column at all. Columns
-nothing fills (`pr`, `flags`, `usage`) are left out, so the empty home
-above has no blank headers.
+nothing fills (`report`, `pr`, `flags`, `usage`) are left out, so a
+fresh home of queued tasks that have not reported yet has no blank
+headers.
 
 **Finishing and undoing.** A task that opens a PR reports the URL, which
 shows up in every view. `quorum task cancel <id>` stops the manager's

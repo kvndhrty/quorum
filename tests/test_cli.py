@@ -991,6 +991,52 @@ def test_task_table_drops_columns_nothing_fills(capsys):
     header = capsys.readouterr().out.split("\n")[0].split()
     assert header == ["id", "project", "status", "harness", "report"]
 
+    # ...and a fresh home whose queued tasks have not reported yet loses the
+    # `report` header too: nothing is exempt from the drop but the identity
+    # columns every row fills.
+    _print_table(_task_table([dict(row, last_report="")]))
+    header = capsys.readouterr().out.split("\n")[0].split()
+    assert header == ["id", "project", "status", "harness"]
+
+
+def test_table_stays_compact_on_a_wide_terminal(capsys):
+    """A table left with no give-way column (the usual `agent list`) must not
+    spread the window's slack over its fixed columns: at 200 columns the
+    fields stay two spaces apart, exactly as they are when piped."""
+    from rich.cells import cell_len
+
+    from quorum.cli import _agent_table, _print_table
+
+    rows = [
+        {
+            "name": "manager", "type": "manager", "status": "idle", "enabled": True,
+            "schedule": "every 5 minutes", "last_end": "12:00", "usage_text": "",
+            "error": "",
+        }
+    ]
+    _print_table(_agent_table(rows, with_type=True), width=200)
+    lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+    assert len(lines) == 2, lines
+    assert all(cell_len(line.rstrip()) < 60 for line in lines), lines
+    assert "name       type     status  schedule" in lines[0]
+
+    # a surviving give-way column still fills the window
+    _print_table(_agent_table([dict(rows[0], error="boom")], with_type=True), width=200)
+    assert "error" in _plain(capsys.readouterr().out).split("\n")[0]
+
+
+def test_a_narrow_table_clips_every_column_before_the_id(capsys):
+    """Below the width the report column can cover, Rich clips the fixed
+    columns — but the id is the handle you retype into `task run`, so it
+    holds `ID_MIN_WIDTH` while project/status/harness give up theirs."""
+    from quorum.cli import _print_table, _task_table
+
+    for width in (40, 30, 24):
+        _print_table(_task_table(_wide_task_rows()), width=width)
+        lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+        assert len(lines) == 3, (width, lines)
+        assert "▶ 38hskq" in lines[1] and "✓ a3f2k9" in lines[2], (width, lines)
+
 
 def test_pr_ref_shortens_known_forges_and_leaves_the_rest():
     from quorum.cli import _pr_ref
