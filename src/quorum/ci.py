@@ -41,6 +41,22 @@ MAX_FAILING_NAMES = 5
 # in different fields — see `_verdict`.
 PR_FIELDS = "number,url,state,isDraft,mergeable,statusCheckRollup"
 
+# The forge's word for the pull request itself, normalized to the small
+# vocabulary `tasks.PR_STATES` persists (#57). GitHub says OPEN / MERGED /
+# CLOSED; GitLab (#51) says opened / merged / closed. The names are
+# forge-neutral on purpose — a second backend fills the same field rather
+# than teaching every reader a second dialect. Anything unrecognized stays
+# "unknown" and is never written to disk: a shape we do not understand must
+# not be quietly read as one of the three.
+PR_STATE_WORDS = {
+    "OPEN": "open",
+    "OPENED": "open",
+    "MERGED": "merged",
+    "CLOSED": "closed",
+    "LOCKED": "closed",
+}
+UNKNOWN_PR_STATE = "unknown"
+
 FAILING_CONCLUSIONS = frozenset(
     {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"}
 )
@@ -156,6 +172,17 @@ def auth_status(home: Path) -> bool | None:
     return proc.returncode == 0
 
 
+def normalize_state(raw: object) -> str:
+    """A forge's PR state as one of `open` / `merged` / `closed`.
+
+    `unknown` for anything else, including absence: this is the value that
+    reaches `task.json`, and a wrong guess there would badge an unfinished
+    PR as delivered forever (nothing re-probes a task once its worktree is
+    gone).
+    """
+    return PR_STATE_WORDS.get(str(raw or "").strip().upper(), UNKNOWN_PR_STATE)
+
+
 def _verdict(check: dict) -> str:
     """Classify one rollup entry as pass / fail / pending.
 
@@ -201,10 +228,15 @@ def _summarize(pr: object) -> dict | None:
         summary = "none"
     mergeable = str(pr.get("mergeable") or "UNKNOWN").upper()
     number = pr.get("number")
+    state = normalize_state(pr.get("state"))
     return {
         "pr": number if isinstance(number, int) else None,
         "url": str(pr.get("url") or ""),
-        "state": str(pr.get("state") or "UNKNOWN").upper(),
+        "state": state,
+        # The delivered/not-delivered read, hoisted out of the string so no
+        # caller has to know the vocabulary: `done` is the harness's word,
+        # merged is the forge's, and only the second one means shipped.
+        "merged": state == "merged",
         "draft": bool(pr.get("isDraft")),
         "summary": summary,
         "counts": counts,

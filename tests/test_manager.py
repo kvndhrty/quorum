@@ -166,8 +166,20 @@ def test_action_cap_refuses_and_bounds_the_journal(home: Path, clock, project: s
     make_manager(home, clock).tick()
 
     entries = fsio.read_jsonl(journal_path(home))
-    assert len(entries) == 2  # the cap, exactly
+    actions = [e["action"] for e in entries]
+    assert actions.count("task.nudge") == 2  # the cap, exactly
     assert "REFUSED|" in manager_transcript_text(home)
+
+    # ...and the refusal left a mark the *next* run can read (#59): one
+    # cap.hit for the run, however many further actions it tried.
+    hits = [e for e in entries if e["action"] == "cap.hit"]
+    assert len(hits) == 1
+    assert hits[0]["actor"] == "manager" and hits[0]["run"] == entries[0]["run"]
+    assert "task.nudge" in hits[0]["args"] and "cap (2)" in hits[0]["args"]
+
+    # the journal section of the next digest is where the manager meets it
+    digest = build_digest(home, TaskStore(home).list(), clock(), [])
+    assert "cap.hit" in digest
 
 
 def test_failed_harness_raises_and_returns_directives(home: Path, clock, project: str):
@@ -247,7 +259,7 @@ def test_digest_surfaces_stranded_work(home: Path, clock, tmp_path: Path):
 def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, project: str):
     """Surfacing: cost/tokens show up per task when the harness reported
     them, and a configured budget turns an expensive run into a digest
-    observation — quorum still never stops anything."""
+    line that also says what the runner's budget gate will do about it."""
     write_config(home, "manager_act")
     store = TaskStore(home)
     task = store.add(project, "expensive work", "tasktool")
@@ -269,9 +281,38 @@ def test_digest_surfaces_spend_and_flags_a_run_over_budget(home: Path, clock, pr
     digest = build_digest(
         home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
     )
-    assert "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00" in digest
-    assert "an observation, not a rail" in digest
+    assert (
+        "BUDGET-EXCEEDED: run 2: cost $2.00 > max_cost_per_run $1.00 "
+        "(next run gated; --force to override)" in digest
+    )
     assert "run 1:" not in digest  # the cheap run is not indicted
+
+
+def test_digest_marks_an_earlier_overage_as_cleared(home: Path, clock, project: str):
+    """Only the last run gates: an over-budget run followed by a cheaper one
+    is still reported (the spend happened) but the digest says the gate is
+    clear, so the manager does not reach for --force it does not need."""
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "calmed down", "tasktool")
+    store.update(
+        task.id,
+        status="executing",
+        runs=[
+            {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+             "usage": {"cost_usd": 2.0, "total_tokens": 40000, "events": 1}},
+            {"started_at": "t2", "ended_at": "t3", "exit_code": 0,
+             "usage": {"cost_usd": 0.5, "total_tokens": 5000, "events": 1}},
+        ],
+    )
+    digest = build_digest(
+        home, store.list(), clock(), directives=[], tasks_config=TasksConfig(max_cost_per_run=1.0)
+    )
+    assert (
+        "BUDGET-EXCEEDED: run 1: cost $2.00 > max_cost_per_run $1.00 "
+        "(an earlier run; a later one cleared the gate)" in digest
+    )
+    assert "next run gated" not in digest
 
 
 def test_digest_says_nothing_about_spend_a_harness_never_reported(
@@ -606,6 +647,73 @@ def test_a_manager_harness_that_reports_no_spend_says_nothing(
     assert row["usage"] is None and row["usage_text"] == ""
 
 
+# -- self-observations: recent outcomes and the action budget (#59) ----------
+
+
+def test_a_run_records_how_it_went_and_the_next_digest_shows_it(
+    home: Path, clock, project: str
+):
+    """The ledger line is the record of a run, not only of its cost: a
+    manager that has been timing out must be able to read that off its own
+    digest — which is the one thing no amount of task detail tells it."""
+    write_config(home, "manager_act")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    entry = fsio.read_jsonl(usage_path(home, "manager"))[-1]
+    assert entry["outcome"] == "ok"
+    assert isinstance(entry["duration_seconds"], (int, float))
+    assert entry["duration_seconds"] >= 0
+
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[], cap=7)
+    assert "Your last run: ok " in digest
+    assert "Actions this run: 0 of 7 (cap)" in digest
+
+
+def test_a_timed_out_run_is_the_one_the_ledger_must_still_show(
+    home: Path, clock, project: str
+):
+    """A timeout reports no usage at all, so its outcome is exactly the thing
+    a spend-only ledger would lose — and the run before it is still `ok`."""
+    write_config(home, "manager_act")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+    make_manager(home, clock).tick()
+
+    write_config(home, "hang", run_timeout_seconds=1)
+    with pytest.raises(RuntimeError, match="timed out"):
+        make_manager(home, clock).tick()
+
+    outcomes = [e.get("outcome") for e in fsio.read_jsonl(usage_path(home, "manager"))]
+    assert outcomes == ["ok", "timeout"]
+
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    line = next(ln for ln in digest.splitlines() if ln.startswith("Your last 2 runs:"))
+    assert "TIMEOUT" in line and line.index("ok") < line.index("TIMEOUT")
+    assert "Your own runs have cost" not in digest  # neither run reported any
+
+
+def test_a_crashed_run_is_recorded_as_raised(home: Path, clock, project: str):
+    write_config(home, "fail")
+    TaskStore(home).add(project, "something to manage", "tasktool")
+    with pytest.raises(RuntimeError, match="exited 3"):
+        make_manager(home, clock).tick()
+
+    entry = fsio.read_jsonl(usage_path(home, "manager"))[-1]
+    assert entry["outcome"] == "raised"
+    digest = build_digest(home, TaskStore(home).list(), clock(), directives=[])
+    assert "RAISED" in digest
+
+
+def test_the_action_budget_is_in_every_digest_even_an_empty_home(home: Path, clock):
+    """The budget line does not depend on a ledger existing: a manager's very
+    first run still needs to know what it may spend."""
+    write_config(home, "manager_act")
+    digest = build_digest(home, [], clock(), directives=[])
+    assert "Actions this run: 0 of 20 (cap)" in digest  # the default cap
+    assert "Your last" not in digest
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 
@@ -919,3 +1027,226 @@ def test_house_rules_from_the_overlay_reach_the_manager_run(
     assert "You are the manager of a quorum home" in text  # the packaged default
     # the header comment still *documents* the key, hence the line anchor
     assert "PROMPT| {local}" not in text
+
+
+# --- overlap observation ------------------------------------------------------
+
+
+def make_origin(tmp_path: Path, repo: Path, name: str = "origin.git") -> Path:
+    """A bare remote with origin/HEAD set — what a `git clone` gives a project."""
+    import subprocess
+
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo_git(repo, "remote", "add", "origin", str(bare))
+    repo_git(repo, "push", "-q", "-u", "origin", "HEAD")
+    repo_git(repo, "remote", "set-head", "origin", "-a")
+    return bare
+
+
+def add_worktree(home: Path, repo: Path, store: TaskStore, project: str, prompt: str):
+    """A task with a real worktree, forked from the project checkout the way
+    the runner does it (branch quorum/<short-id>)."""
+    task = store.add(project=project, prompt=prompt, harness="t")
+    workdir = tasks.worktree_path(home, task.id)
+    repo_git(repo, "worktree", "add", str(workdir), "-b", f"quorum/{task.short_id}")
+    return store.update(task.id, workdir=str(workdir), status="executing")
+
+
+def test_overlap_signal_sees_shared_paths_and_ignores_disjoint_work(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "edit the readme and add a")
+    b = add_worktree(home, repo, store, "ovproj", "edit the readme and add b")
+    c = add_worktree(home, repo, store, "ovproj", "only touch c")
+
+    # a commits its edits; b leaves them uncommitted (a live task mid-work);
+    # c's change is untracked. All three shapes must count.
+    (Path(a.workdir) / "README.md").write_text("a's version")
+    (Path(a.workdir) / "a.txt").write_text("a")
+    repo_git(Path(a.workdir), "add", ".")
+    repo_git(Path(a.workdir), "commit", "-qm", "a's work")
+    (Path(b.workdir) / "README.md").write_text("b's version")
+    (Path(b.workdir) / "b.txt").write_text("b")
+    (Path(c.workdir) / "c.txt").write_text("c")
+
+    assert tasks.worktree_changed_paths(a) == {"README.md", "a.txt"}
+    assert tasks.worktree_changed_paths(b) == {"README.md", "b.txt"}
+    assert tasks.worktree_changed_paths(c) == {"c.txt"}
+
+    result = overlap_signal(store.list())
+    assert result == {
+        a.id: [{"with": b.short_id, "paths": ["README.md"]}],
+        b.id: [{"with": a.short_id, "paths": ["README.md"]}],
+    }
+    assert c.id not in result
+
+
+def test_overlap_signal_only_compares_tasks_on_the_same_project(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    store = TaskStore(home)
+    repos = {}
+    for name in ("one", "two"):
+        repo = make_repo(tmp_path, name)
+        make_origin(tmp_path, repo, f"{name}.git")
+        repos[name] = repo
+    a = add_worktree(home, repos["one"], store, "one", "readme")
+    b = add_worktree(home, repos["two"], store, "two", "readme")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text("changed")
+    # Same path, different repositories: nothing to say.
+    assert overlap_signal(store.list()) == {}
+
+
+def test_digest_marks_both_overlapping_tasks_and_skips_attached_ones(
+    home: Path, tmp_path: Path, clock
+):
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "edit the readme")
+    b = add_worktree(home, repo, store, "ovproj", "also edit the readme")
+    c = add_worktree(home, repo, store, "ovproj", "disjoint")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text(f"{t.short_id}'s version")
+    (Path(c.workdir) / "c.txt").write_text("c")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    a_line = digest_line(digest, a.short_id, f"- [executing] {a.short_id}")
+    b_line = digest_line(digest, b.short_id, f"- [executing] {b.short_id}")
+    c_line = digest_line(digest, c.short_id, f"- [executing] {c.short_id}")
+    assert f"overlaps={b.short_id} paths=1" in a_line
+    assert f"overlaps={a.short_id} paths=1" in b_line
+    assert "overlaps=" not in c_line
+    assert f"  overlap: with {b.short_id} on README.md" in digest
+    assert f"  overlap: with {a.short_id} on README.md" in digest
+
+    # An adopted session's checkout is the human's: it is never compared,
+    # even though its diff really does collide with a's.
+    store.update(b.id, attached=True)
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "overlaps=" not in digest
+    assert "overlap:" not in digest
+
+
+def test_overlap_detail_names_at_most_three_paths(home: Path, tmp_path: Path, clock):
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "wide")
+    b = add_worktree(home, repo, store, "ovproj", "also wide")
+    for t in (a, b):
+        for name in ("d.txt", "a.txt", "c.txt", "b.txt", "e.txt"):
+            (Path(t.workdir) / name).write_text("x")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert f"overlaps={b.short_id} paths=5" in digest
+    assert f"  overlap: with {b.short_id} on a.txt, b.txt, c.txt (+2 more)" in digest
+
+
+def test_overlap_falls_back_to_the_checkout_branch_without_a_remote(
+    home: Path, tmp_path: Path
+):
+    """A `git init`ed project has no origin/HEAD; the branch the runner forked
+    from is the checkout's, and that is the base."""
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "local")
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "local", "readme")
+    b = add_worktree(home, repo, store, "local", "readme too")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text("changed")
+    # The checkout itself moving on must not count against the tasks.
+    (repo / "later.txt").write_text("landed after the fork")
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "later")
+
+    assert tasks.worktree_changed_paths(a) == {"README.md"}
+    assert set(overlap_signal(store.list())) == {a.id, b.id}
+
+
+def test_overlap_ignores_the_checkouts_own_unpushed_commits(home: Path, tmp_path: Path):
+    """The runner forks a worktree from the checkout's HEAD, not from
+    origin/HEAD. A checkout one unpushed commit ahead of the remote would,
+    measured against origin/HEAD, put that commit's paths in *every* live
+    task's changed set — and two tasks on unrelated files would report an
+    overlap on a file neither of them wrote."""
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "ahead")
+    make_origin(tmp_path, repo)
+    # One commit the remote has never seen, touching a file no task will.
+    (repo / "X.txt").write_text("landed locally, not pushed")
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "unpushed")
+
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ahead", "only touch a")
+    b = add_worktree(home, repo, store, "ahead", "only touch b")
+    (Path(a.workdir) / "a.txt").write_text("a")
+    (Path(b.workdir) / "b.txt").write_text("b")
+
+    assert tasks.worktree_changed_paths(a) == {"a.txt"}
+    assert tasks.worktree_changed_paths(b) == {"b.txt"}
+    assert overlap_signal(store.list()) == {}
+
+
+def test_overlap_is_unobservable_without_a_base_or_a_worktree(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    store = TaskStore(home)
+    queued = store.add(project="p", prompt="not started", harness="t")
+    assert tasks.worktree_changed_paths(queued) is None  # no workdir yet
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    notgit = store.add(project="p", prompt="plain dir", harness="t")
+    notgit = store.update(notgit.id, workdir=str(plain), status="executing")
+    assert tasks.worktree_changed_paths(notgit) is None
+
+    # A repository that is its own main worktree with no remote: no base.
+    lone = make_repo(tmp_path, "lone")
+    solo = store.add(project="p", prompt="in the checkout", harness="t")
+    solo = store.update(solo.id, workdir=str(lone), status="executing")
+    assert tasks.worktree_changed_paths(solo) is None
+
+    # None of these can be compared, and none of them raises.
+    assert overlap_signal(store.list()) == {}
+
+
+def test_overlap_pairs_are_bounded(home: Path, tmp_path: Path, monkeypatch):
+    from quorum.agents import manager as manager_mod
+
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    made = [add_worktree(home, repo, store, "ovproj", f"t{i}") for i in range(3)]
+    for t in made:
+        (Path(t.workdir) / "README.md").write_text("changed")
+
+    assert len(manager_mod.overlap_signal(store.list())) == 3
+    monkeypatch.setattr(manager_mod, "OVERLAP_MAX_PAIRS", 1)
+    # One pair's worth of budget: exactly two tasks are marked, the third
+    # goes unobserved rather than costing more git calls.
+    assert len(manager_mod.overlap_signal(store.list())) == 2
+    monkeypatch.setattr(manager_mod, "OVERLAP_MAX_PAIRS", 0)
+    assert manager_mod.overlap_signal(store.list()) == {}
+
+
+def test_the_preamble_tells_a_task_to_rebase_before_pushing(home: Path):
+    from quorum import prompts
+
+    text = prompts.render(home, "task-preamble", task_id="abc123", project_path="/w")
+    assert "git fetch origin" in text
+    assert "rebase" in text
+    assert "report blocked, naming the conflicting files" in text
+    # A task that pushed in an earlier run cannot fast-forward after a
+    # rebase; the way out is spelled, and it is leased.
+    assert "git push --force-with-lease origin HEAD" in text
+    assert "never a bare `--force`" in text
+    assert "overlaps=" in prompts.load(home, "manager")

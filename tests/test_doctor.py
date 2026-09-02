@@ -24,7 +24,15 @@ from typer.testing import CliRunner
 from quorum import doctor, installed_version
 from quorum import home as home_mod
 from quorum.cli import app
-from quorum.config import CIConfig, Config, HarnessConfig, HerdrConfig, SandboxConfig, TasksConfig
+from quorum.config import (
+    CIConfig,
+    Config,
+    HarnessConfig,
+    HerdrConfig,
+    NotifyConfig,
+    SandboxConfig,
+    TasksConfig,
+)
 from quorum.doctor import NA, OK, PROBLEM
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
@@ -330,6 +338,35 @@ def _fake_nono(monkeypatch: pytest.MonkeyPatch, supported: bool):
     mod.is_supported = lambda: supported
     mod.support_info = lambda: types.SimpleNamespace(details="no Landlock here")
     monkeypatch.setitem(sys.modules, "nono_py", mod)
+
+
+def test_notify_check_is_quiet_without_the_table():
+    check = doctor.check_notify(Config())
+    assert check.status == NA
+    assert "reach no one" in check.summary
+
+
+def test_notify_check_passes_with_a_runnable_template():
+    config = Config(notify=NotifyConfig(command=[sys.executable, "-c", "{text}"]))
+    check = doctor.check_notify(config)
+    assert check.status == OK
+    assert "attention" in check.summary
+
+
+def test_notify_check_flags_a_binary_that_is_not_there(tmp_path: Path):
+    config = Config(notify=NotifyConfig(command=[str(tmp_path / "nope"), "{text}"]))
+    check = doctor.check_notify(config)
+    assert check.status == PROBLEM
+    assert "not on PATH" in check.summary
+    assert "[notify].command" in check.fix
+
+
+def test_notify_check_notes_a_template_without_text():
+    config = Config(notify=NotifyConfig(command=[sys.executable, "-c", "pass"]))
+    check = doctor.check_notify(config)
+    assert check.status == NA
+    assert "appends the text" in check.summary
+    assert "{text}" in check.fix
 
 
 def test_sandbox_check_is_quiet_when_unused():

@@ -84,6 +84,15 @@ use_nono = false          # sandbox task runs via nono-py (docs/guide.md#sandbox
 enabled = true            # let the manager digest observe PR/check state via `gh`
                           # (silently does nothing without gh; one network call
                           # per digested task per tick)
+
+# Reach a person: an argv template run once per new message on the listed
+# board topics ({text}, {from}, {topic}, {type}, {id} substituted per element,
+# no shell). Fails soft — a missing binary or a bad exit is one line in
+# logs/supervisor.log. Try it with `quorum notify test "hello"`.
+#[notify]
+#command = ["terminal-notifier", "-title", "quorum", "-message", "{text}"]
+#topics = ["attention"]   # the manager's ask-a-human channel
+#timeout_seconds = 10
 """
 
 SUBDIRS = [
@@ -128,6 +137,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "ac344c667083649b04166a4801c8646240a67f37a078b90c13db922005079a6d",
         # replaced by the {local} overlay-slot revision (#37)
         "f564262f9fa66c42301e211c64e77433e981003f0df138964aa78174898845f0",
+        # the overlay-slot revision, replaced by the rebase-before-push
+        # delivery step (#58)
+        "fa56cbd13104899d52ba4169ed1829c4b4b29ebe2389d3f9e7f3ae390949f677",
     },
     "task-perpetual.md": {
         # the original (#12) block, replaced by the {local} overlay-slot
@@ -151,9 +163,19 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule
         "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
-        # the #31 revision, replaced by the #42 hung-session policy (stop,
-        # --fresh-session, STALLED)
+        # the task-dependency revision, replaced by the budget-gate rule (#19)
         "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
+        # the budget-gate revision, replaced by the merged-observation
+        # revision (#57): how to read `state=merged` / `state=closed`
+        "e082bdb1588d389285bca08c991dd5b79da6af4be441a634460a09bec7ed2ef3",
+        # the merged-observation revision, replaced by the self-observation
+        # revision (#59): timing-out runs and a cap hit two runs running
+        "3b060014ec4fac03637df6c9185ea1fc8e3b3ab7065935ad36a8ace2388e3600",
+        # the self-observation revision, replaced by the overlaps= rule (#58)
+        "7f3d25f7faf4d5ced1ddc557c2611b23df15fd35d6b32192e2dde00b05a970a3",
+        # the overlaps= revision, replaced by the #42 hung-session policy (stop,
+        # --fresh-session, STALLED)
+        "54221d7f36b8228bbaa71a44aff59f589f41034c346d95be288a59c63aaa09b3",
     },
 }
 

@@ -29,11 +29,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import actor, ci, fsio, herdr, notes, tasks, usage
-from ..actor import journal_path
+from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
 from ..agent import Agent
 from ..config import TasksConfig, load_config_or_default
 from ..runner import guidance_note
-from .harness_run import DEFAULT_RUN_TIMEOUT_SECONDS, run_agent_harness
+from .harness_run import (
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    agent_cap,
+    run_agent_harness,
+    self_observations,
+)
 
 __all__ = [
     "DEFAULT_RUN_TIMEOUT_SECONDS",
@@ -42,6 +47,7 @@ __all__ = [
     "journal_path",
     "loop_signal",
     "stall_minutes",
+    "overlap_signal",
     "transcript_path",
 ]
 
@@ -201,13 +207,110 @@ def loop_signal(entries: list[dict]) -> dict | None:
     }
 
 
+# --- overlap observation -----------------------------------------------------
+# Two live tasks on one project each see their own worktree and nothing
+# else: the digest showed each task's git state in isolation, so a manager
+# that launched two branches from the same base found out they collided
+# only when both PRs came back MERGE-CONFLICT. `overlap_signal` intersects
+# the path sets the worktrees have changed (tasks.worktree_changed_paths —
+# read-only git, no network) for every pair of live worktree tasks on the
+# same project. Pairs are what the budget counts, because pairs are what
+# grows quadratically; the git subprocesses are per *task* (each worktree
+# is read once and memoized) and they block the tick. Budget is spent in
+# digest order, so a home with more concurrency than budget still sees its
+# first OVERLAP_MAX_PAIRS pairs and the rest go unobserved — prefer false
+# negatives, like `possible-loop`. The detail line names at
+# most OVERLAP_MAX_PATHS shared paths so one wide pair cannot become a wall.
+OVERLAP_MAX_PAIRS = 20
+OVERLAP_MAX_PATHS = 3
+
+
+def overlap_signal(live: list[tasks.Task]) -> dict[str, list[dict]]:
+    """Which live worktree tasks touch the same files as which others.
+
+    `live` is the caller's already-filtered listing (the digest passes its
+    active tasks — nothing terminal, nothing attached).
+
+    Returns {task id: [{"with": short id, "paths": sorted shared paths}, ...]}
+    for every task that shares at least one changed path with another live
+    task on the same project — both sides of a pair are listed, so both
+    digest lines carry the mark. Attached tasks and tasks run without a
+    worktree are never compared: that directory is the human's checkout,
+    and its diff is theirs, not the task's. Pure over the worktrees (no
+    state file, nothing written), fail-soft per task (an unreadable
+    worktree contributes no paths and no pair), and bounded by
+    OVERLAP_MAX_PAIRS.
+
+    Like every other flag in the digest this is an observation, not a rail:
+    parallel edits to one file are sometimes exactly the job, and the
+    manager decides whether to serialize, nudge, or ignore.
+    """
+    by_project: dict[str, list[tasks.Task]] = {}
+    for t in live:
+        if t.attached or not t.use_worktree or not t.workdir:
+            continue
+        by_project.setdefault(t.project, []).append(t)
+    paths: dict[str, set[str] | None] = {}
+
+    def changed(t: tasks.Task) -> set[str] | None:
+        if t.id not in paths:
+            paths[t.id] = tasks.worktree_changed_paths(t)
+        return paths[t.id]
+
+    result: dict[str, list[dict]] = {}
+    budget = OVERLAP_MAX_PAIRS
+    for group in by_project.values():
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                if budget <= 0:
+                    return result
+                budget -= 1
+                pa, pb = changed(a), changed(b)
+                if not pa or not pb:
+                    continue
+                shared = sorted(pa & pb)
+                if not shared:
+                    continue
+                result.setdefault(a.id, []).append({"with": b.short_id, "paths": shared})
+                result.setdefault(b.id, []).append({"with": a.short_id, "paths": shared})
+    return result
+
+
+def _overlap_marks(overlaps: list[dict] | None) -> str:
+    """The greppable part: ` overlaps=<short-id> paths=N` per partner,
+    appended to the task line. Empty for the overwhelming majority of tasks."""
+    if not overlaps:
+        return ""
+    return "".join(f" overlaps={o['with']} paths={len(o['paths'])}" for o in overlaps)
+
+
+def _overlap_lines(overlaps: list[dict] | None) -> list[str]:
+    """The prose behind the marks: up to OVERLAP_MAX_PATHS shared paths per
+    partner, and how many more there are."""
+    if not overlaps:
+        return []
+    lines = []
+    for o in overlaps:
+        shown = ", ".join(o["paths"][:OVERLAP_MAX_PATHS])
+        more = len(o["paths"]) - OVERLAP_MAX_PATHS
+        tail = f" (+{more} more)" if more > 0 else ""
+        lines.append(
+            f"  overlap: with {o['with']} on {shown}{tail} — both branches change these "
+            "files; an observation, not a rail"
+        )
+    return lines
+
+
 def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
     """What a task has spent, and whether any run went over budget.
 
     Absent entirely when the harness reported nothing — silence is unknown
-    spend, never zero. The BUDGET-EXCEEDED line is an *observation* of the
-    same class as `possible-loop`: quorum did not stop the run and will not,
-    the manager decides what an expensive task deserves.
+    spend, never zero. A BUDGET-EXCEEDED line on an *earlier* run is an
+    observation of the same class as `possible-loop`. On the *last* run it
+    also names the consequence: the runner's budget gate refuses the next
+    run (`runner.budget_blockers`), so the manager reads why its relaunch
+    failed and what it can do instead — the gate rate-limits, it never
+    decides for it.
     """
     lines = []
     spent = usage.total(r.usage for r in task.runs)
@@ -215,10 +318,14 @@ def _usage_lines(task: tasks.Task, budget: TasksConfig) -> list[str]:
         lines.append(
             f"  usage: {usage.describe(spent)} over {int(spent['runs'])} reporting run(s)"
         )
+    last = f"run {len(task.runs)}:"
     for note in usage.run_overages(
         task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
     ):
-        lines.append(f"  BUDGET-EXCEEDED: {note} — an observation, not a rail")
+        if note.startswith(last):
+            lines.append(f"  BUDGET-EXCEEDED: {note} (next run gated; --force to override)")
+        else:
+            lines.append(f"  BUDGET-EXCEEDED: {note} (an earlier run; a later one cleared the gate)")
     return lines
 
 
@@ -349,6 +456,7 @@ def build_digest(
     now: datetime,
     directives: list[str],
     tasks_config: TasksConfig | None = None,
+    cap: int = DEFAULT_MAX_ACTIONS_PER_RUN,
 ) -> str:
     """The manager's whole world, compiled from files. Greppable: task lines
     look like `- [status] shortid ...` so both models and tests can parse
@@ -367,12 +475,12 @@ def build_digest(
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
     lines = [f"# Situation digest — {fsio.iso(now)}", ""]
-    # What supervision itself costs, read from the manager's own usage
-    # ledger: the one spend nothing else in the digest accounts for. Absent
-    # when the manager's harness reports nothing, like every other figure.
-    self_spend = usage.describe_agent(usage.agent_usage(home, "manager"))
-    if self_spend:
-        lines += [f"Your own runs have cost: {self_spend}", ""]
+    # What supervision itself costs and how its own recent ticks went, read
+    # from the manager's own usage ledger: the one part of the situation
+    # nothing else in the digest accounts for. Spend is absent when the
+    # harness reports nothing, like every other figure; the outcome line
+    # survives that, because a run that times out reports nothing at all.
+    lines += self_observations(home, "manager", cap) + [""]
     # The notebook comes first, and under its own caps (notes.py): it is the
     # only part of the digest a *previous* you wrote deliberately for this
     # run, and it must not compete for room with per-task output that grows
@@ -390,7 +498,15 @@ def build_digest(
             # finished work always gets probed.
             return None
         ci_budget -= 1
-        return ci.pr_state(home, task)
+        state = ci.pr_state(home, task)
+        if state is not None:
+            # The one place a probe result is written to disk: what the forge
+            # says about the PR outlives the probe, so views that never make
+            # a network call can still badge a merged task. An observation,
+            # never a status change — see tasks.record_pr_state and
+            # docs/architecture.md ("The merged observation").
+            tasks.record_pr_state(home, task, state["state"], now=now)
+        return state
 
     # A perpetual task is never supposed to finish, so one that reported a
     # terminal status is either the user ending it (cancelled — fine) or a
@@ -411,6 +527,9 @@ def build_digest(
     lines.append("## Active tasks")
     if not active:
         lines.append("(none)")
+    # Read once over the active listing: attached tasks are excluded by
+    # construction here and again inside (their checkout is the human's).
+    overlaps = overlap_signal(active)
     for t in active:
         alive = tasks.runner_alive(home, t.id)
         seen = tasks.last_activity(home, t.id)
@@ -428,6 +547,7 @@ def build_digest(
             + _restart_marks(t)
             + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
+            + _overlap_marks(overlaps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
@@ -449,6 +569,7 @@ def build_digest(
                 "keeps happening)"
             )
         lines.extend(_dependency_lines(deps.get(t.id)))
+        lines.extend(_overlap_lines(overlaps.get(t.id)))
         git = tasks.workdir_git_state(t)
         if git and (git["dirty"] or git["unpushed"]):
             unpushed = "no-remote" if git["unpushed"] is None else git["unpushed"]
@@ -547,7 +668,13 @@ def build_digest(
             # loudly, and leave the judgement to the prompt.
             pr = ci_state(t)
             if pr:
-                bad = "CI-FAILING " if (pr["summary"] == "failing" or pr["conflict"]) else ""
+                # A merged PR is delivered, full stop: its checks are
+                # historical and its "conflict" is meaningless. Suppressed
+                # explicitly rather than by construction, so a forge that
+                # keeps reporting a stale red rollup after the merge cannot
+                # send the manager to relaunch finished work.
+                red = pr["summary"] == "failing" or pr["conflict"]
+                bad = "CI-FAILING " if red and not pr["merged"] else ""
                 lines.append(f"  ci: {bad}{ci.describe(pr)}")
             lines.extend(_usage_lines(t, budget))
         lines.append("")
@@ -603,6 +730,7 @@ class Manager(Agent):
                 self.ctx.now(),
                 directives,
                 self.ctx.config.tasks if self.ctx.config else None,
+                cap=agent_cap(self.ctx),
             )
             prompt = self.ctx.prompt("manager", digest=digest)
             run_agent_harness(self.ctx, prompt)

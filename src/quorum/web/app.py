@@ -1,8 +1,8 @@
 """Local web dashboard: a thin FastAPI layer over the same files every other
 view reads. Binds to 127.0.0.1 only. Reads dominate; the write actions are
-posting a board note, editing a project's deadline/notes, sending guidance to
-a task, and creating/controlling agents — all routed through the same code
-paths as the CLI.
+posting a board note, acking one off the #attention banner, editing a
+project's deadline/notes, sending guidance to a task, and creating/controlling
+agents — all routed through the same code paths as the CLI.
 """
 
 from __future__ import annotations
@@ -139,6 +139,20 @@ def create_app(home: Path) -> FastAPI:
     def post_note(topic: str, body: BoardPost) -> dict:
         msg = MessageBus(home).post("user@web", topic, type=body.type, text=body.text)
         return {"id": msg.id}
+
+    @app.post("/api/board/{topic}/ack/{message_id}")
+    def ack_note(topic: str, message_id: str) -> dict:
+        """Archive one board message — the same `MessageBus.ack_board_message`
+        `quorum board ack` and the TUI's `a` call, so the banner drops it and
+        `messages/archive/` keeps it. Unknown and ambiguous both fail loudly:
+        a silently-wrong ack archives someone else's escalation."""
+        try:
+            msg = MessageBus(home).ack_board_message(message_id, topic=topic)
+        except KeyError:
+            raise HTTPException(404, f"no live message {message_id!r} on {topic!r}") from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        return {"id": msg.id, "short_id": msg.short_id, "topic": msg.topic}
 
     @app.patch("/api/projects/{slug}")
     def patch_project(slug: str, body: ProjectPatch) -> dict:

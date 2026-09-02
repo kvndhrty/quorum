@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+import time
+from pathlib import Path
 
 from .. import fsio, usage
 from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, actor_env, transcript_path
@@ -32,6 +34,36 @@ def resolve_agent_harness(ctx: AgentContext):
     return resolve_harness(config, name)
 
 
+def agent_cap(ctx: AgentContext) -> int:
+    """The per-run action cap this agent's runs are tagged with (actor.py)."""
+    return int(ctx.settings.get("max_actions_per_run", DEFAULT_MAX_ACTIONS_PER_RUN))
+
+
+def self_observations(home: Path, name: str, cap: int) -> list[str]:
+    """What an agent can see about *itself*: spend, recent run outcomes, budget.
+
+    Three lines, all read from files the agent's own runs already wrote (the
+    usage ledger) or from the run it is about to make (the cap). Nothing here
+    pauses, throttles or changes anything — like `possible-loop` and
+    `BUDGET-EXCEEDED`, these are observations the prompt judges.
+
+    The action count is `0` by construction: the header is rendered *before*
+    the harness starts, so what it reports is the budget, and what happened to
+    it lands in the journal (`cap.hit`) for the next run to read.
+    """
+    lines = []
+    spent = usage.describe_agent(usage.agent_usage(home, name))
+    if spent:
+        lines.append(f"Your own runs have cost: {spent}")
+    runs = usage.agent_runs(home, name)
+    recent = usage.describe_runs(runs)
+    if recent:
+        label = f"Your last {len(runs)} runs" if len(runs) > 1 else "Your last run"
+        lines.append(f"{label}: {recent}")
+    lines.append(f"Actions this run: 0 of {cap} (cap)")
+    return lines
+
+
 def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
     """Run the agent's configured harness over `prompt`, synchronously,
     cwd = QUORUM_HOME. Raises on timeout or nonzero exit; returns the run id.
@@ -42,12 +74,15 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
 
     Whatever the harness said the run cost is captured off the same parsed
     events (`usage.py`, fail-soft) and appended to the agent's usage ledger
-    — the agent-side counterpart of a task run's `usage` field.
+    — the agent-side counterpart of a task run's `usage` field — together
+    with how the run ended (`ok`/`raised`/`timeout`) and how long it took,
+    which is what lets a *later* run of the same agent see that its recent
+    ticks have been timing out.
     """
     harness = resolve_agent_harness(ctx)
     run_id = fsio.ulid()
     timeout = float(ctx.settings.get("run_timeout_seconds", DEFAULT_RUN_TIMEOUT_SECONDS))
-    cap = int(ctx.settings.get("max_actions_per_run", DEFAULT_MAX_ACTIONS_PER_RUN))
+    cap = agent_cap(ctx)
     env = {
         **os.environ,
         **harness.env,
@@ -68,6 +103,11 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
         env=env,
     )
     spend = usage.UsageCollector()
+    # Real elapsed time, not ctx.now(): this measures how long the process
+    # actually took (the same real seconds `proc.wait(timeout=...)` counts),
+    # and nothing decides anything from it.
+    started = time.monotonic()
+    outcome = "raised"  # every exit that is not a clean 0 is one of these
     try:
         with guidance_pump(ctx.home, ctx.name, harness, proc, prompt) as pump:
 
@@ -89,15 +129,26 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
                 proc.kill()
                 proc.wait()
                 reader.join(2)
+                outcome = "timeout"
                 raise RuntimeError(
                     f"{ctx.name} harness run {run_id} timed out after {int(timeout)}s "
                     "and was killed"
                 ) from None
         reader.join(5)
+        if code == 0:
+            outcome = "ok"
     finally:
         # A run that timed out or crashed still spent what it spent, and a
         # run count only means something if every run is in the ledger.
-        usage.record_agent_run(ctx.home, ctx.name, run_id, spend.result(), ctx.now())
+        usage.record_agent_run(
+            ctx.home,
+            ctx.name,
+            run_id,
+            spend.result(),
+            ctx.now(),
+            outcome=outcome,
+            duration_seconds=time.monotonic() - started,
+        )
     if code != 0:
         raise RuntimeError(f"{ctx.name} harness run {run_id} exited {code}")
     return run_id

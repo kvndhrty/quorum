@@ -136,6 +136,119 @@ def test_task_add_requires_known_project_and_harness(home: Path):
     assert r.exit_code == 1 and "no project" in r.output
 
 
+# A prompt that would fight the shell: quotes, backticks, blank lines, and a
+# trailing newline the way `gh issue view ... | ...` delivers one.
+ISSUE_PROMPT = (
+    "## Problem\n\n`quorum task add` takes \"the prompt\" as an argv string.\n\n"
+    "## Proposal\n\n- read it from stdin\n"
+)
+
+
+def stored_prompt(home: Path) -> str:
+    from quorum.tasks import TaskStore
+
+    tasks = TaskStore(home).list()
+    assert len(tasks) == 1
+    return tasks[0].prompt
+
+
+def test_task_add_reads_prompt_from_stdin(home: Path, tmp_path: Path):
+    """`-` pipes the prompt in, byte-for-byte — no stripping, no newline
+    translation: what the harness reads must be what was piped."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(
+        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_reads_prompt_from_file(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "issue.md"
+    body.write_bytes(ISSUE_PROMPT.encode("utf-8"))
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_prompt_file_keeps_crlf(home: Path, tmp_path: Path):
+    """read_bytes, not read_text: universal newlines would rewrite the file."""
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "crlf.md"
+    body.write_bytes(b"line one\r\nline two\r\n")
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == "line one\r\nline two\r\n"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["do it", "--prompt-file", "PROMPT"],
+        ["-", "--prompt-file", "PROMPT"],
+    ],
+)
+def test_task_add_refuses_two_prompt_sources(home: Path, tmp_path: Path, args: list[str]):
+    slug = setup_task_env(home, tmp_path)
+    body = tmp_path / "issue.md"
+    body.write_text(ISSUE_PROMPT)
+    args = [str(body) if a == "PROMPT" else a for a in args]
+    r = runner.invoke(
+        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 1
+    assert "exactly one way" in r.output
+    from quorum.tasks import TaskStore
+
+    assert TaskStore(home).list() == []
+
+
+def test_task_add_without_a_prompt_says_how(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 1
+    assert "--prompt-file" in r.output
+
+
+@pytest.mark.parametrize("source", ["stdin", "file"])
+def test_task_add_refuses_empty_input(home: Path, tmp_path: Path, source: str):
+    """A whitespace-only prompt would queue, launch, and waste a whole run."""
+    slug = setup_task_env(home, tmp_path)
+    args = ["-"]
+    if source == "file":
+        blank = tmp_path / "blank.md"
+        blank.write_text("\n  \n")
+        args = ["--prompt-file", str(blank)]
+    r = runner.invoke(
+        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
+        input="\n  \n",
+    )
+    assert r.exit_code == 1
+    assert "empty prompt" in r.output
+    from quorum.tasks import TaskStore
+
+    assert TaskStore(home).list() == []
+
+
+def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    missing = tmp_path / "nope.md"
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "--prompt-file", str(missing), "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 1 and "cannot read" in r.output
+
+
 def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
 
@@ -311,6 +424,29 @@ def test_non_manager_actor_journals_to_its_own_path_and_hits_cap(
     r = runner.invoke(app, ["task", "add", slug, "one too many", "--harness", "fake", "--home", str(home)])
     assert r.exit_code == 1
     assert "alpha action cap (2) reached" in r.output
+
+
+def test_a_torn_journal_line_does_not_break_the_cap_count(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """The journal is read back to count this run's actions; a line that is
+    valid JSON but not an object must be skipped, not crash every action."""
+    from quorum import fsio
+    from quorum.actor import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    journal = journal_path(home, "alpha")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text('"not even a dict"\n')
+
+    monkeypatch.setenv("QUORUM_ACTOR", "alpha")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TORNRUN")
+    monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
+
+    r = runner.invoke(app, ["task", "add", slug, "after the torn line", "--harness", "fake", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    entries = [e for e in fsio.read_jsonl(journal) if isinstance(e, dict)]
+    assert [e["action"] for e in entries] == ["task.add"]
 
 
 def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkeypatch):
@@ -845,6 +981,39 @@ def test_task_run_force_overrides_the_dependency_refusal(home: Path, tmp_path: P
     from quorum.tasks import TaskStore
 
     assert len(TaskStore(home).resolve(second).runs) == 1
+def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, monkeypatch):
+    """The budget gate as the manager meets it: `task run` (and `--detach`,
+    in the parent) refuse a task whose last run went over, the views say so,
+    and `--force` is the override."""
+    slug = setup_task_env(home, tmp_path)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+
+    from quorum.tasks import TaskStore
+
+    for extra in ([], ["--detach"]):
+        r = runner.invoke(app, ["task", "run", short, *extra, "--home", str(home)])
+        assert r.exit_code == 1, r.output
+        assert "exceeded its budget" in r.output and "next run gated" in r.output
+        assert "--force" in r.output
+        assert len(TaskStore(home).resolve(short).runs) == 1
+
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "$! GATED" in r.output
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["budget_gated"] is True
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "gated:    the last run exceeded its budget" in r.output
+
+    r = runner.invoke(app, ["task", "run", short, "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert len(TaskStore(home).resolve(short).runs) == 2
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 
@@ -874,6 +1043,46 @@ def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path)
     row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
     assert row["perpetual"] is False
     assert "∞" not in runner.invoke(app, ["task", "list", "--home", str(home)]).output
+
+
+# -- the merged observation (#57) --------------------------------------------
+
+
+def test_a_merged_or_closed_pr_is_badged_everywhere(home: Path, tmp_path: Path):
+    """`done ✔` is delivered; `done ⊘` is a PR a human closed unmerged. Both
+    are read straight off task.json — the manager tick recorded them, this
+    command never probes a forge."""
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    store = TaskStore(home)
+    shipped = store.add(slug, "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged", pr_state_at="2026-01-01T00:00:00Z")
+    dropped = store.add(slug, "abandoned", "fake", status="done")
+    store.update(dropped.id, pr_state="closed", pr_state_at="2026-01-01T00:00:00Z")
+    store.add(slug, "never observed", "fake", status="done")
+
+    rows = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    assert [r["pr_state"] for r in rows] == ["merged", "closed", None]
+
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "done ✔" in listing and "done ⊘" in listing
+    assert "✔" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "✔" in runner.invoke(app, ["status", "--legend"]).output
+    shown = runner.invoke(app, ["task", "show", shipped.short_id, "--home", str(home)]).output
+    assert "pr state: merged (observed 2026-01-01T00:00:00Z)" in shown
+
+
+def test_a_task_with_no_observed_pr_state_is_not_badged(home: Path, tmp_path: Path):
+    """Absence means "never observed" — no gh, no PR — never "not merged"."""
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
+    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "✔" not in listing and "⊘" not in listing
+    short = json.loads(
+        runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output
+    )[0]["id_short"]
+    assert "pr state" not in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
 
 
 # -- one load-config fallback (#34) ------------------------------------------
@@ -909,3 +1118,201 @@ def test_views_still_render_over_a_broken_config(home: Path):
     (home / "config.toml").write_text("nonsense = [[[")
     overview = views.overview(home)
     assert overview["agents"] == [] and overview["tasks"] == []
+
+
+# -- listings as Rich tables (#52) -------------------------------------------
+
+
+def _wide_task_rows() -> list[dict]:
+    """Two `views.task_rows`-shaped rows with every optional field lit — the
+    row shape that used to run past 80 columns and wrap mid-cell."""
+    return [
+        {
+            "id_short": "38hskq", "project": "quorum", "status": "executing",
+            "harness": "claude", "running": True, "attached": False, "perpetual": False,
+            "last_report": "implementing the rich table for status rows\nand making sure "
+                           "nothing wraps at eighty columns even with every field lit",
+            "pr_url": "https://github.com/kvndhrty/quorum/pull/49",
+            "git": {"dirty": 2, "unpushed": 1},
+            "waiting_on": ["a3f2k9"], "dep_failed": [], "dep_missing": [], "dep_cycle": False,
+            "usage_text": "$12.31 · 17.4M tok", "budget_overages": ["run 3: cost $12.31 > 1.0"],
+        },
+        {
+            "id_short": "a3f2k9", "project": "quorum", "status": "done",
+            "harness": "codex", "running": False, "attached": False, "perpetual": True,
+            "last_report": "short", "pr_url": "", "git": None,
+            "waiting_on": [], "dep_failed": [], "dep_missing": [], "dep_cycle": False,
+            "usage_text": "1.2k tok", "budget_overages": [],
+        },
+    ]
+
+
+def test_task_table_fits_eighty_columns_without_wrapping(capsys):
+    """The wrapping the issue describes: fitted to 80 columns, every row is
+    one line, ids/status/pr/usage are whole, and the report and flags cells
+    are the ones that give way (ellipsis, never a wrap)."""
+    from rich.cells import cell_len
+
+    from quorum.cli import _print_table, _task_table
+
+    rows = _wide_task_rows()
+    _print_table(_task_table(rows), width=80)
+    lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+    assert len(lines) == 1 + len(rows), lines  # header + one line per row: no wrapped cell
+    assert all(cell_len(line) <= 80 for line in lines), [cell_len(x) for x in lines]
+    header, first, second = lines
+    # the fixed columns keep their headers; report/flags may lose theirs to
+    # the ellipsis at this width, exactly as their cells do
+    assert header.split()[:4] == ["id", "project", "status", "harness"]
+    assert "pr" in header.split() and "usage" in header.split()
+    assert "▶ 38hskq" in first and "executing" in first and "claude" in first
+    assert "#49" in first and "$12.31 · 17.4M tok $!" in first
+    assert "…" in first  # the report gave way
+    assert "https://" not in first  # the URL itself only in `task show`
+    assert "✓ a3f2k9" in second and "done ∞" in second and "1.2k tok" in second
+
+
+def test_task_table_is_whole_and_plain_off_a_terminal(capsys):
+    """Piped (as here — pytest's capture is not a tty): natural width, no
+    ANSI, the whole report on one line, so grep on an id or status works."""
+    from quorum.cli import _print_table, _task_table
+
+    rows = _wide_task_rows()
+    _print_table(_task_table(rows))
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    lines = out.rstrip("\n").split("\n")
+    assert len(lines) == 1 + len(rows)
+    assert all(line == line.rstrip() for line in lines)  # no padding past the last cell
+    assert "…" not in lines[1]
+    # the newline in the report was folded into the one row
+    assert "status rows and making sure nothing wraps at eighty columns" in lines[1]
+    assert "⚠ 2 uncommitted, 1 unpushed  waiting-on a3f2k9" in lines[1]
+    assert "#49" in lines[1] and "$12.31 · 17.4M tok $!" in lines[1]
+
+
+def test_task_table_drops_columns_nothing_fills(capsys):
+    """A home with no PRs, flags or reported usage gets no blank headers."""
+    from quorum.cli import _print_table, _task_table
+
+    row = dict(_wide_task_rows()[1], perpetual=False, usage_text="")
+    _print_table(_task_table([row]))
+    header = capsys.readouterr().out.split("\n")[0].split()
+    assert header == ["id", "project", "status", "harness", "report"]
+
+    # ...and a fresh home whose queued tasks have not reported yet loses the
+    # `report` header too: nothing is exempt from the drop but the identity
+    # columns every row fills.
+    _print_table(_task_table([dict(row, last_report="")]))
+    header = capsys.readouterr().out.split("\n")[0].split()
+    assert header == ["id", "project", "status", "harness"]
+
+
+def test_table_stays_compact_on_a_wide_terminal(capsys):
+    """A table left with no give-way column (the usual `agent list`) must not
+    spread the window's slack over its fixed columns: at 200 columns the
+    fields stay two spaces apart, exactly as they are when piped."""
+    from rich.cells import cell_len
+
+    from quorum.cli import _agent_table, _print_table
+
+    rows = [
+        {
+            "name": "manager", "type": "manager", "status": "idle", "enabled": True,
+            "schedule": "every 5 minutes", "last_end": "12:00", "usage_text": "",
+            "error": "",
+        }
+    ]
+    _print_table(_agent_table(rows, with_type=True), width=200)
+    lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+    assert len(lines) == 2, lines
+    assert all(cell_len(line.rstrip()) < 60 for line in lines), lines
+    assert "name       type     status  schedule" in lines[0]
+
+    # a surviving give-way column still fills the window
+    _print_table(_agent_table([dict(rows[0], error="boom")], with_type=True), width=200)
+    assert "error" in _plain(capsys.readouterr().out).split("\n")[0]
+
+
+def test_a_narrow_table_clips_every_column_before_the_id(capsys):
+    """Below the width the report column can cover, Rich clips the fixed
+    columns — but the id is the handle you retype into `task run`, so it
+    holds `ID_MIN_WIDTH` while project/status/harness give up theirs."""
+    from quorum.cli import _print_table, _task_table
+
+    for width in (40, 30, 24):
+        _print_table(_task_table(_wide_task_rows()), width=width)
+        lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+        assert len(lines) == 3, (width, lines)
+        assert "▶ 38hskq" in lines[1] and "✓ a3f2k9" in lines[2], (width, lines)
+
+
+def test_pr_ref_shortens_known_forges_and_leaves_the_rest():
+    from quorum.cli import _pr_ref
+
+    assert _pr_ref("https://github.com/kvndhrty/quorum/pull/49") == "#49"
+    assert _pr_ref("https://github.com/kvndhrty/quorum/pull/49/") == "#49"
+    assert _pr_ref("https://gitlab.example/g/p/-/merge_requests/7") == "!7"
+    # not a PR-shaped URL: shown as given rather than guessed at
+    assert _pr_ref("https://example.com/review/abc") == "https://example.com/review/abc"
+
+
+def test_long_report_is_clipped_in_the_table_not_in_task_show(capsys):
+    from quorum.cli import REPORT_MAX_CHARS, _print_table, _task_table
+
+    row = dict(_wide_task_rows()[1], last_report="x" * 300)
+    _print_table(_task_table([row]))
+    line = capsys.readouterr().out.split("\n")[1]
+    assert "x" * (REPORT_MAX_CHARS - 1) + "…" in line and "x" * REPORT_MAX_CHARS not in line
+
+
+def test_status_and_task_list_stay_greppable_when_piped(home: Path, tmp_path: Path):
+    """End to end through the CLI (CliRunner is not a tty): both listings
+    carry every id and status, the PR as `#N`, and `task show` the full URL."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "first", "--harness", "fake", "--home", str(home)])
+    first = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "add", slug, "second", "--harness", "fake", "--home", str(home)])
+    second = r.output.split("queued task ")[1].split(" ")[0]
+    url = "https://github.com/kvndhrty/quorum/pull/49"
+    r = runner.invoke(
+        app, ["task", "report", second, "--status", "pr", "--pr-url", url, "opened", "--home", str(home)]
+    )
+    assert r.exit_code == 0, r.output
+
+    for argv in (["task", "list"], ["status"]):
+        r = runner.invoke(app, [*argv, "--home", str(home)])
+        assert r.exit_code == 0, r.output
+        assert "\x1b[" not in r.output
+        rows = {line.split()[1]: line for line in r.output.split("\n") if f"  {slug}  " in line}
+        assert set(rows) == {first, second}
+        assert "queued" in rows[first]
+        assert "pr" in rows[second].split() and "#49" in rows[second]
+        assert url not in r.output
+        header = next(line for line in r.output.split("\n") if line.startswith("id  "))
+        assert header.split() == ["id", "project", "status", "harness", "report", "pr"]
+
+    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    assert f"pr:       {url}" in r.output
+
+
+def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["project", "set", slug, "--deadline", "2099-01-01", "--home", str(home)])
+
+    r = runner.invoke(app, ["agent", "list", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    lines = r.output.rstrip("\n").split("\n")
+    assert lines[0].split()[:4] == ["name", "type", "status", "schedule"]
+    manager = next(line for line in lines if "manager" in line)
+    assert manager.startswith("○ manager") and "never-ran" in manager
+
+    r = runner.invoke(app, ["status", "--home", str(home)])
+    agents = r.output.split("agents:\n")[1].split("\n")[0].split()
+    assert agents[:3] == ["name", "status", "schedule"] and "type" not in agents
+    projects = r.output.split("projects:\n")[1].rstrip("\n").split("\n")
+    assert projects[0].split() == ["slug", "due"]  # name == slug is not repeated
+    assert projects[1].startswith(slug) and "2099-01-01 (" in projects[1]
+
+    r = runner.invoke(app, ["project", "list", "--home", str(home)])
+    assert r.exit_code == 0 and r.output.split("\n")[1].startswith(slug)
