@@ -7,6 +7,8 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -190,6 +192,73 @@ def test_inject_pump_delivers_mid_run_guidance(home: Path, project: str, monkeyp
     inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
     assert fsio.sorted_entries(inbox / "new") == []  # consumed, not re-delivered next run
     assert fsio.sorted_entries(inbox / "cur") == []
+
+
+class _PipeEnd:
+    """A stand-in for the harness's stdin pipe: records turns, knows if closed."""
+
+    def __init__(self):
+        self.turns: list[str] = []
+        self.closed = False
+
+    def write(self, text: str) -> None:
+        self.turns.append(text)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
+    """The turn-boundary race behind a CI flake (PR #74, `test (3.12)`): the
+    harness posts a nudge and then emits its `result`; the pump claims the
+    nudge (rename out of new/) and only *then* counts the delivery. A result
+    landing in that gap saw "answered, nothing pending" and closed stdin
+    with the nudge in flight — one result event instead of two, and the
+    nudge bounced back to new/. This forces that interleaving: the result
+    arrives while the claim is mid-way, on another thread, exactly as the
+    transcript reader delivers it."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    bus.send("user", inbox, text="switch to the fallback plan")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    real_claim = pump._bus.claim
+    result_seen = threading.Event()
+
+    def racing_claim(agent):
+        for claimed in real_claim(agent):
+            # the message is in cur/ now; before the pump can count it, the
+            # harness's first result reaches on_event from the reader thread
+            t = threading.Thread(target=lambda: (pump.on_event({"type": "result"}),
+                                                 result_seen.set()))
+            t.start()
+            t.join(timeout=0.3)  # the fixed pump holds the lock here: it must wait
+            yield claimed
+
+    pump._bus.claim = racing_claim
+    pump.start()
+    try:
+        assert result_seen.wait(5)
+        deadline = time.monotonic() + 5
+        while len(stdin.turns) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(stdin.turns) == 2, stdin.turns  # prompt turn, then the nudge
+        assert "switch to the fallback plan" in stdin.turns[1]
+        assert not stdin.closed  # the nudge's answer is still owed
+        inbox_dir = bus.inbox_dir / inbox
+        assert fsio.sorted_entries(inbox_dir / "new") == []  # delivered, not bounced
+        while fsio.sorted_entries(inbox_dir / "cur") and time.monotonic() < deadline:
+            time.sleep(0.01)  # the ack follows the write on the pump thread
+        assert fsio.sorted_entries(inbox_dir / "cur") == []  # ...and acked
+
+        pump.on_event({"type": "result"})  # the harness answers the nudge
+        assert stdin.closed  # now the run is idle: every turn answered
+    finally:
+        pump.stop()
 
 
 def test_build_harness_argv_strips_prompt_for_inject_harnesses():
@@ -712,6 +781,75 @@ def test_force_overrides_the_dependency_refusal(home: Path, project: str):
     dependent = store.add(project, "review the work", "fake", depends_on=[upstream.id])
     assert run_task(home, config, dependent.id, force=True) == 0
     assert len(store.get(dependent.id).runs) == 1
+
+
+def test_run_refuses_a_task_whose_last_run_blew_its_budget(
+    home: Path, project: str, monkeypatch
+):
+    """The budget gate (#19): with a `[tasks]` budget set, a task whose last
+    run reported more than it is refused its next run — the rate-limit-class
+    rail beside the dependency refusal, checked before anything is spent."""
+    harness_config(home, tasks_extra="max_cost_per_run = 0.10\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "spendy work", "fake")
+
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    assert run_task(home, config, task.id) == 0  # the first run is never gated
+    with pytest.raises(RunnerError, match="exceeded its budget .*cost \\$0.42 > max_cost_per_run"):
+        run_task(home, config, task.id)
+    fresh = store.get(task.id)
+    assert len(fresh.runs) == 1  # refused before spending anything
+    assert fresh.status == "queued"  # a rail never sets status
+    assert not runner.runner_lock_path(home, task.id).exists()
+
+
+def test_force_overrides_the_budget_gate_and_a_cheaper_run_clears_it(
+    home: Path, project: str, monkeypatch
+):
+    harness_config(home, tasks_extra="max_tokens_per_run = 1000\n")
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "spendy work", "fake")
+
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")  # 11k tokens: over
+    assert run_task(home, config, task.id) == 0
+    with pytest.raises(RunnerError, match="next run gated"):
+        run_task(home, config, task.id)
+
+    # --force waives the gate for one run; the harness then reports nothing,
+    # and silence is not evidence of spend — so the gate is clear again
+    monkeypatch.delenv("FAKE_HARNESS_USAGE")
+    assert run_task(home, config, task.id, force=True) == 0
+    assert run_task(home, config, task.id) == 0
+    assert len(store.get(task.id).runs) == 3
+
+    # over again, then a forced run that comes in under budget clears it too
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    assert run_task(home, config, task.id) == 0
+    with pytest.raises(RunnerError, match="tokens 11.0k > max_tokens_per_run 1.0k"):
+        run_task(home, config, task.id)
+    assert runner.budget_blockers(config.tasks, store.get(task.id)) == [
+        "tokens 11.0k > max_tokens_per_run 1.0k"
+    ]
+    # a lighter run: same fake, so patch the recorded usage instead of the harness
+    last = store.get(task.id).runs
+    last[-1].usage = {"total_tokens": 10, "events": 1}
+    store.update(task.id, runs=[r.model_dump() for r in last])
+    assert runner.budget_blockers(config.tasks, store.get(task.id)) == []
+    assert run_task(home, config, task.id) == 0
+
+
+def test_budget_gate_is_off_at_zero(home: Path, project: str, monkeypatch):
+    """No budget (the default) means no gate, whatever a run cost."""
+    harness_config(home)
+    config = load_config(home)
+    assert config.tasks.max_cost_per_run == 0 and config.tasks.max_tokens_per_run == 0
+    task = TaskStore(home).add(project, "expensive by design", "fake")
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "250.00")
+    assert run_task(home, config, task.id) == 0
+    assert run_task(home, config, task.id) == 0
+    assert len(TaskStore(home).get(task.id).runs) == 2
 
 
 def test_a_satisfied_dependency_runs_and_reaches_the_prompt(

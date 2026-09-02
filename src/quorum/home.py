@@ -150,6 +150,8 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
         # the notebook revision, replaced by the #31 task-dependency rule
         "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
+        # the task-dependency revision, replaced by the budget-gate rule (#19)
+        "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
     },
 }
 
