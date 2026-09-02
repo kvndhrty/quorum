@@ -105,11 +105,16 @@ nothing, never a misleading `$0.00`.
 
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
-That is all it does today — quorum will not kill, pause, or refuse a run
-over its budget. The mark reaches the manager, whose prompt tells it to ask
-whether the spend is buying progress and to nudge, decompose, or escalate if
-it is not. If you want a hard stop, that is your judgement to make from the
-flag.
+The budget also gates the **next** run: while a task's *last* run is over
+budget, `quorum task run` refuses it (`$! GATED` in `task list`, a `gated:`
+line in `task show`, and the TUI's `s` key says so) until you run it with
+`--force` or a run comes in under budget — a run that reports no usage
+counts as under, since silence is not spend. Quorum never kills a run in
+progress: a run past its budget finishes, and only the relaunch is held.
+The digest tells the manager the gate is on, and its prompt tells it not to
+reach for `--force` by reflex but to sharpen the nudge, split the task, or
+escalate to you first. With no budget set (the default) nothing is ever
+gated.
 
 ## Harnesses
 
@@ -471,8 +476,10 @@ when there is something to manage), the manager compiles a **digest**:
   task per tick (capped at 12 probed tasks and 10s each, so a hung network
   delays a tick by a bounded couple of minutes at worst, never forever);
 - what each task has spent, when its harness reports usage, and a
-  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — another
-  observation, never a stop;
+  `BUDGET-EXCEEDED` note per run past a `[tasks]` budget you set — with
+  `(next run gated; --force to override)` when it was the last run, since
+  `task run` will refuse that task until a cheaper run clears it
+  (*What runs cost*, under [Setup](#setup) above); never a mid-run stop;
 - what the manager's **own** runs have cost, when its harness reports usage:
   supervision is not free, and in a busy home it is the steadiest recurring
   bill. The same figure shows up next to the agent in `quorum status`, the

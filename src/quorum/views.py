@@ -220,6 +220,14 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 "budget_overages": usage.run_overages(
                     t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
                 ),
+                # True while the *last* run is over budget: `task run`
+                # refuses the next one until --force or a cheaper run
+                # (runner.budget_blockers). Rendered, never enforced, here.
+                "budget_gated": bool(
+                    usage.last_run_overages(
+                        t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+                    )
+                ),
                 "pr_url": t.pr_url,
                 # Dependencies as the views render them: short ids
                 # throughout, since every consumer here displays rather than

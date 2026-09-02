@@ -81,11 +81,11 @@ class TasksConfig(BaseModel):
     # nono-sandboxed run skips it with a note (the sandbox blocks git).
     auto_commit: bool = False
     # Per-run token/cost budget (usage.py). 0 = off, which is the default and
-    # what any harness that reports no usage always effectively gets. These
-    # are *observation* thresholds today: a run over budget is flagged in the
-    # digest and in views, and nothing is killed or vetoed — enforcement
-    # (gating the next run) is a separate, later decision, and would stay in
-    # the rate-limit family the action cap belongs to.
+    # what any harness that reports no usage always effectively gets. A run
+    # over budget is flagged in the digest and in views, and — the rail in
+    # the rate-limit family the action cap belongs to — a task whose *last*
+    # run went over is refused its next run by `task run` unless --force
+    # (runner.budget_blockers). Nothing is ever killed mid-run or vetoed.
     max_cost_per_run: float = 0.0
     max_tokens_per_run: int = 0
 

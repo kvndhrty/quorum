@@ -597,7 +597,9 @@ def _echo_task_row(t: dict) -> None:
         line += "  DEP-CYCLE"
     if t.get("usage_text"):
         line += f"  {t['usage_text']}"
-    if t.get("budget_overages"):
+    if t.get("budget_gated"):
+        line += "  $! GATED"
+    elif t.get("budget_overages"):
         line += "  $!"
     typer.echo(line)
 
@@ -1037,6 +1039,14 @@ def task_show(
             task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
         ):
             typer.secho(f"  budget:   {note}", fg="yellow")
+        if usage.last_run_overages(
+            task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
+        ):
+            typer.secho(
+                "  gated:    the last run exceeded its budget — `task run` refuses the "
+                "next one (--force overrides)",
+                fg="yellow",
+            )
     typer.echo(f"  updated:  {task.updated_at}")
     reports = read_reports(target, task.id, limit=10)
     if reports:
@@ -1050,16 +1060,27 @@ def task_show(
 def task_run(
     task_id: str,
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
-    force: bool = typer.Option(False, "--force", help="Run even while the task's dependencies are unfinished."),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Run even while the task's dependencies are unfinished, or after a run over budget.",
+    ),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
     under `quorum up`)."""
-    from .runner import RunnerError, launch_detached, run_task, unmet_dependencies
+    from .runner import (
+        RunnerError,
+        budget_blockers,
+        budget_refusal,
+        launch_detached,
+        run_task,
+        unmet_dependencies,
+    )
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    # mirror the runner's substrate rail here so --detach fails in the
+    config = _load_config(target)
+    # mirror the runner's substrate rails here so --detach fails in the
     # parent too, instead of journaling a success and refusing in the child
     if task.attached:
         raise _fail(
@@ -1075,12 +1096,14 @@ def task_run(
                 f"task {task.short_id} is waiting on {', '.join(blockers)} — "
                 "unfinished dependencies; `--force` to run anyway"
             )
+        over = budget_blockers(config.tasks, task)
+        if over:
+            raise _fail(budget_refusal(task, over))
     _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
         pid = launch_detached(target, task.id, force=force)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
         return
-    config = _load_config(target)
     try:
         code = run_task(target, config, task.id, force=force)
     except RunnerError as e:

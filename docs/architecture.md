@@ -281,17 +281,33 @@ transcript. So capture is one more look at each parsed event
   manager digest opens with the same figure for the manager itself — the one
   recurring cost nothing else in the digest accounts for, and in a live home
   usually the largest.
-- **The budget is an observation, not (yet) a rail.** `[tasks]
-  max_cost_per_run` / `max_tokens_per_run` (validated non-negative, 0 =
-  off) turn an over-budget run into a `BUDGET-EXCEEDED` digest line and a
-  `$!` mark in the views. Quorum kills nothing and refuses nothing for
-  cost; the manager reads the flag and decides, exactly as it does with
-  `possible-loop`. Enforcement — gating the *next* run of a task that blew
-  its budget — is a deliberate follow-up (issue #19 step 3): it would join
-  the **rate-limit family** the per-run action cap belongs to (bound a
-  bad run's blast radius, never veto a particular choice), and mid-run
-  enforcement is only even expressible for pumped runs, where stdin can be
-  closed at a turn boundary.
+- **The budget gate is a rail of the rate-limit class — the next run,
+  never the current one.** `[tasks] max_cost_per_run` /
+  `max_tokens_per_run` (validated non-negative, 0 = off) turn an
+  over-budget run into a `BUDGET-EXCEEDED` digest line and a `$!` mark in
+  the views, and — the enforcement half of issue #19 — a task whose
+  **last** run went over is refused its next run: `run_task` raises before
+  taking `runner.lock` or spending anything, `quorum task run` mirrors the
+  check so `--detach` fails in the parent, and the TUI's `s` key shows the
+  refusal as a notice. `--force` waives it for one run. Only the last run
+  counts (`usage.last_run_overages` → `runner.budget_blockers`): a later
+  run that came in under budget, or reported nothing (silence is not
+  evidence of spend), clears the gate on its own — a rate limit on
+  relaunching a task that just blew its budget, not a sentence for one that
+  once did. It is the fourth substrate refusal, beside `runner.lock`, the
+  attached-task refusal and the dependency refusal (*Task dependencies*
+  below), and the second rail of the **rate-limit family** the per-run
+  action cap belongs to: it bounds a bad task's blast radius and never
+  vetoes a particular choice. What to do instead of relaunching — a sharper
+  nudge, a decomposition, an escalation — lives in `prompts/manager.md`,
+  and the digest line says `(next run gated; --force to override)` on the
+  last run (`(an earlier run; a later one cleared the gate)` on older ones)
+  so the manager knows why a relaunch failed. Deliberately **not** a
+  mid-run kill: that is only even expressible for pumped runs (stdin closed
+  at a turn boundary), and a detached run past budget finishes its turn
+  and is gated afterwards. The gate never sets status, never cancels, and
+  never touches the views' `$!` mark (`budget_gated` on `task_rows` is the
+  same read, rendered).
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
@@ -308,7 +324,11 @@ stdin closes, the pump also owns ending the run: the protocol emits one
 `result` event per completed user turn (the prompt turn is the first), so
 the pump closes stdin once every delivered turn has its result and `new/`
 is empty — a run extends while guidance keeps arriving and ends at the
-first idle turn boundary. A message
+first idle turn boundary. The claim of a message (its rename out of
+`new/`) and its count as a delivered turn happen under the same lock the
+close check takes, so a `result` arriving mid-claim sees the message
+either still pending or already owed an answer, never neither — the gap
+that once let a run end with a nudge in flight. A message
 that arrives after close, or lands on a harness without `inject`, waits in
 `new/` for the next run start, exactly as before; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgment: a message
@@ -426,14 +446,15 @@ Cross-project chains work by construction, since ids are global.
 - **The digest observes** (`waiting-on=<short ids>` on the task line while a
   dependency is unfinished; `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE` flags
   with a line of explanation). These are observations of the same class as
-  `possible-loop` and `BUDGET-EXCEEDED` — the manager judges them (nudge the
-  dependency, cancel the dependent, escalate) and quorum does nothing on its
-  own.
+  `possible-loop` and a `BUDGET-EXCEEDED` on an earlier run — the manager
+  judges them (nudge the dependency, cancel the dependent, escalate) and
+  quorum does nothing on its own.
 - **One narrow substrate refusal**: `run_task` (and `quorum task run`, so
   `--detach` fails in the parent too) refuses a task with unfinished
   dependencies unless `--force`. This is the third rail of that class, next
-  to `runner.lock` and the attached-task refusal — a deliberate bend of "the
-  action cap is the only rail", justified the same way: a dependent launched
+  to `runner.lock` and the attached-task refusal (the budget gate under
+  *Token/cost usage* is the fourth) — a deliberate bend of "the action cap
+  is the only rail", justified the same way: a dependent launched
   early is pure waste (it reviews a PR that does not exist yet), and the
   manager is the only caller that would ever do it by accident. It refuses
   the launch; it never cancels, re-queues or reorders anything.
@@ -529,8 +550,8 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    when a task's transcript tail is dominated by one repeated tool call
    (see below); a `usage:` line with what the task has spent when its
    harness reported usage at all, plus `BUDGET-EXCEEDED` per run past a
-   configured `[tasks]` budget (both observations — see *Token/cost usage*
-   above); a header line with what the manager's *own* recent runs have
+   configured `[tasks]` budget, the last run's marked `next run gated` (see
+   *Token/cost usage* above); a header line with what the manager's *own* recent runs have
    cost, read from its usage ledger; its **notebook** (see below); the manager's own
    recent **action journal** with then-vs-now status per target (the
    anti-loop memory — see below); and any user directives claimed from
@@ -557,9 +578,10 @@ target's status at action time, run id) *before* it executes — ground truth,
 not model self-report. The journal serves two purposes: fed back into the
 next digest, it lets the manager see which interventions changed nothing and
 avoid degenerate loops (its prompt forbids repeating an intervention marked
-UNCHANGED); and it enforces the one rail quorum keeps — a per-run action cap
-(`max_actions_per_run`), a rate limit that bounds a bad run's blast radius
-without ever second-guessing a choice.
+UNCHANGED); and it enforces the one supervision rail quorum keeps — a
+per-run action cap (`max_actions_per_run`), a rate limit that bounds a bad
+run's blast radius without ever second-guessing a choice. The task budget
+gate (*Token/cost usage* above) is the only other rail of that class.
 
 **The notebook (`notes.py`).** The journal is what the manager *did* this
 run, read back as a bounded tail; a note meant for next week is pushed out
@@ -642,7 +664,8 @@ That last part is the point, and the deliberate divergence from OpenHands'
 stuck detector (which auto-halts): `possible-loop` is an **observation, not a
 rail**. Python makes no decision; the flag is data, the default manager prompt
 tells the manager to read the tail and judge (nudge, relaunch, cancel, or
-ignore), and the per-run action cap remains the only rail.
+ignore), and the only rails stay rate limits that never read the flag (the
+per-run action cap, the task budget gate).
 
 **CI observation (`ci:`).** `workdir_git_state` follows work as far as
 "pushed" and stops; `ci.py` — the only module that shells out to `gh` —

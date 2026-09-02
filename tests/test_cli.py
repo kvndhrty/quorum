@@ -958,6 +958,39 @@ def test_task_run_force_overrides_the_dependency_refusal(home: Path, tmp_path: P
     from quorum.tasks import TaskStore
 
     assert len(TaskStore(home).resolve(second).runs) == 1
+def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, monkeypatch):
+    """The budget gate as the manager meets it: `task run` (and `--detach`,
+    in the parent) refuse a task whose last run went over, the views say so,
+    and `--force` is the override."""
+    slug = setup_task_env(home, tmp_path)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
+    monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+
+    from quorum.tasks import TaskStore
+
+    for extra in ([], ["--detach"]):
+        r = runner.invoke(app, ["task", "run", short, *extra, "--home", str(home)])
+        assert r.exit_code == 1, r.output
+        assert "exceeded its budget" in r.output and "next run gated" in r.output
+        assert "--force" in r.output
+        assert len(TaskStore(home).resolve(short).runs) == 1
+
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "$! GATED" in r.output
+    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    assert row["budget_gated"] is True
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "gated:    the last run exceeded its budget" in r.output
+
+    r = runner.invoke(app, ["task", "run", short, "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert len(TaskStore(home).resolve(short).runs) == 2
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 
