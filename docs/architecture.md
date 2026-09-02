@@ -266,9 +266,12 @@ transcript. So capture is one more look at each parsed event
   separate spends, so a task total sums them.
 - **Surfacing** is pure file reading: `views.task_rows` carries `usage`
   (task total), `usage_text` (rendered once, so the CLI, TUI and browser
-  agree) and `budget_overages`; `quorum status` / `task list` append
-  `$0.42 · 11.0k tok` to the row, `task show` breaks it out, and the
-  manager digest gets a `usage:` line per task.
+  agree) and `budget_overages`; `quorum status` / `task list` show
+  `$0.42 · 11.0k tok` in a headed `usage` column, `task show` breaks it
+  out, and the manager digest gets a `usage:` line per task. The figure is
+  the harness CLI's own — quorum prices nothing — and the guide says so
+  next to its status example, since a subscription claude session reports
+  a notional API-rate cost, not a bill.
 - **Agent runs are ledgered, not embedded.** The manager's tick and every
   prompt agent run through `agents/harness_run.py`, which captures usage off
   the same parsed events — but an agent has no `task.json` to hang it on, so
@@ -1074,6 +1077,33 @@ outbox-spool-plus-router implementation with no agent code changes.
 `views.py` assembles the read model out of files alone — no locks, no
 network, no supervisor required — and `quorum status`, the TUI and the web
 app are all readers of that one model, which is why they never disagree.
+
+The CLI's listings (`quorum status`, `task list`, `agent list`, `project
+list`) render that model as Rich tables (rich is already typer's dependency)
+rather than concatenated lines — the shape that grew a clause per feature
+until a row with a report and a PR URL wrapped mid-cell past column 80
+(#52). One table builder per row kind in `cli.py` (`_task_table`,
+`_agent_table`, `_project_table`) turns the `views.*_rows` dicts into cells
+— rendering only, never re-deriving — and one `_print_table` renders the
+result two ways. On a terminal the table is fitted to the window: the
+report and flags (agents: error; projects: tags) columns absorb the
+shortfall with an ellipsis, so the id, status, harness, pr and usage
+columns stay whole down to the width at which the give-way column has
+nothing left to give (around 60 columns for a task listing). Below that
+floor Rich clips the fixed columns too, and only the id — the handle you
+retype into `task run` — holds a `min_width` (`ID_MIN_WIDTH`), so it is the
+last cell to be cut. Fitting is conditional on a give-way column having
+survived the drop: a table of nothing but fixed columns (the usual `agent
+list`) is rendered at its natural width rather than expanded, or a wide
+window's slack would be spread evenly over the columns and leave the fields
+acres apart. Off a terminal (a pipe, a file, `CliRunner`) it is laid out at
+its natural width, plain text, no ANSI and no trailing padding, so every
+id, status and `#N` reference is whole and greppable. Columns empty on
+every row are dropped; a PR URL is shortened to `#N` (`!N` for a GitLab
+merge request, the URL as given otherwise) with the full URL kept for `task
+show`; a report is folded to one line and clipped at `REPORT_MAX_CHARS`.
+`_print_table(width=80)` is the test seam: an 80-column render must have
+exactly one line per row.
 
 The reads are pure; the writes are deliberately not absent. Both dashboards
 carry a small set of *write affordances*, and the rule is that each is a

@@ -1118,3 +1118,201 @@ def test_views_still_render_over_a_broken_config(home: Path):
     (home / "config.toml").write_text("nonsense = [[[")
     overview = views.overview(home)
     assert overview["agents"] == [] and overview["tasks"] == []
+
+
+# -- listings as Rich tables (#52) -------------------------------------------
+
+
+def _wide_task_rows() -> list[dict]:
+    """Two `views.task_rows`-shaped rows with every optional field lit — the
+    row shape that used to run past 80 columns and wrap mid-cell."""
+    return [
+        {
+            "id_short": "38hskq", "project": "quorum", "status": "executing",
+            "harness": "claude", "running": True, "attached": False, "perpetual": False,
+            "last_report": "implementing the rich table for status rows\nand making sure "
+                           "nothing wraps at eighty columns even with every field lit",
+            "pr_url": "https://github.com/kvndhrty/quorum/pull/49",
+            "git": {"dirty": 2, "unpushed": 1},
+            "waiting_on": ["a3f2k9"], "dep_failed": [], "dep_missing": [], "dep_cycle": False,
+            "usage_text": "$12.31 · 17.4M tok", "budget_overages": ["run 3: cost $12.31 > 1.0"],
+        },
+        {
+            "id_short": "a3f2k9", "project": "quorum", "status": "done",
+            "harness": "codex", "running": False, "attached": False, "perpetual": True,
+            "last_report": "short", "pr_url": "", "git": None,
+            "waiting_on": [], "dep_failed": [], "dep_missing": [], "dep_cycle": False,
+            "usage_text": "1.2k tok", "budget_overages": [],
+        },
+    ]
+
+
+def test_task_table_fits_eighty_columns_without_wrapping(capsys):
+    """The wrapping the issue describes: fitted to 80 columns, every row is
+    one line, ids/status/pr/usage are whole, and the report and flags cells
+    are the ones that give way (ellipsis, never a wrap)."""
+    from rich.cells import cell_len
+
+    from quorum.cli import _print_table, _task_table
+
+    rows = _wide_task_rows()
+    _print_table(_task_table(rows), width=80)
+    lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+    assert len(lines) == 1 + len(rows), lines  # header + one line per row: no wrapped cell
+    assert all(cell_len(line) <= 80 for line in lines), [cell_len(x) for x in lines]
+    header, first, second = lines
+    # the fixed columns keep their headers; report/flags may lose theirs to
+    # the ellipsis at this width, exactly as their cells do
+    assert header.split()[:4] == ["id", "project", "status", "harness"]
+    assert "pr" in header.split() and "usage" in header.split()
+    assert "▶ 38hskq" in first and "executing" in first and "claude" in first
+    assert "#49" in first and "$12.31 · 17.4M tok $!" in first
+    assert "…" in first  # the report gave way
+    assert "https://" not in first  # the URL itself only in `task show`
+    assert "✓ a3f2k9" in second and "done ∞" in second and "1.2k tok" in second
+
+
+def test_task_table_is_whole_and_plain_off_a_terminal(capsys):
+    """Piped (as here — pytest's capture is not a tty): natural width, no
+    ANSI, the whole report on one line, so grep on an id or status works."""
+    from quorum.cli import _print_table, _task_table
+
+    rows = _wide_task_rows()
+    _print_table(_task_table(rows))
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    lines = out.rstrip("\n").split("\n")
+    assert len(lines) == 1 + len(rows)
+    assert all(line == line.rstrip() for line in lines)  # no padding past the last cell
+    assert "…" not in lines[1]
+    # the newline in the report was folded into the one row
+    assert "status rows and making sure nothing wraps at eighty columns" in lines[1]
+    assert "⚠ 2 uncommitted, 1 unpushed  waiting-on a3f2k9" in lines[1]
+    assert "#49" in lines[1] and "$12.31 · 17.4M tok $!" in lines[1]
+
+
+def test_task_table_drops_columns_nothing_fills(capsys):
+    """A home with no PRs, flags or reported usage gets no blank headers."""
+    from quorum.cli import _print_table, _task_table
+
+    row = dict(_wide_task_rows()[1], perpetual=False, usage_text="")
+    _print_table(_task_table([row]))
+    header = capsys.readouterr().out.split("\n")[0].split()
+    assert header == ["id", "project", "status", "harness", "report"]
+
+    # ...and a fresh home whose queued tasks have not reported yet loses the
+    # `report` header too: nothing is exempt from the drop but the identity
+    # columns every row fills.
+    _print_table(_task_table([dict(row, last_report="")]))
+    header = capsys.readouterr().out.split("\n")[0].split()
+    assert header == ["id", "project", "status", "harness"]
+
+
+def test_table_stays_compact_on_a_wide_terminal(capsys):
+    """A table left with no give-way column (the usual `agent list`) must not
+    spread the window's slack over its fixed columns: at 200 columns the
+    fields stay two spaces apart, exactly as they are when piped."""
+    from rich.cells import cell_len
+
+    from quorum.cli import _agent_table, _print_table
+
+    rows = [
+        {
+            "name": "manager", "type": "manager", "status": "idle", "enabled": True,
+            "schedule": "every 5 minutes", "last_end": "12:00", "usage_text": "",
+            "error": "",
+        }
+    ]
+    _print_table(_agent_table(rows, with_type=True), width=200)
+    lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+    assert len(lines) == 2, lines
+    assert all(cell_len(line.rstrip()) < 60 for line in lines), lines
+    assert "name       type     status  schedule" in lines[0]
+
+    # a surviving give-way column still fills the window
+    _print_table(_agent_table([dict(rows[0], error="boom")], with_type=True), width=200)
+    assert "error" in _plain(capsys.readouterr().out).split("\n")[0]
+
+
+def test_a_narrow_table_clips_every_column_before_the_id(capsys):
+    """Below the width the report column can cover, Rich clips the fixed
+    columns — but the id is the handle you retype into `task run`, so it
+    holds `ID_MIN_WIDTH` while project/status/harness give up theirs."""
+    from quorum.cli import _print_table, _task_table
+
+    for width in (40, 30, 24):
+        _print_table(_task_table(_wide_task_rows()), width=width)
+        lines = _plain(capsys.readouterr().out).rstrip("\n").split("\n")
+        assert len(lines) == 3, (width, lines)
+        assert "▶ 38hskq" in lines[1] and "✓ a3f2k9" in lines[2], (width, lines)
+
+
+def test_pr_ref_shortens_known_forges_and_leaves_the_rest():
+    from quorum.cli import _pr_ref
+
+    assert _pr_ref("https://github.com/kvndhrty/quorum/pull/49") == "#49"
+    assert _pr_ref("https://github.com/kvndhrty/quorum/pull/49/") == "#49"
+    assert _pr_ref("https://gitlab.example/g/p/-/merge_requests/7") == "!7"
+    # not a PR-shaped URL: shown as given rather than guessed at
+    assert _pr_ref("https://example.com/review/abc") == "https://example.com/review/abc"
+
+
+def test_long_report_is_clipped_in_the_table_not_in_task_show(capsys):
+    from quorum.cli import REPORT_MAX_CHARS, _print_table, _task_table
+
+    row = dict(_wide_task_rows()[1], last_report="x" * 300)
+    _print_table(_task_table([row]))
+    line = capsys.readouterr().out.split("\n")[1]
+    assert "x" * (REPORT_MAX_CHARS - 1) + "…" in line and "x" * REPORT_MAX_CHARS not in line
+
+
+def test_status_and_task_list_stay_greppable_when_piped(home: Path, tmp_path: Path):
+    """End to end through the CLI (CliRunner is not a tty): both listings
+    carry every id and status, the PR as `#N`, and `task show` the full URL."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "first", "--harness", "fake", "--home", str(home)])
+    first = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "add", slug, "second", "--harness", "fake", "--home", str(home)])
+    second = r.output.split("queued task ")[1].split(" ")[0]
+    url = "https://github.com/kvndhrty/quorum/pull/49"
+    r = runner.invoke(
+        app, ["task", "report", second, "--status", "pr", "--pr-url", url, "opened", "--home", str(home)]
+    )
+    assert r.exit_code == 0, r.output
+
+    for argv in (["task", "list"], ["status"]):
+        r = runner.invoke(app, [*argv, "--home", str(home)])
+        assert r.exit_code == 0, r.output
+        assert "\x1b[" not in r.output
+        rows = {line.split()[1]: line for line in r.output.split("\n") if f"  {slug}  " in line}
+        assert set(rows) == {first, second}
+        assert "queued" in rows[first]
+        assert "pr" in rows[second].split() and "#49" in rows[second]
+        assert url not in r.output
+        header = next(line for line in r.output.split("\n") if line.startswith("id  "))
+        assert header.split() == ["id", "project", "status", "harness", "report", "pr"]
+
+    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    assert f"pr:       {url}" in r.output
+
+
+def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    runner.invoke(app, ["project", "set", slug, "--deadline", "2099-01-01", "--home", str(home)])
+
+    r = runner.invoke(app, ["agent", "list", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    lines = r.output.rstrip("\n").split("\n")
+    assert lines[0].split()[:4] == ["name", "type", "status", "schedule"]
+    manager = next(line for line in lines if "manager" in line)
+    assert manager.startswith("○ manager") and "never-ran" in manager
+
+    r = runner.invoke(app, ["status", "--home", str(home)])
+    agents = r.output.split("agents:\n")[1].split("\n")[0].split()
+    assert agents[:3] == ["name", "status", "schedule"] and "type" not in agents
+    projects = r.output.split("projects:\n")[1].rstrip("\n").split("\n")
+    assert projects[0].split() == ["slug", "due"]  # name == slug is not repeated
+    assert projects[1].startswith(slug) and "2099-01-01 (" in projects[1]
+
+    r = runner.invoke(app, ["project", "list", "--home", str(home)])
+    assert r.exit_code == 0 and r.output.split("\n")[1].startswith(slug)
