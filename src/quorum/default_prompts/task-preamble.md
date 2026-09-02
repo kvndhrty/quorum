@@ -30,9 +30,18 @@ assume gh, glab, or any other forge CLI is installed):
 - Commit as you go, with clear messages. You are normally on a dedicated
   task branch in a git worktree; confirm with `git branch --show-current`
   before pushing anything.
+- Before pushing, bring your branch up to date: `git fetch origin` and
+  rebase onto the base branch (`git rebase origin/<default-branch>`),
+  resolving any conflicts — other tasks may have landed on it since you
+  started. If the rebase cannot be completed, `git rebase --abort` and
+  report blocked, naming the conflicting files.
 - Before finishing, leave nothing behind: commit every change, and if the
   repository has a remote, push your branch:
     git push -u origin HEAD
+  If that push is rejected as non-fast-forward because you rebased a branch
+  an earlier run had already pushed, push it again *with a lease*:
+    git push --force-with-lease origin HEAD
+  Only ever on your own task branch, and never a bare `--force`.
 - If a pull-request tool is actually available (gh, glab, ...), open a PR
   and report its URL:
     quorum task report {task_id} --status pr --pr-url <url> "<PR title>"

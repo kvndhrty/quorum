@@ -300,6 +300,22 @@ collide, your checkout stays clean, and abandoning a task is
 `git worktree remove` plus `git branch -D` — nothing in your repo moved.
 Use `--no-worktree` to run directly in the project directory instead.
 
+**Running tasks concurrently.** Separate worktrees keep concurrent tasks out
+of each other's *directories*, not out of each other's *diffs*: two tasks
+forked from the same commit that both edit one file will both open PRs that
+conflict. Quorum handles this the way it handles everything else — as
+something the manager sees and a harness is told about, not a lock. The
+preamble's delivery protocol tells every task to `git fetch` and rebase
+onto the base branch before pushing (to report `blocked` naming the
+conflicting files if it cannot, and to re-push with `--force-with-lease` —
+never a bare `--force` — when the rebase leaves a branch it pushed in an
+earlier run unable to fast-forward), and the manager's digest marks any two live
+tasks on one project whose branches touch the same paths with
+`overlaps=<id> paths=N` ([below](#the-manager)), so it can nudge them to
+rebase or let one land first. If your projects are genuinely independent
+per file, you will never see the mark; if you queue several tasks against
+one module, expect to.
+
 **The protocol.** Every run's prompt starts with a preamble
 (`~/.quorum/prompts/task-preamble.md`, editable) that teaches the harness:
 
@@ -511,6 +527,14 @@ when there is something to manage), the manager compiles a **digest**:
   tail first. (Only harnesses that stream JSON events are observable this
   way — a plain-text harness never gets the note, so its absence means
   nothing there);
+- `overlaps=<id> paths=N` on both of two live tasks on the same project
+  whose branches change the same files (with an `overlap:` line naming up
+  to three of them) — read from their worktrees with plain local git, no
+  network. Two branches from one base editing one file is how two PRs come
+  back `MERGE-CONFLICT` at once; the default prompt tells the manager to
+  nudge both to rebase before pushing, or to let one land first. Never a
+  rule: sometimes two tasks editing one file *is* the job. Attached sessions
+  and `--no-worktree` tasks are not compared (that checkout is yours);
 - a `ci:` line for any task whose branch has a pull request — its state
   (`state=open` / `merged` / `closed`), check counts, the names of the
   failing checks, and `MERGE-CONFLICT` when the branch no longer merges. A

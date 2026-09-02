@@ -863,3 +863,226 @@ def test_house_rules_from_the_overlay_reach_the_manager_run(
     assert "You are the manager of a quorum home" in text  # the packaged default
     # the header comment still *documents* the key, hence the line anchor
     assert "PROMPT| {local}" not in text
+
+
+# --- overlap observation ------------------------------------------------------
+
+
+def make_origin(tmp_path: Path, repo: Path, name: str = "origin.git") -> Path:
+    """A bare remote with origin/HEAD set — what a `git clone` gives a project."""
+    import subprocess
+
+    bare = tmp_path / name
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    repo_git(repo, "remote", "add", "origin", str(bare))
+    repo_git(repo, "push", "-q", "-u", "origin", "HEAD")
+    repo_git(repo, "remote", "set-head", "origin", "-a")
+    return bare
+
+
+def add_worktree(home: Path, repo: Path, store: TaskStore, project: str, prompt: str):
+    """A task with a real worktree, forked from the project checkout the way
+    the runner does it (branch quorum/<short-id>)."""
+    task = store.add(project=project, prompt=prompt, harness="t")
+    workdir = tasks.worktree_path(home, task.id)
+    repo_git(repo, "worktree", "add", str(workdir), "-b", f"quorum/{task.short_id}")
+    return store.update(task.id, workdir=str(workdir), status="executing")
+
+
+def test_overlap_signal_sees_shared_paths_and_ignores_disjoint_work(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "edit the readme and add a")
+    b = add_worktree(home, repo, store, "ovproj", "edit the readme and add b")
+    c = add_worktree(home, repo, store, "ovproj", "only touch c")
+
+    # a commits its edits; b leaves them uncommitted (a live task mid-work);
+    # c's change is untracked. All three shapes must count.
+    (Path(a.workdir) / "README.md").write_text("a's version")
+    (Path(a.workdir) / "a.txt").write_text("a")
+    repo_git(Path(a.workdir), "add", ".")
+    repo_git(Path(a.workdir), "commit", "-qm", "a's work")
+    (Path(b.workdir) / "README.md").write_text("b's version")
+    (Path(b.workdir) / "b.txt").write_text("b")
+    (Path(c.workdir) / "c.txt").write_text("c")
+
+    assert tasks.worktree_changed_paths(a) == {"README.md", "a.txt"}
+    assert tasks.worktree_changed_paths(b) == {"README.md", "b.txt"}
+    assert tasks.worktree_changed_paths(c) == {"c.txt"}
+
+    result = overlap_signal(store.list())
+    assert result == {
+        a.id: [{"with": b.short_id, "paths": ["README.md"]}],
+        b.id: [{"with": a.short_id, "paths": ["README.md"]}],
+    }
+    assert c.id not in result
+
+
+def test_overlap_signal_only_compares_tasks_on_the_same_project(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    store = TaskStore(home)
+    repos = {}
+    for name in ("one", "two"):
+        repo = make_repo(tmp_path, name)
+        make_origin(tmp_path, repo, f"{name}.git")
+        repos[name] = repo
+    a = add_worktree(home, repos["one"], store, "one", "readme")
+    b = add_worktree(home, repos["two"], store, "two", "readme")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text("changed")
+    # Same path, different repositories: nothing to say.
+    assert overlap_signal(store.list()) == {}
+
+
+def test_digest_marks_both_overlapping_tasks_and_skips_attached_ones(
+    home: Path, tmp_path: Path, clock
+):
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "edit the readme")
+    b = add_worktree(home, repo, store, "ovproj", "also edit the readme")
+    c = add_worktree(home, repo, store, "ovproj", "disjoint")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text(f"{t.short_id}'s version")
+    (Path(c.workdir) / "c.txt").write_text("c")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    a_line = digest_line(digest, a.short_id, f"- [executing] {a.short_id}")
+    b_line = digest_line(digest, b.short_id, f"- [executing] {b.short_id}")
+    c_line = digest_line(digest, c.short_id, f"- [executing] {c.short_id}")
+    assert f"overlaps={b.short_id} paths=1" in a_line
+    assert f"overlaps={a.short_id} paths=1" in b_line
+    assert "overlaps=" not in c_line
+    assert f"  overlap: with {b.short_id} on README.md" in digest
+    assert f"  overlap: with {a.short_id} on README.md" in digest
+
+    # An adopted session's checkout is the human's: it is never compared,
+    # even though its diff really does collide with a's.
+    store.update(b.id, attached=True)
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "overlaps=" not in digest
+    assert "overlap:" not in digest
+
+
+def test_overlap_detail_names_at_most_three_paths(home: Path, tmp_path: Path, clock):
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ovproj", "wide")
+    b = add_worktree(home, repo, store, "ovproj", "also wide")
+    for t in (a, b):
+        for name in ("d.txt", "a.txt", "c.txt", "b.txt", "e.txt"):
+            (Path(t.workdir) / name).write_text("x")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert f"overlaps={b.short_id} paths=5" in digest
+    assert f"  overlap: with {b.short_id} on a.txt, b.txt, c.txt (+2 more)" in digest
+
+
+def test_overlap_falls_back_to_the_checkout_branch_without_a_remote(
+    home: Path, tmp_path: Path
+):
+    """A `git init`ed project has no origin/HEAD; the branch the runner forked
+    from is the checkout's, and that is the base."""
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "local")
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "local", "readme")
+    b = add_worktree(home, repo, store, "local", "readme too")
+    for t in (a, b):
+        (Path(t.workdir) / "README.md").write_text("changed")
+    # The checkout itself moving on must not count against the tasks.
+    (repo / "later.txt").write_text("landed after the fork")
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "later")
+
+    assert tasks.worktree_changed_paths(a) == {"README.md"}
+    assert set(overlap_signal(store.list())) == {a.id, b.id}
+
+
+def test_overlap_ignores_the_checkouts_own_unpushed_commits(home: Path, tmp_path: Path):
+    """The runner forks a worktree from the checkout's HEAD, not from
+    origin/HEAD. A checkout one unpushed commit ahead of the remote would,
+    measured against origin/HEAD, put that commit's paths in *every* live
+    task's changed set — and two tasks on unrelated files would report an
+    overlap on a file neither of them wrote."""
+    from quorum.agents.manager import overlap_signal
+
+    repo = make_repo(tmp_path, "ahead")
+    make_origin(tmp_path, repo)
+    # One commit the remote has never seen, touching a file no task will.
+    (repo / "X.txt").write_text("landed locally, not pushed")
+    repo_git(repo, "add", ".")
+    repo_git(repo, "commit", "-qm", "unpushed")
+
+    store = TaskStore(home)
+    a = add_worktree(home, repo, store, "ahead", "only touch a")
+    b = add_worktree(home, repo, store, "ahead", "only touch b")
+    (Path(a.workdir) / "a.txt").write_text("a")
+    (Path(b.workdir) / "b.txt").write_text("b")
+
+    assert tasks.worktree_changed_paths(a) == {"a.txt"}
+    assert tasks.worktree_changed_paths(b) == {"b.txt"}
+    assert overlap_signal(store.list()) == {}
+
+
+def test_overlap_is_unobservable_without_a_base_or_a_worktree(home: Path, tmp_path: Path):
+    from quorum.agents.manager import overlap_signal
+
+    store = TaskStore(home)
+    queued = store.add(project="p", prompt="not started", harness="t")
+    assert tasks.worktree_changed_paths(queued) is None  # no workdir yet
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    notgit = store.add(project="p", prompt="plain dir", harness="t")
+    notgit = store.update(notgit.id, workdir=str(plain), status="executing")
+    assert tasks.worktree_changed_paths(notgit) is None
+
+    # A repository that is its own main worktree with no remote: no base.
+    lone = make_repo(tmp_path, "lone")
+    solo = store.add(project="p", prompt="in the checkout", harness="t")
+    solo = store.update(solo.id, workdir=str(lone), status="executing")
+    assert tasks.worktree_changed_paths(solo) is None
+
+    # None of these can be compared, and none of them raises.
+    assert overlap_signal(store.list()) == {}
+
+
+def test_overlap_pairs_are_bounded(home: Path, tmp_path: Path, monkeypatch):
+    from quorum.agents import manager as manager_mod
+
+    repo = make_repo(tmp_path, "ovproj")
+    make_origin(tmp_path, repo)
+    store = TaskStore(home)
+    made = [add_worktree(home, repo, store, "ovproj", f"t{i}") for i in range(3)]
+    for t in made:
+        (Path(t.workdir) / "README.md").write_text("changed")
+
+    assert len(manager_mod.overlap_signal(store.list())) == 3
+    monkeypatch.setattr(manager_mod, "OVERLAP_MAX_PAIRS", 1)
+    # One pair's worth of budget: exactly two tasks are marked, the third
+    # goes unobserved rather than costing more git calls.
+    assert len(manager_mod.overlap_signal(store.list())) == 2
+    monkeypatch.setattr(manager_mod, "OVERLAP_MAX_PAIRS", 0)
+    assert manager_mod.overlap_signal(store.list()) == {}
+
+
+def test_the_preamble_tells_a_task_to_rebase_before_pushing(home: Path):
+    from quorum import prompts
+
+    text = prompts.render(home, "task-preamble", task_id="abc123", project_path="/w")
+    assert "git fetch origin" in text
+    assert "rebase" in text
+    assert "report blocked, naming the conflicting files" in text
+    # A task that pushed in an earlier run cannot fast-forward after a
+    # rebase; the way out is spelled, and it is leased.
+    assert "git push --force-with-lease origin HEAD" in text
+    assert "never a bare `--force`" in text
+    assert "overlaps=" in prompts.load(home, "manager")
