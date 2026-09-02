@@ -214,7 +214,7 @@ def test_prune_worktrees_removes_the_worktree_and_the_merged_branch(home: Path, 
     assert prune.archived_ids(home) == [task.id]
 
 
-def test_prune_worktrees_keeps_an_unmerged_branch(home: Path, repo: Path):
+def test_prune_worktrees_force_deletes_an_unmerged_branch(home: Path, repo: Path):
     from quorum import runner as runner_mod
 
     task = finished(home)
@@ -237,6 +237,126 @@ def test_prune_worktrees_keeps_an_unmerged_branch(home: Path, repo: Path):
     # upgrades `git branch -d` to -D, which is the point of asking for it
     assert git_out(repo, "branch", "--list", branch) == ""
     assert not worktree_path(home, task.id).exists()
+
+
+def test_prune_worktrees_force_never_destroys_an_uncommitted_file(home: Path, repo: Path):
+    """--force waives the stranded-work refusal and forces the *branch* delete;
+    it is never passed to `git worktree remove`, so files nobody committed
+    survive a prune and their task stays unarchived to say so."""
+    from quorum import runner as runner_mod
+
+    task = finished(home)
+    store = TaskStore(home)
+    workdir = runner_mod.prepare_workdir(home, store.get(task.id), store)
+    (workdir / "work.txt").write_text("real work")
+    subprocess.run(["git", "-C", str(workdir), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(workdir), "commit", "-qm", "work"], check=True, capture_output=True
+    )
+    (workdir / "scratch.txt").write_text("never committed")
+
+    result = runner.invoke(
+        app, ["task", "prune", "--worktrees", "--force", "--yes", "--home", str(home)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "worktree kept, task not archived" in result.output
+    assert (workdir / "scratch.txt").read_text() == "never committed"
+    assert "work" in git_out(repo, "log", "--all", "--oneline")
+    assert short_ids(home) == {task.short_id}
+    assert not prune.archive_root(home).exists()
+
+
+def test_prune_worktrees_dry_run_names_the_worktree_and_the_branch(home: Path, repo: Path):
+    from quorum import runner as runner_mod
+
+    task = finished(home)
+    store = TaskStore(home)
+    workdir = runner_mod.prepare_workdir(home, store.get(task.id), store)
+
+    result = runner.invoke(
+        app, ["task", "prune", "--worktrees", "--dry-run", "--home", str(home)]
+    )
+    assert result.exit_code == 0, result.output
+    assert f"would remove worktree {workdir}" in result.output
+    assert f"would delete branch quorum/{task.short_id}" in result.output
+    assert "git branch -d" in result.output  # unforced: git still gets the veto
+    assert workdir.is_dir()
+    assert short_ids(home) == {task.short_id}
+
+    forced = runner.invoke(
+        app, ["task", "prune", "--worktrees", "--force", "--dry-run", "--home", str(home)]
+    )
+    assert "git branch -D" in forced.output
+
+
+def test_prune_worktrees_dry_run_says_a_dirty_worktree_would_stay(home: Path, repo: Path):
+    from quorum import runner as runner_mod
+
+    task = finished(home)
+    store = TaskStore(home)
+    workdir = runner_mod.prepare_workdir(home, store.get(task.id), store)
+    (workdir / "scratch.txt").write_text("uncommitted")
+
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--worktrees", "--force", "--dry-run", "--home", str(home)],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"would keep worktree {workdir}" in result.output
+    assert "unarchived" in result.output
+
+
+def test_prune_rechecks_the_runner_lock_after_planning(home: Path, monkeypatch: pytest.MonkeyPatch):
+    """plan() runs before an interactive confirm — a runner can take the lock
+    in between, and archiving would move the directory out from under it."""
+    task = finished(home)
+    real_plan = prune.plan
+
+    def a_runner_appears(*args, **kwargs):
+        candidates = real_plan(*args, **kwargs)
+        # pid 1 is always alive and is never this process (see above)
+        fsio.atomic_write_json(runner_lock_path(home, task.id), {"pid": 1})
+        return candidates
+
+    monkeypatch.setattr("quorum.cli.prune_mod.plan", a_runner_appears)
+
+    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    assert result.exit_code == 0, result.output
+    assert "holds its lock" in result.output
+    assert short_ids(home) == {task.short_id}
+    assert not prune.archive_root(home).exists()
+
+
+def test_prune_keeps_an_upstream_whose_dependent_was_skipped(home: Path, repo: Path):
+    """The same-batch dependency exemption only holds while the dependent is
+    actually going: if its worktree will not go, the upstream stays too
+    rather than leaving a dangling `depends_on`."""
+    from quorum import runner as runner_mod
+
+    store = TaskStore(home)
+    upstream = finished(home, "the base")
+    downstream = store.add("proj", "builds on it", "fake", depends_on=[upstream.id])
+    store.update(downstream.id, status="done")
+    workdir = runner_mod.prepare_workdir(home, store.get(downstream.id), store)
+    (workdir / "scratch.txt").write_text("uncommitted")  # git will refuse to remove it
+
+    result = runner.invoke(
+        app, ["task", "prune", "--worktrees", "--force", "--yes", "--home", str(home)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "worktree kept, task not archived" in result.output
+    assert f"{downstream.short_id} still depends on it" in result.output
+    assert short_ids(home) == {upstream.short_id, downstream.short_id}
+    assert not prune.archive_root(home).exists()
+
+
+def test_dependents_first_orders_a_dependent_before_its_upstream(home: Path):
+    store = TaskStore(home)
+    upstream = finished(home, "the base")
+    downstream = store.add("proj", "builds on it", "fake", depends_on=[upstream.id])
+
+    ordered = prune.dependents_first([store.get(upstream.id), store.get(downstream.id)])
+    assert [t.id for t in ordered] == [downstream.id, upstream.id]
 
 
 def test_remove_task_worktree_keeps_an_unmerged_branch_without_force(home: Path, repo: Path):

@@ -509,10 +509,11 @@ never delete.**
   immediately for one topic; `inbox --clear` touches `new/` only, because a
   message in `cur/` has a claimant.
 
-`prune.py` splits into three total readers and two doers — `select()` (pure,
-over an already-loaded task list), `refusal()`, `plan()`, then
-`remove_task_worktree()` and `archive_task()` — so the selection is reusable
-rather than tangled into the command.
+`prune.py` splits into total readers and two doers — `select()` (pure, over
+an already-loaded task list), `refusal()`, `dependents_first()` (pure batch
+ordering), `plan()`, `worktree_plan()` (the `--dry-run` preview of the git
+half), then `remove_task_worktree()` and `archive_task()` — so the selection
+is reusable rather than tangled into the command.
 
 The refusals are substrate rails of the same class as the runner's, not
 manager policy: a **live runner** would keep writing into a directory that
@@ -527,16 +528,33 @@ record that surfaces it would hide it. Only the last is overridable, with
 detach, prune the dependent too).
 
 `--worktrees` adds `git worktree remove` plus branch deletion, and treats the
-two asymmetrically because git does: a worktree can be recreated from a
-branch, so a removal git refuses (uncommitted or untracked files) leaves the
-task unarchived; an unmerged branch that is deleted is gone, so `git branch
--d` is used and a refusal is reported as a note (`--force` upgrades it to
-`-D`) while the task is archived anyway — the commits are safe in the repo.
+two asymmetrically because git does. **`--force` is never passed to `git
+worktree remove`**: uncommitted and untracked files in a worktree are exactly
+the stranded work the rest of quorum surfaces, and no flag on a tidy-up
+command should destroy them, so a removal git refuses leaves the worktree
+alone *and* the task unarchived — the record is the only thing that would
+have said the work was there. `--force` therefore has exactly two meanings:
+waive the stranded-work refusal, and upgrade `git branch -d` to `-D`. The
+second one does lose data — an unmerged branch's commits go with it — which
+is why it is behind the flag and said out loud in the confirm prompt;
+unforced, an unmerged branch is kept with a note and the task is archived
+anyway, its commits still in the repo.
 
-`--dry-run` prints the same plan and touches nothing. A prune journals one
-entry through `_actor_guard`, not one per task: it is a single decision, and
-per-task entries would burn an agent's action cap mid-sweep and leave the
-tidy half-finished.
+The archive loop re-derives `refusal()` for each task immediately before
+archiving it, because `plan()` ran before an interactive confirm that a
+runner could have started during, and because a task skipped mid-sweep
+leaves the batch: an upstream that passed the dependency check only because
+its dependent was going too is refused again rather than archived into a
+dangling `depends_on`. `plan()` returns the batch `dependents_first()`, which
+is what makes one in-order pass enough.
+
+`--dry-run` prints the same plan and touches nothing — with `--worktrees` it
+also prints the git half per task (`would remove worktree …`, `would delete
+branch … (-d/-D)`), including the dirty worktree it would leave and the task
+that would stay unarchived because of it. A prune journals one entry through
+`_actor_guard`, not one per task: it is a single decision, and per-task
+entries would burn an agent's action cap mid-sweep and leave the tidy
+half-finished.
 
 ## The manager
 

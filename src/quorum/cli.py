@@ -1192,18 +1192,24 @@ def task_prune(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen; change nothing."),
     force: bool = typer.Option(
-        False, "--force", help="Archive despite stranded work, and delete an unmerged branch."
+        False, "--force",
+        help="Archive despite stranded work, and `git branch -D` an unmerged branch "
+             "(losing its commits). Never forces a dirty worktree's removal.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Archive finished tasks into `tasks/.archive/<id>/` so they leave every view.
 
-    Nothing is deleted: the task directory is *moved*, and moving it back
+    A task directory is never deleted: it is *moved*, and moving it back
     restores it. Refuses a task with a live runner, an attached task, one
     another task still depends on, and (without --force) one whose worktree
-    holds uncommitted or unpushed work.
+    holds uncommitted or unpushed work. With --worktrees, a worktree git
+    refuses to remove is kept and its task left unarchived — --force does
+    not override that, though it does force the branch delete.
     """
+    from .tasks import TaskStore
+
     target = get_home(home)
     window = _parse_window(older_than) if older_than else None
     statuses = [s for s in status.split(",") if s.strip()]
@@ -1219,13 +1225,24 @@ def task_prune(
     typer.echo(f"{verb} {len(prunable)} task(s):")
     for c in prunable:
         typer.echo(f"  {c.task.short_id}  {c.task.status:<10} {c.task.prompt[:60]}")
+        if dry_run and worktrees:
+            for note in prune_mod.worktree_plan(target, c.task, force=force):
+                typer.echo(f"    {note}")
     if dry_run:
         typer.echo("(dry run — nothing changed)")
         return
     _confirm(
         yes,
         f"archive {len(prunable)} task(s) into tasks/.archive"
-        + (" and remove their worktrees?" if worktrees else "?"),
+        + (
+            (
+                " and remove their worktrees, force-deleting unmerged branches?"
+                if force
+                else " and remove their worktrees, deleting merged branches?"
+            )
+            if worktrees
+            else "?"
+        ),
     )
     # One journal entry for the command, not one per task: a prune is a
     # single decision, and per-task entries would burn an agent's action cap
@@ -1236,7 +1253,21 @@ def task_prune(
              + (" +worktrees" if worktrees else ""),
     )
     archived = 0
+    # The batch as it stands *now*: a task that turns out to be unprunable
+    # mid-sweep leaves it, so an upstream that only passed the dependency
+    # check because its dependent was going too is refused again rather than
+    # archived into a dangling `depends_on`. `plan` orders dependents first,
+    # which is what makes that in-order recheck enough.
+    by_id = {t.id: t for t in TaskStore(target).list()}
+    batch = {c.task.id for c in prunable}
     for c in prunable:
+        # Re-read the refusals: an interactive confirm is a long time for a
+        # runner to take the lock, and the batch may have shrunk above.
+        again = prune_mod.refusal(target, c.task, by_id, selected=batch, force=force)
+        if again:
+            typer.secho(f"  skip {c.task.short_id}  {again}", fg="yellow")
+            batch.discard(c.task.id)
+            continue
         if worktrees:
             removed, notes = prune_mod.remove_task_worktree(target, c.task, force=force)
             for note in notes:
@@ -1245,11 +1276,13 @@ def task_prune(
                 typer.secho(
                     f"  skip {c.task.short_id}  worktree kept, task not archived", fg="yellow"
                 )
+                batch.discard(c.task.id)
                 continue
         try:
             prune_mod.archive_task(target, c.task.id)
         except OSError as e:
             typer.secho(f"  skip {c.task.short_id}  {e}", fg="yellow")
+            batch.discard(c.task.id)
             continue
         archived += 1
     typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")

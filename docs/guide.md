@@ -644,9 +644,11 @@ in the TUI.
 Quorum accumulates on purpose — a finished task keeps its record, its
 worktree, and its `quorum/<short-id>` branch — but a long-lived home turns
 into a wall of `done` rows. Three commands tidy it, and **none of them
-delete anything**: a pruned task moves to `~/.quorum/tasks/.archive/<id>/`,
+delete a record**: a pruned task moves to `~/.quorum/tasks/.archive/<id>/`,
 and cleared messages join the same `messages/archive/YYYY-MM.jsonl.gz` the
-supervisor's janitor writes.
+supervisor's janitor writes. The one thing that *is* destroyed, and only
+when you ask for it, is a branch: `--worktrees --force` runs `git branch -D`,
+and an unmerged branch's commits go with it.
 
 ```bash
 quorum task prune --dry-run              # what would go (always start here)
@@ -654,6 +656,7 @@ quorum task prune                        # archive done/blocked/cancelled tasks
 quorum task prune --older-than 7d        # ...only those untouched for a week
 quorum task prune --status done          # ...only the ones that finished well
 quorum task prune --worktrees            # also remove worktrees + merged branches
+quorum task prune --worktrees --dry-run  # ...naming each worktree and branch first
 ```
 
 Getting a task back is one move in the other direction:
@@ -671,9 +674,16 @@ the only thing that hid it. Commit and push, or pass `--force`.
 
 **Worktrees and branches.** `--worktrees` runs `git worktree remove` and then
 deletes the task branch *only if git agrees it is merged*. An unmerged branch
-is kept, with a note telling you the `git branch -D` to run; `--force` does
-it for you. A worktree git won't remove (uncommitted files in it) leaves that
-task unarchived — the record is what would have told you the work was there.
+is kept, with a note telling you the `git branch -D` to run.
+
+`--force` never forces the worktree removal — a worktree holding uncommitted
+or untracked files is left exactly as it is, and its task stays unarchived,
+because the record is what would have told you the work was there. Commit
+it, or `rm -rf` the worktree yourself if you truly meant to throw it away.
+What `--force` *does* do to git is run `git branch -D` instead of `-d`, so
+**an unmerged branch's commits are lost**. That is the one destructive thing
+in this section; `--worktrees --dry-run` names every worktree and branch
+first.
 
 **The board.** Escalations sit in the `attention` banner for seven days
 because the board has no read-state. When you've dealt with them:
