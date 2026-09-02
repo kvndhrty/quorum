@@ -357,6 +357,119 @@ def test_per_tick_cap_leaves_the_rest_for_the_next_tick(home: Path, delivered, m
     assert delivered() == [["-m", "m0"], ["-m", "m1"], ["-m", "m2"]]
 
 
+# -- one drain at a time, and the cursor before the hook -----------------------------
+
+
+def test_startup_drain_precedes_the_scheduler_and_the_janitor(home: Path, delivered):
+    """The startup catch-up and the interval job share one cursor, and
+    `max_instances=1` only guards the job against itself. If the scheduler
+    were started first, a catch-up slower than the control cadence would
+    overlap the job's first fire and both would deliver. Startup also has to
+    beat the janitor, or an escalation older than the board's retention is
+    archived before it is ever sent."""
+    config = configure(home)
+    Supervisor(home, config)._notify()  # arms the cursor
+    MessageBus(home).post("manager", "attention", text="while you were down")
+
+    sup = Supervisor(home, config)
+    order: list[str] = []
+
+    def record(name: str, fn):
+        def wrapped(*args, **kwargs):
+            order.append(name)
+            return fn(*args, **kwargs)
+
+        return wrapped
+
+    sup.scheduler.start = record("scheduler", sup.scheduler.start)
+    sup._janitor = record("janitor", sup._janitor)
+    sup._notify = record("notify", sup._notify)
+    sup._stop.set()  # run() returns as soon as it reaches the wait
+    sup.run()
+
+    assert order.index("notify") < order.index("scheduler") < order.index("janitor")
+    assert delivered() == [["-m", "while you were down"]]
+
+
+def test_a_second_drain_mid_batch_delivers_nothing_twice(home: Path, delivered, monkeypatch):
+    """Whoever wins, the loser must not re-deliver what is already going out."""
+    import threading
+
+    config = configure(home)
+    sup = Supervisor(home, config)
+    sup._notify()
+    MessageBus(home).post("manager", "attention", text="only once")
+
+    inside, release = threading.Event(), threading.Event()
+    real_deliver = notify.deliver
+
+    def slow_deliver(*args, **kwargs):
+        inside.set()
+        release.wait(5)
+        return real_deliver(*args, **kwargs)
+
+    monkeypatch.setattr(notify, "deliver", slow_deliver)
+    first = threading.Thread(target=sup._notify)
+    first.start()
+    try:
+        assert inside.wait(5)
+        sup._notify()  # the interval job arriving mid-batch
+    finally:
+        release.set()
+        first.join(5)
+    assert delivered() == [["-m", "only once"]]
+
+
+def test_the_cursor_is_persisted_before_the_hook_runs(home: Path, delivered, monkeypatch):
+    """At-most-once by design: if the cursor write is what fails, the hook
+    must not have run — a notification that repeats every 15 seconds forever
+    is worse than one that is lost."""
+    config = configure(home)
+    sup = Supervisor(home, config)
+    sup._notify()  # arms the cursor (one save)
+    MessageBus(home).post("manager", "attention", text="x")
+
+    real_save = notify.save_cursors
+
+    def failing_save(home_path, cursors):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(notify, "save_cursors", failing_save)
+    sup._notify()  # must not raise, and must not have delivered
+    assert delivered() == []
+
+    monkeypatch.setattr(notify, "save_cursors", real_save)
+    sup._notify()
+    sup._notify()
+    assert delivered() == [["-m", "x"]]  # exactly once, ever
+
+
+def test_arming_and_the_per_tick_cap_bound_the_parsing_too(home: Path, delivered, monkeypatch):
+    """Reading a backlog just to learn the newest filename parses a month of
+    messages to throw them away; so does parsing past the tick's cap."""
+    from quorum import messages as messages_mod
+
+    bus = MessageBus(home)
+    for i in range(5):
+        bus.post("manager", "attention", text=f"old{i}")
+
+    parsed: list[Path] = []
+    real_load = messages_mod._load
+    monkeypatch.setattr(
+        messages_mod, "_load", lambda p: (parsed.append(p), real_load(p))[1]
+    )
+
+    notify.drain(home, notify_config(), bus)  # arms at the tail
+    assert parsed == []
+
+    monkeypatch.setattr(notify, "MAX_PER_TICK", 2)
+    for i in range(4):
+        bus.post("manager", "attention", text=f"new{i}")
+    notify.drain(home, notify_config(), bus)
+    assert len(parsed) == 2
+    assert delivered() == [["-m", "new0"], ["-m", "new1"]]
+
+
 # -- quorum notify test -----------------------------------------------------------------
 
 

@@ -261,15 +261,22 @@ so the record stays true.
   private per-topic cursor in `state/notify.json` (the on-disk filename,
   via `MessageBus.entries_after_cursor` — never `Message.filename()`,
   which is only what `post()` happened to write) and runs the argv
-  template once per message via `deliver` (`build_argv` substitutes
+  via `MessageBus.entries_after_cursor`'s `limit`, and armed at the tail
+  through `topic_tail` so nothing is parsed to be discarded) and runs the
+  argv template once per message via `deliver` (`build_argv` substitutes
   `{text}/{from}/{topic}/{type}/{id}` per element, appending the text
   when the template has no `{text}` — the harness `{prompt}` convention).
   Supervisor job `_notify` on the `_control` cadence plus once at
-  startup. **Fail-soft in herdr's mold**: missing binary / nonzero exit /
-  hang past `timeout_seconds` → one `supervisor.log` line, cursor still
-  advances, `drain` never raises (an unwritable cursor is logged; an
-  unreadable one re-initialized). First drain arms the cursor at the
-  tail *without* delivering (enabling must not replay history);
+  startup — that startup call runs *before* `scheduler.start()` and the
+  janitor, and `drain` holds a module lock, so the two callers can never
+  interleave over one cursor. The cursor is advanced and persisted
+  **before** each delivery: **at-most-once** on purpose, a lost
+  notification being cheaper than one that repeats every 15s because the
+  cursor write is what failed. **Fail-soft in herdr's mold**: missing
+  binary / nonzero exit / hang past `timeout_seconds` → one
+  `supervisor.log` line, `drain` never raises (an unwritable cursor is
+  logged; an unreadable one re-initialized). First drain arms the cursor
+  at the tail *without* delivering (enabling must not replay history);
   `MAX_PER_TICK` bounds one tick. Fires on topic membership, never on
   content — no policy here. `quorum notify test` is the loud path (exit
   1 with the reason, touches neither board nor cursor); doctor's

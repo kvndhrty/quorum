@@ -802,15 +802,23 @@ shape as `[harness.<name>]`, substituted element-wise (`{text}`, `{from}`,
 like a harness template with no `{prompt}`), so there is no shell and
 nothing to quote — and the topics that fire it (default `attention`, the
 one topic meant for a human). The supervisor runs `_notify` on the control
-cadence (15 s, and once at startup): it reads each listed topic past a
-private cursor kept in `state/notify.json` (the last on-disk filename
-processed, per topic — `MessageBus.entries_after_cursor` hands back real
-filenames, because a message's own `filename()` is only what `post()`
-happened to write) and runs the template once per message, oldest first,
-advancing the cursor after every message. That is the documented
-board-consumer pattern and nothing more: no queue, no retry store, no
-second transport, and a message posted while the supervisor is down goes
-out on the next start exactly once.
+cadence (15 s, and once at startup, that startup catch-up running *before*
+the scheduler and the janitor so it can neither race the job's first fire
+nor lose an escalation the janitor is about to archive): it reads each
+listed topic past a private cursor kept in `state/notify.json` (the last
+on-disk filename processed, per topic — `MessageBus.entries_after_cursor`
+hands back real filenames, because a message's own `filename()` is only
+what `post()` happened to write) and runs the template once per message,
+oldest first, advancing and persisting the cursor *before* each delivery.
+Delivery is therefore **at-most-once** by design: a crash — or a failed
+cursor write — mid-hook loses one notification, where the other order
+would repeat it every 15 seconds for as long as the disk stayed full.
+Nothing is ever delivered twice, including across a restart or between
+the startup drain and the job (`drain` takes a process-wide lock, since
+APScheduler's `max_instances` guards a job only against itself). That is
+the documented board-consumer pattern and nothing more: no queue, no retry
+store, no second transport, and a message posted while the supervisor is
+down goes out on the next start.
 
 Three stances hold it in shape. **It fires on topic membership, never on
 content**: what is escalation-worthy stays prompt policy, and the hook

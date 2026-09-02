@@ -124,6 +124,12 @@ class Supervisor:
                 coalesce=True,
                 max_instances=1,
             )
+            # What arrived while we were down goes out now, not in 15s — and
+            # *before* `scheduler.start()`, so a slow catch-up cannot overlap
+            # the interval job's first fire over the same cursor, and before
+            # the janitor below, so an escalation older than the board's
+            # retention is delivered rather than archived unseen.
+            self._notify()
             self.scheduler.start()
             for name, err in self.errors.items():
                 self.bus.post(
@@ -133,7 +139,6 @@ class Supervisor:
             signal.signal(signal.SIGINT, self._handle_signal)
             signal.signal(signal.SIGTERM, self._handle_signal)
             self._janitor()
-            self._notify()  # what arrived while we were down goes out now, not in 15s
             self._stop.wait()
         finally:
             self._shutdown_scheduler()
@@ -445,6 +450,9 @@ class Supervisor:
         A no-op without the table. `notify.drain` never raises (a failed
         delivery is a log line and an advanced cursor), but the job is
         wrapped anyway: nothing scheduled here may take the process down.
+        Called from two places — the startup catch-up in `run()` and this
+        interval job — so `drain` serializes itself; `max_instances=1`
+        only guards the job against another copy of the job.
         """
         cfg = self.config.notify
         if cfg is None:

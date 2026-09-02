@@ -808,6 +808,10 @@ command = ["/Users/you/bin/notify-me"]
 each argument, exactly like `{prompt}` in a harness template — there is no
 shell, so a message containing quotes, spaces or `$` is still one argument.
 A template with no `{text}` gets the text appended as the final argument.
+Substitution is plain text replacement, though, so if an argument is itself
+structured — the JSON body in the Slack line above — a message containing a
+`"` or a backslash makes it malformed; prefer a small script of your own
+(the last shape) when the payload has to be escaped.
 
 Prove the wiring before an escalation does:
 
@@ -819,12 +823,15 @@ That runs the template once, right now, and exits 1 with the reason if it
 could not (binary not on PATH, nonzero exit, timeout). `quorum doctor`
 also reports the table — `✗` when the command is not on PATH.
 
-The supervisor delivers for real: every ~15 seconds (and once at startup)
-it sends out whatever landed on the listed topics since the last one it
-delivered, oldest first, keeping its place in `state/notify.json`. So an
-escalation posted while `quorum up` was stopped still goes out when it
-comes back, and nothing is ever sent twice. Turning the hook on starts from
-*now* — it does not replay old messages the banner already showed.
+The supervisor delivers for real: every ~15 seconds (and once at startup,
+before anything else it does) it sends out whatever landed on the listed
+topics since the last one it delivered, oldest first, keeping its place in
+`state/notify.json`. So an escalation posted while `quorum up` was stopped
+still goes out when it comes back, and nothing is ever sent twice: it
+writes its place down *before* running your command, so the one thing it
+will do under a crash or a full disk is skip a notification, never repeat
+one. Turning the hook on starts from *now* — it does not replay old
+messages the banner already showed.
 
 Delivery fails soft, like every other integration: a command that is
 missing, exits nonzero or hangs past `timeout_seconds` is one line in

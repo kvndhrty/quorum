@@ -14,9 +14,13 @@ the next start, oldest first, and nothing is delivered twice.
 Three rails, each the shape of an existing one:
 
 - **The board stays the source of truth.** No queue, no retry store: the
-  cursor is the whole state, and it advances whether or not delivery
-  succeeded. A notification that cannot be delivered must not block the
-  ones behind it.
+  cursor is the whole state, and it advances — and is persisted — *before*
+  the hook runs, whether or not delivery then succeeds. That makes
+  delivery at-most-once on purpose: a desktop notification lost because
+  the process died mid-hook is a far smaller failure than one that
+  repeats every 15 seconds forever because the cursor write is what
+  failed. A notification that cannot be delivered must not block the ones
+  behind it.
 - **No decisions in Python.** The hook fires on topic membership, never on
   content — what is escalation-worthy stays prompt policy.
 - **Fails soft**, herdr's mold rather than sandbox.py's: a missing binary,
@@ -32,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import traceback
 from pathlib import Path
 
@@ -47,6 +52,13 @@ PLACEHOLDERS = ("text", "from", "topic", "type", "id")
 # job's thread for an hour. The cursor advances per message, so the rest
 # simply wait for the next tick.
 MAX_PER_TICK = 25
+# One drain at a time, whoever asks. The supervisor calls `drain` from two
+# places — the startup catch-up and the interval job — and APScheduler's
+# `max_instances=1` only guards the job against itself, never against the
+# main thread. Two drains sharing one cursor would each read it, each
+# deliver, and the second would overwrite the first's advance. Non-blocking:
+# a skipped tick is a tick, and the next one is 15 seconds away.
+_drain_lock = threading.Lock()
 
 log = logging.getLogger("quorum.notify")
 
@@ -154,7 +166,13 @@ def drain(home: Path, cfg: NotifyConfig, bus: MessageBus | None = None) -> int:
     delivered, including anything that arrives while the supervisor is
     down. An unreadable state file is re-initialized the same way, with a
     log line, rather than raising every 15 seconds.
+
+    Only one drain runs at a time; a caller that arrives while another is
+    mid-batch does nothing rather than delivering the same messages again.
     """
+    if not _drain_lock.acquire(blocking=False):
+        log.debug("notify: a drain is already running — skipping this one")
+        return 0
     try:
         return _drain(Path(home), cfg, bus or MessageBus(home))
     except Exception:
@@ -162,6 +180,8 @@ def drain(home: Path, cfg: NotifyConfig, bus: MessageBus | None = None) -> int:
         # one line, and the next tick tries again from the last saved cursor.
         log.error("notify: drain failed:\n%s", traceback.format_exc())
         return 0
+    finally:
+        _drain_lock.release()
 
 
 def _drain(home: Path, cfg: NotifyConfig, bus: MessageBus) -> int:
@@ -172,27 +192,30 @@ def _drain(home: Path, cfg: NotifyConfig, bus: MessageBus) -> int:
     attempted = 0
     for topic in cfg.topics:
         if topic not in cursors:
-            entries = bus.entries_after_cursor(topic, None)
-            cursors[topic] = entries[-1][0] if entries else ""
+            # Only the name is wanted here: parsing the backlog to learn it
+            # would be a month of escalations read to be discarded.
+            tail = bus.topic_tail(topic)
+            cursors[topic] = tail or ""
             save_cursors(home, cursors)
-            if entries:
-                log.info(
-                    "notify: topic %r starts at %s — %d earlier message(s) not delivered",
-                    topic, cursors[topic], len(entries),
-                )
+            if tail:
+                log.info("notify: topic %r starts at %s — nothing older is delivered", topic, tail)
             continue
-        for filename, message in bus.entries_after_cursor(topic, cursors[topic])[:MAX_PER_TICK]:
-            if message is not None:
-                attempted += 1
-                failure = deliver(cfg.command, message, cfg.timeout_seconds)
-                if failure is None:
-                    log.info("notify: delivered %s/%s via %s", topic, filename, cfg.command[0])
-                else:
-                    log.warning(
-                        "notify: %s/%s not delivered (%s) — cursor advanced", topic, filename, failure
-                    )
-            # Advance after every message, delivered or not, so a crash
-            # mid-batch repeats at most nothing rather than the whole batch.
+        entries = bus.entries_after_cursor(topic, cursors[topic], limit=MAX_PER_TICK)
+        for filename, message in entries:
+            # Advance *before* delivering, and persist it: a crash — or a
+            # failed cursor write — then loses one notification instead of
+            # repeating it at every tick forever. At-most-once is the right
+            # trade for something whose whole job is to interrupt a person.
             cursors[topic] = filename
             save_cursors(home, cursors)
+            if message is None:
+                continue
+            attempted += 1
+            failure = deliver(cfg.command, message, cfg.timeout_seconds)
+            if failure is None:
+                log.info("notify: delivered %s/%s via %s", topic, filename, cfg.command[0])
+            else:
+                log.warning(
+                    "notify: %s/%s not delivered (%s) — cursor advanced", topic, filename, failure
+                )
     return attempted
