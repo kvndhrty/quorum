@@ -11,7 +11,11 @@ An *agent's* harness runs (the manager's tick, any prompt agent) have no
 task record to hang a number on, so they get a ledger instead: one line per
 run in `state/manager/usage.jsonl` / `state/agents/<name>/usage.jsonl`, read
 back over a bounded tail by `agent_usage`. That is how the cost of
-supervision itself becomes visible — to the views, and to the manager.
+supervision itself becomes visible — to the views, and to the manager. The
+same line also carries how the run *went* (`outcome`, `duration_seconds`,
+read back by `agent_runs`): a timed-out run reports no usage at all, so
+without that the runs an agent most needs to see about itself would be the
+invisible ones.
 
 Three properties this module is built around:
 
@@ -37,7 +41,7 @@ Three properties this module is built around:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from . import actor, fsio
@@ -209,8 +213,24 @@ def total(usages: Iterable[dict[str, float] | None]) -> dict[str, float] | None:
 AGENT_USAGE_TAIL = 200
 
 
+# How many recent runs a self-observation line reports on. Small on purpose:
+# what an agent needs is the *shape* of its last few ticks (are they finishing
+# at all?), not a log — and the line shares a digest header with its spend.
+RECENT_RUNS = 5
+
+# What a recorded run ended as. A ledger line written before #59 has none, and
+# `None` (rendered `?`) is the honest reading of it — never `ok`.
+RUN_OUTCOMES = ("ok", "raised", "timeout")
+
+
 def record_agent_run(
-    home: Any, name: str, run_id: str, usage: dict[str, float] | None, now: Any = None
+    home: Any,
+    name: str,
+    run_id: str,
+    usage: dict[str, float] | None,
+    now: Any = None,
+    outcome: str | None = None,
+    duration_seconds: float | None = None,
 ) -> None:
     """Append one agent harness run to `state/.../usage.jsonl`.
 
@@ -218,14 +238,56 @@ def record_agent_run(
     null`) and the ones that failed — a timed-out run still spent what it
     spent, and a run count only means something if every run is in it. Never
     raises: a spend ledger must not be able to fail a tick.
+
+    `outcome` (`ok`/`raised`/`timeout`) and `duration_seconds` make the same
+    line the record of *how the run went*, not only what it cost — the one
+    thing an agent could never see about its own recent history. They ride
+    the existing line deliberately: a run that times out reports no usage at
+    all, so the outcome of the runs that matter most would need a second file
+    to live anywhere else.
     """
+    entry: dict[str, Any] = {
+        "at": fsio.iso(now or fsio.utc_now()),
+        "run": run_id,
+        "usage": usage,
+    }
+    if outcome is not None:
+        entry["outcome"] = outcome
+    if duration_seconds is not None:
+        entry["duration_seconds"] = round(float(duration_seconds), 3)
     try:
-        fsio.append_jsonl(
-            actor.usage_path(home, name),
-            {"at": fsio.iso(now or fsio.utc_now()), "run": run_id, "usage": usage},
-        )
+        fsio.append_jsonl(actor.usage_path(home, name), entry)
     except OSError:
         pass
+
+
+def agent_runs(home: Any, name: str, limit: int = RECENT_RUNS) -> list[dict[str, Any]]:
+    """The agent's `limit` most recent ledger lines, newest last.
+
+    Read off the same bounded tail as `agent_usage` — and separately from it,
+    because a run that timed out or died reported no usage, and those are
+    exactly the runs an outcome line exists to show. Each entry is
+    `{"run", "at", "outcome", "duration_seconds", "usage"}`, with `outcome`
+    and `duration_seconds` `None` for a line written before they existed (or
+    hand-edited into nonsense). Never raises.
+    """
+    entries = fsio.read_jsonl_tail(actor.usage_path(home, name), limit=AGENT_USAGE_TAIL)
+    out = []
+    # `entries[-0:]` is the whole list, so ask for nothing explicitly
+    for e in entries[-limit:] if limit > 0 else []:
+        if not isinstance(e, dict):
+            continue  # a torn or hand-edited line is silence, like everywhere else
+        outcome = e.get("outcome")
+        out.append(
+            {
+                "run": e.get("run") or "",
+                "at": e.get("at") or "",
+                "outcome": outcome if outcome in RUN_OUTCOMES else None,
+                "duration_seconds": _number(e.get("duration_seconds")),
+                "usage": e.get("usage") if isinstance(e.get("usage"), dict) else None,
+            }
+        )
+    return out
 
 
 def agent_usage(home: Any, name: str, limit: int = AGENT_USAGE_TAIL) -> dict[str, Any] | None:
@@ -282,6 +344,31 @@ def format_tokens(count: float) -> str:
     return str(int(count))
 
 
+def format_duration(seconds: float) -> str:
+    """A run's wall time, at the granularity a human judges a tick by."""
+    total_seconds = int(seconds)
+    if total_seconds >= 3600:
+        return f"{total_seconds // 3600}h{(total_seconds % 3600) // 60:02d}m"
+    return f"{total_seconds // 60}m{total_seconds % 60:02d}s"
+
+
+def describe_runs(runs: Iterable[dict[str, Any]]) -> str:
+    """`ok 2m10s · ok 1m48s · TIMEOUT 15m00s · ? · ok 0m52s`, oldest first.
+
+    Anything but `ok` is upper-cased: the point of the line is that a run of
+    TIMEOUTs is legible at a glance. "" when there is nothing to say.
+    """
+    parts = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        outcome = run.get("outcome")
+        label = "?" if outcome not in RUN_OUTCOMES else ("ok" if outcome == "ok" else outcome.upper())
+        duration = _number(run.get("duration_seconds"))
+        parts.append(f"{label} {format_duration(duration)}" if duration is not None else label)
+    return " · ".join(parts)
+
+
 def format_cost(cost: float) -> str:
     return f"${cost:.4f}" if 0 < cost < 0.01 else f"${cost:.2f}"
 
@@ -334,3 +421,20 @@ def run_overages(runs: Iterable[Any], max_cost: float = 0.0, max_tokens: int = 0
         for note in overages(getattr(run, "usage", None), max_cost, max_tokens):
             out.append(f"run {i}: {note}")
     return out
+
+
+def last_run_overages(
+    runs: Sequence[Any], max_cost: float = 0.0, max_tokens: int = 0
+) -> list[str]:
+    """How the task's *last* run exceeded the budget — the condition the
+    runner's budget gate reads (`runner.budget_blockers`).
+
+    Only the last run counts: the gate is a rate limit on relaunching a task
+    that just blew its budget, not a sentence for a task that once did. So a
+    later run that came in under budget — or reported nothing, since silence
+    is not evidence of spend — clears it, and a task with no runs is never
+    gated. Both limits off (0) means an empty list for any history.
+    """
+    if not runs:
+        return []
+    return overages(getattr(runs[-1], "usage", None), max_cost, max_tokens)

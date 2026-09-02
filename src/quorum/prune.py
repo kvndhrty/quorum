@@ -14,7 +14,9 @@ that later features can reuse the selection without re-deriving it (#57 wants
 
     select()      which tasks match the status/age filters       (pure)
     refusal()     why one selected task must not be archived     (reads files)
-    plan()        the two above over a home, as one ordered list (reads files)
+    dependents_first()  batch order: a dependent before its upstream  (pure)
+    plan()        the readers above over a home, as one ordered list (reads files)
+    worktree_plan()          what --worktrees would do to git    (reads git)
     remove_task_worktree()   git worktree remove + branch delete (mutates git)
     archive_task()           the move itself                     (mutates disk)
 
@@ -26,6 +28,13 @@ unpushed work in a worktree is exactly the stranded work the rest of quorum
 works to keep visible. `--force` overrides only the last one — the first
 three are conditions the user can resolve directly (wait, detach, prune the
 dependent too).
+
+`--force` never reaches `git worktree remove`. It has exactly two meanings —
+waive the stranded-work refusal, and upgrade `git branch -d` to `-D` (which
+*does* lose an unmerged branch's commits) — and neither of them is "throw
+away the files in a worktree". A worktree git refuses to remove because it
+is dirty stays, and its task stays unarchived, with git's own message: the
+record is the only thing that would have told anyone the work was there.
 """
 
 from __future__ import annotations
@@ -156,6 +165,29 @@ def refusal(
     return None
 
 
+def dependents_first(tasks: Iterable[Task]) -> list[Task]:
+    """Order a batch so a task comes after every batch task that depends on it.
+
+    Archiving in this order means a dependent that turns out to be
+    unprunable (its worktree would not go, a runner appeared) is discovered
+    *before* the upstream whose dependency check it exempted — the caller
+    drops it from the batch and the upstream is refused again. Cycles, which
+    `task add` refuses at creation, fall back to input order rather than
+    spinning.
+    """
+    pending = list(tasks)
+    out: list[Task] = []
+    while pending:
+        ready = [t for t in pending if not any(t.id in o.depends_on for o in pending if o.id != t.id)]
+        if not ready:  # a cycle: nothing to order, keep what the caller gave us
+            out.extend(pending)
+            break
+        out.extend(ready)
+        ready_ids = {t.id for t in ready}
+        pending = [t for t in pending if t.id not in ready_ids]
+    return out
+
+
 def plan(
     home: Path,
     statuses: Iterable[str] = DEFAULT_STATUSES,
@@ -170,19 +202,55 @@ def plan(
     ids = {t.id for t in chosen}
     return [
         PruneCandidate(task=t, refusal=refusal(home, t, by_id, selected=ids, force=force))
-        for t in chosen
+        for t in dependents_first(chosen)
     ]
+
+
+def worktree_plan(home: Path, task: Task, force: bool = False) -> list[str]:
+    """What `--worktrees` would do to this task's git state — display only.
+
+    Read-only, and deliberately says what git *would be asked*, not what git
+    will answer: whether a branch is merged is git's call at the moment of
+    deletion, so the preview names the command (`-d` or `-D`) rather than
+    predicting its outcome. A dirty worktree is the one outcome worth
+    predicting, because it changes whether the task is archived at all.
+    """
+    path = worktree_path(home, task.id)
+    branch = f"quorum/{task.short_id}"
+    project = ProjectRegistry(home).get(task.project)
+    if project is None or not project.dir.is_dir():
+        if not path.exists():
+            return ["worktree already gone"]
+        return [f"would keep worktree {path} (project {task.project!r} is not registered)"]
+    notes: list[str] = []
+    if not path.exists():
+        notes.append("worktree already gone")
+    else:
+        state = workdir_git_state(task)
+        if state is not None and state["dirty"]:
+            return [
+                f"would keep worktree {path} ({state['dirty']} uncommitted — git refuses "
+                "to remove it) and leave the task unarchived"
+            ]
+        notes.append(f"would remove worktree {path}")
+    if _branch_exists(project.dir, branch):
+        if force:
+            notes.append(f"would delete branch {branch} (`git branch -D`, unmerged commits go too)")
+        else:
+            notes.append(f"would delete branch {branch} (`git branch -d`, kept if unmerged)")
+    return notes
 
 
 def remove_task_worktree(home: Path, task: Task, force: bool = False) -> tuple[bool, list[str]]:
     """`git worktree remove` the task's worktree and drop its branch.
 
-    Returns (removed, notes). The branch is only deleted when git agrees it
-    is merged (`git branch -d`) unless `force` upgrades that to `-D`: a
-    worktree can be recreated from a branch, but an unmerged branch that is
-    gone is gone. A worktree git refuses to remove (uncommitted or untracked
-    files) reports False, and the caller leaves the task alone rather than
-    archiving a record whose stranded work nothing would surface again.
+    Returns (removed, notes). `force` is **never** passed to `git worktree
+    remove`: a worktree holding uncommitted or untracked files reports
+    False, and the caller leaves the task alone rather than destroying the
+    files and archiving the record that would have surfaced them. It does
+    upgrade the branch delete from `git branch -d` (only when git agrees the
+    branch is merged) to `-D`, which loses an unmerged branch's commits — a
+    worktree can be recreated from a branch, but a deleted branch is gone.
     """
     notes: list[str] = []
     path = worktree_path(home, task.id)
@@ -193,8 +261,7 @@ def remove_task_worktree(home: Path, task: Task, force: bool = False) -> tuple[b
             return True, ["worktree already gone"]
         return False, [f"project {task.project!r} is not registered — cannot run git"]
     if path.exists():
-        args = ["worktree", "remove", str(path)] + (["--force"] if force else [])
-        result = _git(project.dir, *args)
+        result = _git(project.dir, "worktree", "remove", str(path))
         if result.returncode != 0:
             return False, [f"git worktree remove failed: {_trim(result.stderr)}"]
         notes.append(f"removed worktree {path}")

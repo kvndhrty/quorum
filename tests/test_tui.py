@@ -222,6 +222,32 @@ def test_run_refuses_an_attached_task(home: Path, monkeypatch):
     drive(home, script)
 
 
+def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
+    """The runner's budget gate, surfaced as a notice instead of a silent
+    failure in runner.log; a cheaper last run lifts it."""
+    ids = populate(home)
+    (home / "config.toml").write_text("[tasks]\nmax_cost_per_run = 0.10\n")
+    over = {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+            "usage": {"cost_usd": 0.42, "total_tokens": 100, "events": 1}}
+    TaskStore(home).update(ids[0], runs=[over])
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "quorum.runner.launch_detached", lambda h, task_id: launched.append(task_id) or 1
+    )
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == []
+        TaskStore(home).update(ids[0], runs=[over, {**over, "usage": {"cost_usd": 0.01}}])
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == [ids[0]]
+
+    drive(home, script)
+
+
 def test_cancel_confirms_first_and_only_then_cancels(home: Path):
     ids = populate(home)
 
@@ -327,6 +353,26 @@ def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
         table = app.query_one("#tasks", DataTable)
         statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
         assert statuses[0].endswith("∞") and "∞" not in statuses[1]
+
+    drive(home, script)
+
+
+def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path):
+    """`✔` distinguishes "done and delivered" from "done and waiting on a
+    human" — read off task.json, since the TUI never probes a forge."""
+    store = TaskStore(home)
+    shipped = store.add("proj-a", "shipped it", "fake", status="done")
+    store.update(shipped.id, pr_state="merged")
+    dropped = store.add("proj-a", "abandoned", "fake", status="done")
+    store.update(dropped.id, pr_state="closed")
+    store.add("proj-a", "never observed", "fake", status="done")
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
+        assert statuses[0].endswith("✔")
+        assert statuses[1].endswith("⊘")
+        assert "✔" not in statuses[2] and "⊘" not in statuses[2]
 
     drive(home, script)
 

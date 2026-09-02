@@ -43,6 +43,9 @@ prompt_app = typer.Typer(
 integration_app = typer.Typer(
     help="Install harness adapters (session-adoption hooks and plugins).", no_args_is_help=True
 )
+notify_app = typer.Typer(
+    help="The [notify] hook: how attention posts reach you.", no_args_is_help=True
+)
 app.add_typer(board_app, name="board")
 app.add_typer(project_app, name="project")
 app.add_typer(agent_app, name="agent")
@@ -50,6 +53,7 @@ app.add_typer(task_app, name="task")
 app.add_typer(manager_app, name="manager")
 app.add_typer(prompt_app, name="prompt")
 app.add_typer(integration_app, name="integration")
+app.add_typer(notify_app, name="notify")
 
 
 def _version_callback(value: bool) -> None:
@@ -134,9 +138,33 @@ def _actor_guard(
             cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
         except ValueError:
             cap = DEFAULT_MAX_ACTIONS_PER_RUN
-        # this run's entries sit at the journal's end, well inside the tail window
-        used = len([e for e in fsio.read_jsonl_tail(journal) if e.get("run") == run])
+        # this run's entries sit at the journal's end, well inside the tail window;
+        # a torn or hand-edited line is skipped, never a crashed CLI call
+        mine = [
+            e
+            for e in fsio.read_jsonl_tail(journal)
+            if isinstance(e, dict) and e.get("run") == run
+        ]
+        # a cap.hit is a record of the refusal, not an action the agent took
+        used = len([e for e in mine if e.get("action") != "cap.hit"])
         if used >= cap:
+            # The cap was silent from the agent's own point of view: it saw a
+            # command refused mid-run and its next run saw nothing at all.
+            # One journal line per run fixes that — the next digest's journal
+            # section shows the run that ran out of budget, and the prompt
+            # decides what to do about it. Still only a rate limit; nothing
+            # here pauses or throttles anything.
+            if not any(e.get("action") == "cap.hit" for e in mine):
+                fsio.append_jsonl(
+                    journal,
+                    {
+                        "at": fsio.iso(fsio.utc_now()),
+                        "run": run,
+                        "actor": actor,
+                        "action": "cap.hit",
+                        "args": f"refused {action} — action cap ({cap}) reached this run",
+                    },
+                )
             typer.secho(
                 f"action refused: {actor} action cap ({cap}) reached for this run — "
                 "remaining work waits for your next scheduled run",
@@ -484,6 +512,9 @@ def doctor(
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ✔ its pull request merged   ⊘ its pull request was closed unmerged.
+             Observed by the manager tick, not by this command — no badge
+             means nothing was ever observed (no PR yet, or no `gh` here)
           ⏳ waiting on unfinished dependencies (`task add --after`); the
              runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
              name dependencies that can never finish — nothing waits on those,
@@ -576,6 +607,9 @@ def _echo_task_row(t: dict) -> None:
     else:
         marker = "▶" if t["running"] else ("✓" if t["status"] == "done" else ("✗" if t["status"] == "blocked" else "·"))
     status = t["status"] + (" ∞" if t.get("perpetual") else "")
+    # The forge's word next to the harness's: "done ✔" is delivered, "done ⊘"
+    # is a PR someone closed without merging. Absent = never observed.
+    status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
     line = f"  {marker} {t['id_short']:<9} {t['project']:<18} {status:<12} {t['harness']}"
     if t["last_report"]:
         line += f"  {t['last_report'][:60]}"
@@ -599,7 +633,9 @@ def _echo_task_row(t: dict) -> None:
         line += "  DEP-CYCLE"
     if t.get("usage_text"):
         line += f"  {t['usage_text']}"
-    if t.get("budget_overages"):
+    if t.get("budget_gated"):
+        line += "  $! GATED"
+    elif t.get("budget_overages"):
         line += "  $!"
     typer.echo(line)
 
@@ -607,10 +643,72 @@ def _echo_task_row(t: dict) -> None:
 # -- tasks -----------------------------------------------------------------
 
 
+def _stdin_prompt() -> str:
+    """Everything on stdin, decoded as UTF-8 without newline translation."""
+    stream = getattr(sys.stdin, "buffer", None)
+    try:
+        data = stream.read() if stream is not None else sys.stdin.read()
+    except OSError as e:
+        raise _fail(f"cannot read stdin: {e}") from None
+    if isinstance(data, str):
+        return data
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _fail("stdin is not valid UTF-8") from None
+
+
+def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
+    """The task prompt from exactly one of: the positional argument, stdin
+    (`-`), or --prompt-file.
+
+    Read as bytes and decoded here rather than through `read_text`, so what
+    lands in task.json is byte-for-byte what was piped or written — a prompt
+    is quoted verbatim into the harness's context, and silently rewriting
+    CRLF or the trailing newline would make a stored task differ from its
+    source. Empty (or whitespace-only) input is refused: a task with nothing
+    to do would queue, launch, and waste a whole run."""
+    from_stdin = prompt == "-"
+    given = [
+        label
+        for label, on in (
+            ("the prompt argument", bool(prompt) and not from_stdin),
+            ("`-` (stdin)", from_stdin),
+            ("--prompt-file", prompt_file is not None),
+        )
+        if on
+    ]
+    if len(given) > 1:
+        raise _fail(f"pass the prompt exactly one way — got {' and '.join(given)}")
+    if not given:
+        raise _fail(
+            "a task needs a prompt: pass it as an argument, `-` to read stdin, "
+            "or --prompt-file <path>"
+        )
+    if from_stdin:
+        text = _stdin_prompt()
+        source = "stdin"
+    elif prompt_file is not None:
+        try:
+            text = prompt_file.read_bytes().decode("utf-8")
+        except OSError as e:
+            raise _fail(f"cannot read {prompt_file}: {e}") from None
+        except UnicodeDecodeError:
+            raise _fail(f"{prompt_file} is not valid UTF-8") from None
+        source = str(prompt_file)
+    else:
+        text = prompt
+        source = "the prompt argument"
+    if not text.strip():
+        raise _fail(f"empty prompt ({source}) — a task needs something to do")
+    return text
+
+
 @task_app.command("add")
 def task_add(
     project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
-    prompt: str = typer.Argument(help="What the harness should do."),
+    prompt: str = typer.Argument("", help="What the harness should do — or `-` to read it from stdin."),
+    prompt_file: Path | None = typer.Option(None, "--prompt-file", help="Read the prompt from this file instead of the argument."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
@@ -621,6 +719,12 @@ def task_add(
     yourself with `quorum task run`.
 
     Example: quorum task add my-api "fix the flaky auth tests"
+
+    A long prompt does not have to fight the shell: `-` reads it from stdin
+    and --prompt-file reads it from a file, both verbatim. Queue a GitHub
+    issue without teaching quorum about `gh`:
+
+    gh issue view 14 --json title,body -q '"\\(.title)\\n\\n\\(.body)"' | quorum task add my-api -
 
     Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
     queues a task the manager will not launch until a1b2c3 finishes.
@@ -633,6 +737,7 @@ def task_add(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, resolve_dependencies, short_handle
 
+    text = _task_prompt(prompt, prompt_file)
     target = get_home(home)
     config = _load_config(target)
     if ProjectRegistry(target).get(project) is None:
@@ -649,10 +754,10 @@ def task_add(
         depends_on = resolve_dependencies(store, after or [])
     except ValueError as e:
         raise _fail(str(e)) from None
-    _actor_guard(target, "task.add", args=f"{project}: {prompt[:80]}")
+    _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
     task = store.add(
         project=project,
-        prompt=prompt,
+        prompt=text,
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
         depends_on=depends_on,
@@ -944,6 +1049,10 @@ def task_show(
         typer.echo(f"  session:  {task.session}")
     if task.pr_url:
         typer.echo(f"  pr:       {task.pr_url}")
+    if task.pr_state:
+        # Observed by the manager tick, so it can be older than "now" — say
+        # when, rather than implying it was just checked.
+        typer.echo(f"  pr state: {task.pr_state} (observed {task.pr_state_at})")
     if task.depends_on:
         deps = dependency_state(task, {t.id: t for t in TaskStore(target).list()})
         line = ", ".join(short_handle(d) for d in task.depends_on)
@@ -970,6 +1079,14 @@ def task_show(
             task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
         ):
             typer.secho(f"  budget:   {note}", fg="yellow")
+        if usage.last_run_overages(
+            task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
+        ):
+            typer.secho(
+                "  gated:    the last run exceeded its budget — `task run` refuses the "
+                "next one (--force overrides)",
+                fg="yellow",
+            )
     typer.echo(f"  updated:  {task.updated_at}")
     reports = read_reports(target, task.id, limit=10)
     if reports:
@@ -983,16 +1100,27 @@ def task_show(
 def task_run(
     task_id: str,
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
-    force: bool = typer.Option(False, "--force", help="Run even while the task's dependencies are unfinished."),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Run even while the task's dependencies are unfinished, or after a run over budget.",
+    ),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
     under `quorum up`)."""
-    from .runner import RunnerError, launch_detached, run_task, unmet_dependencies
+    from .runner import (
+        RunnerError,
+        budget_blockers,
+        budget_refusal,
+        launch_detached,
+        run_task,
+        unmet_dependencies,
+    )
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    # mirror the runner's substrate rail here so --detach fails in the
+    config = _load_config(target)
+    # mirror the runner's substrate rails here so --detach fails in the
     # parent too, instead of journaling a success and refusing in the child
     if task.attached:
         raise _fail(
@@ -1008,12 +1136,14 @@ def task_run(
                 f"task {task.short_id} is waiting on {', '.join(blockers)} — "
                 "unfinished dependencies; `--force` to run anyway"
             )
+        over = budget_blockers(config.tasks, task)
+        if over:
+            raise _fail(budget_refusal(task, over))
     _actor_guard(target, "task.run", target=task.short_id, target_status=task.status)
     if detach:
         pid = launch_detached(target, task.id, force=force)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
         return
-    config = _load_config(target)
     try:
         code = run_task(target, config, task.id, force=force)
     except RunnerError as e:
@@ -1193,18 +1323,24 @@ def task_prune(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would happen; change nothing."),
     force: bool = typer.Option(
-        False, "--force", help="Archive despite stranded work, and delete an unmerged branch."
+        False, "--force",
+        help="Archive despite stranded work, and `git branch -D` an unmerged branch "
+             "(losing its commits). Never forces a dirty worktree's removal.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Archive finished tasks into `tasks/.archive/<id>/` so they leave every view.
 
-    Nothing is deleted: the task directory is *moved*, and moving it back
+    A task directory is never deleted: it is *moved*, and moving it back
     restores it. Refuses a task with a live runner, an attached task, one
     another task still depends on, and (without --force) one whose worktree
-    holds uncommitted or unpushed work.
+    holds uncommitted or unpushed work. With --worktrees, a worktree git
+    refuses to remove is kept and its task left unarchived — --force does
+    not override that, though it does force the branch delete.
     """
+    from .tasks import TaskStore
+
     target = get_home(home)
     window = _parse_window(older_than) if older_than else None
     statuses = [s for s in status.split(",") if s.strip()]
@@ -1220,13 +1356,24 @@ def task_prune(
     typer.echo(f"{verb} {len(prunable)} task(s):")
     for c in prunable:
         typer.echo(f"  {c.task.short_id}  {c.task.status:<10} {c.task.prompt[:60]}")
+        if dry_run and worktrees:
+            for note in prune_mod.worktree_plan(target, c.task, force=force):
+                typer.echo(f"    {note}")
     if dry_run:
         typer.echo("(dry run — nothing changed)")
         return
     _confirm(
         yes,
         f"archive {len(prunable)} task(s) into tasks/.archive"
-        + (" and remove their worktrees?" if worktrees else "?"),
+        + (
+            (
+                " and remove their worktrees, force-deleting unmerged branches?"
+                if force
+                else " and remove their worktrees, deleting merged branches?"
+            )
+            if worktrees
+            else "?"
+        ),
     )
     # One journal entry for the command, not one per task: a prune is a
     # single decision, and per-task entries would burn an agent's action cap
@@ -1237,7 +1384,21 @@ def task_prune(
              + (" +worktrees" if worktrees else ""),
     )
     archived = 0
+    # The batch as it stands *now*: a task that turns out to be unprunable
+    # mid-sweep leaves it, so an upstream that only passed the dependency
+    # check because its dependent was going too is refused again rather than
+    # archived into a dangling `depends_on`. `plan` orders dependents first,
+    # which is what makes that in-order recheck enough.
+    by_id = {t.id: t for t in TaskStore(target).list()}
+    batch = {c.task.id for c in prunable}
     for c in prunable:
+        # Re-read the refusals: an interactive confirm is a long time for a
+        # runner to take the lock, and the batch may have shrunk above.
+        again = prune_mod.refusal(target, c.task, by_id, selected=batch, force=force)
+        if again:
+            typer.secho(f"  skip {c.task.short_id}  {again}", fg="yellow")
+            batch.discard(c.task.id)
+            continue
         if worktrees:
             removed, notes = prune_mod.remove_task_worktree(target, c.task, force=force)
             for note in notes:
@@ -1246,11 +1407,13 @@ def task_prune(
                 typer.secho(
                     f"  skip {c.task.short_id}  worktree kept, task not archived", fg="yellow"
                 )
+                batch.discard(c.task.id)
                 continue
         try:
             prune_mod.archive_task(target, c.task.id)
         except OSError as e:
             typer.secho(f"  skip {c.task.short_id}  {e}", fg="yellow")
+            batch.discard(c.task.id)
             continue
         archived += 1
     typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")
@@ -1876,6 +2039,44 @@ def agent_reload(name: str, home: Path | None = _HOME_OPT) -> None:
     """Ask the running supervisor to re-read an agent's config (after editing
     agents/<name>.toml or its prompt's settings)."""
     _agent_command(home, name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
+
+
+# -- notify ----------------------------------------------------------------
+
+
+@notify_app.command("test")
+def notify_test(text: str, home: Path | None = _HOME_OPT) -> None:
+    """Send one message through the [notify] template, right now.
+
+    Proves the wiring without waiting for an escalation. It goes straight
+    to the template — nothing is posted to the board and the hook's cursor
+    is untouched — and unlike the supervisor's fail-soft delivery it is
+    loud: a template that could not be run exits 1 and says why.
+    """
+    from . import notify as notify_mod
+    from .messages import Message
+
+    target = get_home(home)
+    config = _load_config(target)
+    if config.notify is None:
+        raise _fail(
+            "no [notify] table in config.toml — add one (docs/guide.md#getting-notified) "
+            "to be told when the manager needs you"
+        )
+    message = Message.model_validate(
+        {
+            "from": "user",
+            "topic": config.notify.topics[0],
+            "type": "notify.test",
+            "payload": {"text": text},
+        }
+    )
+    argv = notify_mod.build_argv(config.notify.command, message)
+    typer.echo("running: " + " ".join(json.dumps(element) for element in argv))
+    failure = notify_mod.deliver(config.notify.command, message, config.notify.timeout_seconds)
+    if failure is not None:
+        raise _fail(f"not delivered: {failure}")
+    typer.secho("delivered", fg="green")
 
 
 # -- manager ---------------------------------------------------------------
