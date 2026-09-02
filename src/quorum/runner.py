@@ -98,11 +98,17 @@ class GuidancePump:
     guidance keeps arriving and ends at the first idle turn boundary.
     Anything arriving after close stays in `new/` for the next run.
 
-    The lock guards only the counters and the closed flag; inbox and stdin
-    I/O runs outside it (there is one delivering thread, so the prompt turn
-    always precedes guidance), and a `result` event on the transcript thread
-    never waits on filesystem work. A claim is counted *before* its write so
-    the close condition can't fire while a message is in flight.
+    The lock guards the counters, the closed flag, and — the one piece of
+    filesystem work under it — the *claim* of each inbox message (the
+    rename out of `new/`), which is counted as delivered in the same
+    critical section. That pairing is what makes the close condition
+    sound: a `result` arriving on the transcript thread either still sees
+    the message pending in `new/` (so it does not close) or sees it already
+    counted (so the turn is still owed). Claiming outside the lock and
+    counting after left a gap in which a result closed stdin with a nudge in
+    flight — a real CI flake, one result event instead of two. Stdin writes
+    stay outside the lock (there is one delivering thread, so the prompt
+    turn always precedes guidance).
     """
 
     def __init__(self, home: Path, inbox: str, stdin, prompt: str):
@@ -158,10 +164,15 @@ class GuidancePump:
         return True
 
     def _deliver_pending(self) -> None:
-        for claimed in self._bus.claim(self._inbox):
+        claims = self._bus.claim(self._inbox)
+        while True:
             with self._lock:
                 if self._closed:
-                    claimed.reject()
+                    return  # unclaimed messages stay in new/ for the next run
+                # the rename happens inside next(); counting it here, under
+                # the same lock a result's close check takes, is the point
+                claimed = next(claims, None)
+                if claimed is None:
                     return
                 self._delivered += 1
             if not self._write_turn(guidance_note(claimed.message)):

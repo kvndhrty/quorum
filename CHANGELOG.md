@@ -27,6 +27,15 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
   of relaunching as-is — sharpen the nudge, decompose, escalate — and
   `quorum init` upgrades unedited copies.
 
+### Fixed
+
+- The guidance pump could close a stream-json harness's stdin with a nudge
+  in flight: a message was claimed (renamed out of `new/`) before it was
+  counted as delivered, so a `result` event landing in that gap saw an
+  idle run and ended it — the nudge bounced back to `new/` and the run
+  recorded one result event instead of two (a rare CI flake). The claim
+  and the count now happen under the same lock the close check takes.
+
 ## [0.2.0] - 2026-09-01
 
 ### Upgrading from 0.1.0

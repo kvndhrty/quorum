@@ -324,7 +324,11 @@ stdin closes, the pump also owns ending the run: the protocol emits one
 `result` event per completed user turn (the prompt turn is the first), so
 the pump closes stdin once every delivered turn has its result and `new/`
 is empty — a run extends while guidance keeps arriving and ends at the
-first idle turn boundary. A message
+first idle turn boundary. The claim of a message (its rename out of
+`new/`) and its count as a delivered turn happen under the same lock the
+close check takes, so a `result` arriving mid-claim sees the message
+either still pending or already owed an answer, never neither — the gap
+that once let a run end with a nudge in flight. A message
 that arrives after close, or lands on a harness without `inject`, waits in
 `new/` for the next run start, exactly as before; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgment: a message

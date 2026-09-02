@@ -7,6 +7,8 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -190,6 +192,73 @@ def test_inject_pump_delivers_mid_run_guidance(home: Path, project: str, monkeyp
     inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
     assert fsio.sorted_entries(inbox / "new") == []  # consumed, not re-delivered next run
     assert fsio.sorted_entries(inbox / "cur") == []
+
+
+class _PipeEnd:
+    """A stand-in for the harness's stdin pipe: records turns, knows if closed."""
+
+    def __init__(self):
+        self.turns: list[str] = []
+        self.closed = False
+
+    def write(self, text: str) -> None:
+        self.turns.append(text)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
+    """The turn-boundary race behind a CI flake (PR #74, `test (3.12)`): the
+    harness posts a nudge and then emits its `result`; the pump claims the
+    nudge (rename out of new/) and only *then* counts the delivery. A result
+    landing in that gap saw "answered, nothing pending" and closed stdin
+    with the nudge in flight — one result event instead of two, and the
+    nudge bounced back to new/. This forces that interleaving: the result
+    arrives while the claim is mid-way, on another thread, exactly as the
+    transcript reader delivers it."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    bus.send("user", inbox, text="switch to the fallback plan")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    real_claim = pump._bus.claim
+    result_seen = threading.Event()
+
+    def racing_claim(agent):
+        for claimed in real_claim(agent):
+            # the message is in cur/ now; before the pump can count it, the
+            # harness's first result reaches on_event from the reader thread
+            t = threading.Thread(target=lambda: (pump.on_event({"type": "result"}),
+                                                 result_seen.set()))
+            t.start()
+            t.join(timeout=0.3)  # the fixed pump holds the lock here: it must wait
+            yield claimed
+
+    pump._bus.claim = racing_claim
+    pump.start()
+    try:
+        assert result_seen.wait(5)
+        deadline = time.monotonic() + 5
+        while len(stdin.turns) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(stdin.turns) == 2, stdin.turns  # prompt turn, then the nudge
+        assert "switch to the fallback plan" in stdin.turns[1]
+        assert not stdin.closed  # the nudge's answer is still owed
+        inbox_dir = bus.inbox_dir / inbox
+        assert fsio.sorted_entries(inbox_dir / "new") == []  # delivered, not bounced
+        while fsio.sorted_entries(inbox_dir / "cur") and time.monotonic() < deadline:
+            time.sleep(0.01)  # the ack follows the write on the pump thread
+        assert fsio.sorted_entries(inbox_dir / "cur") == []  # ...and acked
+
+        pump.on_event({"type": "result"})  # the harness answers the nudge
+        assert stdin.closed  # now the run is idle: every turn answered
+    finally:
+        pump.stop()
 
 
 def test_build_harness_argv_strips_prompt_for_inject_harnesses():
