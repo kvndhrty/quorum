@@ -541,9 +541,9 @@ for the report to absorb the shortfall (about 60 columns). Squeeze it
 narrower and the fixed columns are clipped too — the id last of all, since
 it is the handle you retype. A pull request shows as `#53`, and the issue a
 task was queued from as `#62` (the URLs themselves, and the whole report,
-are in `task show`; columns nothing uses are dropped entirely). Piped or redirected,
-the same tables come out plain and at full width, so `quorum task list |
-grep <id>` works:
+are in `task show`; columns nothing uses are dropped entirely). Piped or
+redirected, the same tables come out plain and at full width, so `quorum
+task list | grep <id>` works:
 
 ```
 $ quorum status

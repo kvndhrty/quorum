@@ -281,8 +281,8 @@ After installing, in each `QUORUM_HOME`:
 1. `quorum init` — both `manager.md` (merged/closed PRs, the budget gate,
    self-observations, overlaps, the hung-session ladder: eighteen rules now)
    and `task-preamble.md` (rebase before push, plus the `{issue}` slot)
-   changed. A copy you never edited is upgraded in place, including copies seeded
-   from any intermediate 0.2.x main; an edited one is left alone — move
+   changed. A copy you never edited is upgraded in place, including copies
+   seeded from any intermediate 0.2.x main; an edited one is left alone — move
    house rules into `prompts/<name>.local.md` and delete the edited copy, or
    `quorum prompt diff <name>` shows the gap.
 2. `quorum down && quorum up` — the manager tick and the new `_notify` job
@@ -292,8 +292,9 @@ After installing, in each `QUORUM_HOME`:
    `quorum notify test "hello"` to prove it.
 
 No file migrates: `task.json` gains `pr_state` fields only when the manager
-next observes a PR and `issue_url` only on a task queued with `--issue`, `state/notify.json` appears on the first drain, and
-older `usage.jsonl` lines read back with an unknown outcome.
+next observes a PR and `issue_url` only on a task queued with `--issue`,
+`state/notify.json` appears on the first drain, and older `usage.jsonl`
+lines read back with an unknown outcome.
 
 ## [0.2.0] - 2026-09-01
 
