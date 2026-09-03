@@ -9,89 +9,11 @@ The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quo
 
 ## [Unreleased]
 
+The "Operate unattended" package (#67): a home should run for a week without
+anyone editing files by hand, and every escalation should reach a person the
+minute it is posted.
+
 ### Added
-- `quorum task add <project> -` reads the prompt from stdin, and
-  `--prompt-file <path>` reads it from a file — both byte-for-byte, so a
-  piped GitHub issue is stored exactly as it arrived. Exactly one of the
-  three sources is allowed, and empty input is refused. Makes the
-  issue-driven loop a one-liner without putting `gh` inside quorum:
-  `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
-  (#60)
-- The task budget gates the next run (the enforcement half of #19): with
-  `[tasks].max_cost_per_run` / `max_tokens_per_run` set, a task whose
-  *last* run reported more than the budget is refused by `run_task`,
-  `quorum task run` (and `--detach`, in the parent) and the TUI's `s`
-  key until `--force` or a run that comes in under budget — a run that
-  reports no usage counts as under. A rail of the rate-limit class the
-  per-run action cap belongs to: it never kills a run in progress, never
-  sets status, and never vetoes a choice. `task list` marks a gated task
-  `$! GATED`, `task show` adds a `gated:` line, `task_rows` carries
-  `budget_gated`, and the digest's `BUDGET-EXCEEDED` line now ends
-  `(next run gated; --force to override)` on the last run (`(an earlier
-  run; a later one cleared the gate)` on older ones) so the manager knows
-  why a relaunch failed. The packaged `manager.md` says what to do instead
-  of relaunching as-is — sharpen the nudge, decompose, escalate — and
-  `quorum init` upgrades unedited copies.
-
-### Fixed
-
-- The guidance pump could close a stream-json harness's stdin with a nudge
-  in flight: a message was claimed (renamed out of `new/`) before it was
-  counted as delivered, so a `result` event landing in that gap saw an
-  idle run and ended it — the nudge bounced back to `new/` and the run
-  recorded one result event instead of two (a rare CI flake). The claim
-  and the count now happen under the same lock the close check takes.
-- **Merged pull requests are visible** (#57). A task ends at the harness's
-  word (`done`); its work is delivered when the PR merges. The CI probe now
-  normalizes the PR's own state to `open` / `merged` / `closed` and the
-  digest's `ci:` line carries it, so the manager can tell "done and shipped"
-  from "done and waiting on a human" — the default `manager.md` reads a
-  merged task as needing nothing, and a `done` task whose PR was *closed
-  unmerged* as one line for the human. `quorum status`, `task list`, `task
-  show`, the TUI and the web dashboard badge it (`✔` merged, `⊘` closed
-  unmerged) without making a network call, because the manager tick records
-  what it saw as `pr_state` / `pr_state_at` on `tasks/<id>/task.json`.
-
-  Quorum still never changes a status because a PR merged: `done` is the
-  harness's word, merged is the forge's. Fail-soft like the rest of `ci.py`
-  — no `gh`, no PR, `[ci].enabled = false` → nothing recorded and no badge,
-  and **no badge never means "not merged"**, only "never observed". Field
-  names are forge-neutral so a GitLab backend (#51) fills the same ones.
-
-### Changed
-
-- The `ci:` digest line renders `state=merged` where it used to render
-  `state=MERGED` (all PR states are lowercase now). A merged PR never
-  carries `CI-FAILING`, even if the forge still serves a stale red rollup.
-- `docs/architecture.md`'s "nothing materializes its result to disk" note is
-  revised: `pr_state` is the one deliberate exception, and the section now
-  lists the five properties that fence it — this is the case that note said
-  to revisit for.
-
-### Upgrading
-
-Run `quorum init` to pick up the new `manager.md` (a copy you never edited
-is upgraded in place, recognized by hash; an edited one is left alone —
-`quorum prompt diff manager.md` shows what changed). Existing `task.json`
-records need no migration: the new fields are absent until the manager next
-observes a PR.
-- **The manager can see its own last few runs** (#59). Each agent harness run
-  already appended a line to `state/manager/usage.jsonl` (or
-  `state/agents/<name>/usage.jsonl`); that line now also carries `outcome`
-  (`ok` / `raised` / `timeout`) and `duration_seconds`, and the digest opens
-  with `Your last 5 runs: ok 2m10s · TIMEOUT 15m00s · …` next to the
-  existing spend line. A run that times out reports no usage at all, so its
-  outcome is exactly what a spend-only ledger lost. Ledger lines written by
-  earlier versions read back as unknown (`?`), never as `ok`.
-- **The action cap says so in the journal** (#59). Refusing an action over
-  `max_actions_per_run` now appends one `cap.hit` entry per run, so the next
-  digest's journal section shows the run that ran out of budget; the digest
-  header also states the budget (`Actions this run: 0 of 20 (cap)`). Both are
-  observations — nothing pauses, throttles or changes the cap — and the
-  manager prompt gains one rule: shorten your own work when your runs time
-  out, escalate after hitting the cap two runs running.
-- A prompt agent whose template writes `{notes}` gets the same
-  self-observation lines above its notebook (no new placeholder).
 - Notification hook: a `[notify]` table holds an argv template
   (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
   no shell) that the supervisor runs once for every new message on the
@@ -106,6 +28,24 @@ observes a PR.
   cursor has already advanced.
   `quorum notify test "…"` proves the wiring loudly; `quorum doctor` gains
   a `notify` line. (#55)
+- Attention acknowledgement: `quorum board ack <message-id>` archives
+  one board message, so an escalation you have handled
+  leaves the `#attention` banner in `quorum status`, the TUI header and the
+  web header instead of sitting there for the seven-day window — while
+  `messages/archive/` keeps it with its original `created_at`. Ids resolve
+  like task ids (full id, unique prefix, or the short suffix `board read`
+  now prints); unknown and ambiguous are refused, never guessed at.
+  `board ack --all <topic>` is `board clear <topic>`, implemented on top of
+  it. The same ack is a keystroke in the TUI (`a` opens the `#attention`
+  list and acks the highlighted line, notifying rather than crashing on an
+  unwritable home) and an **Ack** button per escalation in the web
+  dashboard's new Attention panel — both thin calls to one shared
+  `MessageBus.ack_board_message`. Every list an ack acts on is a snapshot, so
+  a message archived out of band (the janitor, a second `board ack`, the web
+  panel) between the render and the keystroke is reported, never a traceback:
+  the TUI notifies and stays up, and the CLI archives the path it already
+  resolved instead of resolving twice. `--topic` alongside `--all` is refused
+  — the `--all` argument is itself the topic. (#56)
 - On-demand cleanup, all of it "archive, never delete" (#53):
   - `quorum task prune [--status] [--older-than] [--worktrees] [--dry-run]
     [--force]` moves finished tasks into `tasks/.archive/<id>/`. The
@@ -126,57 +66,22 @@ observes a PR.
     janitor writes — `board clear attention` empties the escalation banner.
   - `quorum task inbox <id> --clear` archives guidance still waiting
     undelivered (unclaimed mail only).
-- Attention acknowledgement (#56): `quorum board ack <message-id>` archives
-  one board message down the same path, so an escalation you have handled
-  leaves the `#attention` banner in `quorum status`, the TUI header and the
-  web header instead of sitting there for the seven-day window — while
-  `messages/archive/` keeps it with its original `created_at`. Ids resolve
-  like task ids (full id, unique prefix, or the short suffix `board read`
-  now prints); unknown and ambiguous are refused, never guessed at.
-  `board ack --all <topic>` is `board clear <topic>`, implemented on top of
-  it. The same ack is a keystroke in the TUI (`a` opens the `#attention`
-  list and acks the highlighted line, notifying rather than crashing on an
-  unwritable home) and an **Ack** button per escalation in the web
-  dashboard's new Attention panel — both thin calls to one shared
-  `MessageBus.ack_board_message`. Every list an ack acts on is a snapshot, so
-  a message archived out of band (the janitor, a second `board ack`, the web
-  panel) between the render and the keystroke is reported, never a traceback:
-  the TUI notifies and stays up, and the CLI archives the path it already
-  resolved instead of resolving twice. `--topic` alongside `--all` is refused
-  — the `--all` argument is itself the topic.
-### Changed
-- `quorum status`, `task list`, `agent list` and `project list` render
-  Rich tables instead of concatenated lines: one headed column per field,
-  fitted to the terminal (the report and flags columns are ellipsized
-  where the window runs out — never wrapped mid-cell — so id, status,
-  harness, pr and usage stay whole down to the width where the give-way
-  column has nothing left to give; narrower still, the id is the last
-  column clipped), the PR URL shortened to `#N`
-  (`task show` keeps the full URL), usage in its own `usage` column, and
-  columns nothing fills dropped. Piped or redirected, the same tables come
-  out plain and at full width, so grepping an id or status keeps working.
-  The guide now says where the `$` figure comes from: the harness CLI's
-  own reported cost, never a quorum estimate. (#52)
-- Overlap observation: the manager digest marks any two live worktree tasks
-  on one project whose branches change the same files with
-  `overlaps=<id> paths=N` on both lines, plus an `overlap:` line naming up
-  to three shared paths — read from the worktrees with local read-only git
-  (committed, uncommitted and untracked changes against the base branch:
-  the project checkout's branch — what the runner forked the worktree from
-  — else `origin/HEAD`, else the upstream), no network,
-  bounded by `OVERLAP_MAX_PAIRS`. Attached sessions and `--no-worktree`
-  tasks are never compared. An observation like `possible-loop`, never a
-  rail; the manager prompt says to nudge both to rebase or serialize them.
-  (#58)
+- **Merged pull requests are visible** (#57). A task ends at the harness's
+  word (`done`); its work is delivered when the PR merges. The CI probe now
+  normalizes the PR's own state to `open` / `merged` / `closed` and the
+  digest's `ci:` line carries it, so the manager can tell "done and shipped"
+  from "done and waiting on a human" — the default `manager.md` reads a
+  merged task as needing nothing, and a `done` task whose PR was *closed
+  unmerged* as one line for the human. `quorum status`, `task list`, `task
+  show`, the TUI and the web dashboard badge it (`✔` merged, `⊘` closed
+  unmerged) without making a network call, because the manager tick records
+  what it saw as `pr_state` / `pr_state_at` on `tasks/<id>/task.json`.
 
-### Changed
-- The task preamble's delivery protocol now says to `git fetch` and rebase
-  onto the base branch before pushing, to push again with
-  `--force-with-lease` (never a bare `--force`, never off the task's own
-  branch) when the rebase leaves an already-pushed branch unable to
-  fast-forward, and to report `blocked` naming the conflicting files when
-  the rebase cannot complete. `quorum init` upgrades an unedited
-  `task-preamble.md` and `manager.md`. (#58)
+  Quorum still never changes a status because a PR merged: `done` is the
+  harness's word, merged is the forge's. Fail-soft like the rest of `ci.py`
+  — no `gh`, no PR, `[ci].enabled = false` → nothing recorded and no badge,
+  and **no badge never means "not merged"**, only "never observed". Field
+  names are forge-neutral so a GitLab backend (#51) fills the same ones.
 - **Hung-session restart** (#42). A harness session that hangs — blocked on
   stdin, waiting on a turn that never returns — used to cost a whole
   supervision cycle at best and a whole night at worst, because the only kill
@@ -207,9 +112,75 @@ observes a PR.
     resume, then restart with a fresh session and a summarizing nudge, then
     escalate after two fresh restarts. Observations, never rails — quorum
     still ends no run on its own judgement.
+- The task budget gates the next run (the enforcement half of #19): with
+  `[tasks].max_cost_per_run` / `max_tokens_per_run` set, a task whose
+  *last* run reported more than the budget is refused by `run_task`,
+  `quorum task run` (and `--detach`, in the parent) and the TUI's `s`
+  key until `--force` or a run that comes in under budget — a run that
+  reports no usage counts as under. A rail of the rate-limit class the
+  per-run action cap belongs to: it never kills a run in progress, never
+  sets status, and never vetoes a choice. `task list` marks a gated task
+  `$! GATED`, `task show` adds a `gated:` line, `task_rows` carries
+  `budget_gated`, and the digest's `BUDGET-EXCEEDED` line now ends
+  `(next run gated; --force to override)` on the last run (`(an earlier
+  run; a later one cleared the gate)` on older ones) so the manager knows
+  why a relaunch failed. The packaged `manager.md` says what to do instead
+  of relaunching as-is — sharpen the nudge, decompose, escalate.
+- Overlap observation: the manager digest marks any two live worktree tasks
+  on one project whose branches change the same files with
+  `overlaps=<id> paths=N` on both lines, plus an `overlap:` line naming up
+  to three shared paths — read from the worktrees with local read-only git
+  (committed, uncommitted and untracked changes against the base branch:
+  the project checkout's branch — what the runner forked the worktree from
+  — else `origin/HEAD`, else the upstream), no network,
+  bounded by `OVERLAP_MAX_PAIRS`. Attached sessions and `--no-worktree`
+  tasks are never compared. An observation like `possible-loop`, never a
+  rail; the manager prompt says to nudge both to rebase or serialize them.
+  (#58)
+- **The manager can see its own last few runs** (#59). Each agent harness run
+  already appended a line to `state/manager/usage.jsonl` (or
+  `state/agents/<name>/usage.jsonl`); that line now also carries `outcome`
+  (`ok` / `raised` / `timeout`) and `duration_seconds`, and the digest opens
+  with `Your last 5 runs: ok 2m10s · TIMEOUT 15m00s · …` next to the
+  existing spend line. A run that times out reports no usage at all, so its
+  outcome is exactly what a spend-only ledger lost. Ledger lines written by
+  earlier versions read back as unknown (`?`), never as `ok`.
+- **The action cap says so in the journal** (#59). Refusing an action over
+  `max_actions_per_run` now appends one `cap.hit` entry per run, so the next
+  digest's journal section shows the run that ran out of budget; the digest
+  header also states the budget (`Actions this run: 0 of 20 (cap)`). Both are
+  observations — nothing pauses, throttles or changes the cap — and the
+  manager prompt gains one rule: shorten your own work when your runs time
+  out, escalate after hitting the cap two runs running. A prompt agent whose
+  template writes `{notes}` gets the same self-observation lines above its
+  notebook (no new placeholder).
+- `quorum task add <project> -` reads the prompt from stdin, and
+  `--prompt-file <path>` reads it from a file — both byte-for-byte, so a
+  piped GitHub issue is stored exactly as it arrived. Exactly one of the
+  three sources is allowed, and empty input is refused. Makes the
+  issue-driven loop a one-liner without putting `gh` inside quorum:
+  `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
+  (#60)
 
 ### Changed
-
+- `quorum status`, `task list`, `agent list` and `project list` render
+  Rich tables instead of concatenated lines: one headed column per field,
+  fitted to the terminal (the report and flags columns are ellipsized
+  where the window runs out — never wrapped mid-cell — so id, status,
+  harness, pr and usage stay whole down to the width where the give-way
+  column has nothing left to give; narrower still, the id is the last
+  column clipped), the PR URL shortened to `#N`
+  (`task show` keeps the full URL), usage in its own `usage` column, and
+  columns nothing fills dropped. Piped or redirected, the same tables come
+  out plain and at full width, so grepping an id or status keeps working.
+  The guide now says where the `$` figure comes from: the harness CLI's
+  own reported cost, never a quorum estimate. (#52)
+- The task preamble's delivery protocol now says to `git fetch` and rebase
+  onto the base branch before pushing, to push again with
+  `--force-with-lease` (never a bare `--force`, never off the task's own
+  branch) when the rebase leaves an already-pushed branch unable to
+  fast-forward, and to report `blocked` naming the conflicting files when
+  the rebase cannot complete. (#58)
 - **A zombie process no longer counts as a live run.** An exited process its
   parent has not reaped is still a process-table entry, so `kill(pid, 0)`
   and `killpg(pgid, 0)` both answered "alive" for one — which made
@@ -219,11 +190,43 @@ observes a PR.
   binding, no longer leaves one behind), and `fsio.pid_alive` /
   `fsio.group_alive` confirm a live-looking pid or group against the process
   state `ps` reports, so a corpse reads as dead. Fail-soft: where `ps`
-  cannot answer, the old reading stands.
-- `prompts/manager.md` — new hung-session section (item 7) and two new tools
-  in its command list. An unedited copy is upgraded by `quorum init`; an
-  edited one is not, so move house rules into `prompts/manager.local.md`
-  (`quorum prompt diff manager` shows the gap).
+  cannot answer, the old reading stands. (#42)
+- The `ci:` digest line renders `state=merged` where it used to render
+  `state=MERGED` (all PR states are lowercase now). A merged PR never
+  carries `CI-FAILING`, even if the forge still serves a stale red rollup.
+  (#57)
+- `docs/architecture.md`'s "nothing materializes its result to disk" note is
+  revised: `pr_state` is the one deliberate exception, and the section now
+  lists the five properties that fence it — this is the case that note said
+  to revisit for. (#57)
+
+### Fixed
+- The guidance pump could close a stream-json harness's stdin with a nudge
+  in flight: a message was claimed (renamed out of `new/`) before it was
+  counted as delivered, so a `result` event landing in that gap saw an
+  idle run and ended it — the nudge bounced back to `new/` and the run
+  recorded one result event instead of two (a rare CI flake). The claim
+  and the count now happen under the same lock the close check takes.
+
+### Upgrading
+After installing, in each `QUORUM_HOME`:
+
+1. `quorum init` — both `manager.md` (merged/closed PRs, the budget gate,
+   self-observations, overlaps, the hung-session ladder: eighteen rules now)
+   and `task-preamble.md` (rebase before push) changed. A copy you never
+   edited is upgraded in place, recognized by hash, including copies seeded
+   from any intermediate 0.2.x main; an edited one is left alone — move
+   house rules into `prompts/<name>.local.md` and delete the edited copy, or
+   `quorum prompt diff <name>` shows the gap.
+2. `quorum down && quorum up` — the manager tick and the new `_notify` job
+   run inside the supervisor process, which keeps the old code until
+   restarted. Detached task runs are unaffected.
+3. Optionally add a `[notify]` table (`docs/guide.md#getting-notified`) and
+   `quorum notify test "hello"` to prove it.
+
+No file migrates: `task.json` gains `pr_state` fields only when the manager
+next observes a PR, `state/notify.json` appears on the first drain, and
+older `usage.jsonl` lines read back with an unknown outcome.
 
 ## [0.2.0] - 2026-09-01
 
