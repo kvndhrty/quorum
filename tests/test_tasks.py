@@ -1369,3 +1369,38 @@ def test_an_unreadable_project_block_costs_the_block_not_the_run(
     assert "Base every branch on main." in text  # the readable source survives
     assert "just-check" not in text
     assert store.get(task.id).runs[-1].exit_code == 0
+
+
+def test_the_project_block_is_read_before_the_sandbox_shuts_the_project_dir(
+    home: Path, project: str, tmp_path: Path, monkeypatch
+):
+    """`build_task_capabilities` grants the worktree and the project's `.git`
+    — never the project directory, where both halves of the block live. Read
+    after `apply_task_sandbox`, the fail-soft read returns "" and the whole
+    feature silently does nothing under [sandbox].use_nono."""
+    harness_config(home)
+    repo = tmp_path / "proj"
+    (repo / ".quorum.toml").write_text('notes = "Base every branch on main."\n', encoding="utf-8")
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_text(
+        "In this repo, run `just check` before pushing.\n", encoding="utf-8"
+    )
+
+    # Stand in for the sandbox: from the moment it is applied the project
+    # directory is out of reach. A real ruleset denies the open; here the
+    # files are simply gone, which the same fail-soft read swallows.
+    def fake_apply(home_, config_, task_, workdir_):
+        (repo / ".quorum.toml").unlink()
+        shutil.rmtree(repo / ".quorum")
+
+    monkeypatch.setattr("quorum.sandbox.apply_task_sandbox", fake_apply)
+    config = load_config(home)
+    config.sandbox.use_nono = True
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, config, task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text  # the .quorum.toml marker's notes
+    assert "`just check`" in text  # .quorum/task-preamble.local.md

@@ -429,7 +429,10 @@ so the record stays true.
   (`project set --notes-file`) then `<project>/.quorum/task-preamble.local.md`
   — a **read**, fail-soft for `load_local`'s reason doubled (every run, a
   file quorum does not own), taken from the *project* dir rather than the
-  worktree because that is the copy the user maintains. Same empty-slot rule
+  worktree because that is the copy the user maintains — and read *before*
+  `apply_task_sandbox`, which grants the worktree and the project's `.git`
+  but never the project dir, so `compose_prompt` takes the block as an
+  argument. Same empty-slot rule
   as `{local}`, deliberately **no prepend fallback** (a rescued overlay is
   policy the home already had; a project block is new and has no defensible
   place in a rewritten template) — `prompt list` names the projects that

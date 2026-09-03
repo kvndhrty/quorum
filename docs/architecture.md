@@ -193,6 +193,13 @@ Both reads are fail-soft, for `load_local`'s reason and more so: this one is
 on every task run and the file belongs to whoever owns the repo. An
 unreadable block is no block; the run goes ahead.
 
+Both are also *project-directory* reads, so the runner takes them before it
+applies the task sandbox: `build_task_capabilities` grants the worktree and
+the project's `.git`, never the project directory itself, and a read taken
+afterwards would fail soft into no block at all — the feature would silently
+do nothing under `[sandbox].use_nono`. `compose_prompt` takes the block as
+an argument for that reason.
+
 `{project}` follows the `{local}` rules with one deliberate difference:
 same empty-slot removal (nothing to say leaves no hole), but **no prepend
 fallback**. An overlay is policy the home already had, so rescuing it into a
