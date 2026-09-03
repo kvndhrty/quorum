@@ -492,6 +492,12 @@ While a task is held:
   `#attention` instead;
 - the views badge it `⏸`.
 
+A hold is a brake on the *next* launch. Holding a task whose run is already
+going does not stop that run — `quorum task stop` does — and holding an
+adopted session (`task adopt`) changes nothing at all, since the runner
+already refuses those. Both `quorum task hold` and the TUI say which when
+you hold such a task.
+
 In the TUI, `h` toggles hold on the highlighted task and `+` / `-` nudge its
 priority by one. Neither asks for confirmation — nothing is lost by pressing
 the key again — and the table is not reordered, so the row you are pointing

@@ -61,6 +61,7 @@ from .tasks import (
     TaskStore,
     dependency_state,
     inbox_name,
+    runner_alive,
     runner_lock_path,
     runner_log_path,
     short_handle,
@@ -1048,6 +1049,27 @@ def held_refusal(task: Task) -> str:
         f"task {task.short_id} is held — `quorum task release {task.short_id}` "
         "to unpark it, or `--force` to run it anyway"
     )
+
+
+def hold_note(home: Path, task: Task) -> str | None:
+    """What a hold does *not* stop, or None when there is nothing to say.
+
+    `task hold` gates the next *launch*: it never signals a run already in
+    flight, and it means nothing at all to an adopted session (the runner
+    refuses those outright). Both are invisible from the brake's own
+    message, so the one line that says so lives here and every surface that
+    holds a task (`quorum task hold`, the TUI's `h`) prints it."""
+    if task.attached:
+        return (
+            "its live interactive session keeps going — a hold gates launches; "
+            f"`quorum task detach {task.short_id}` is what ends an adoption"
+        )
+    if runner_alive(home, task.id):
+        return (
+            f"its live runner keeps going — `quorum task stop {task.short_id}` "
+            "ends the current run"
+        )
+    return None
 
 
 def budget_refusal(task: Task, over: list[str]) -> str:

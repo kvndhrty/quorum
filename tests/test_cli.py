@@ -1433,3 +1433,34 @@ def test_hold_release_and_set_priority_are_journaled(home: Path, tmp_path: Path,
 
     actions = [e["action"] for e in fsio.read_jsonl(journal_path(home))]
     assert actions == ["task.hold", "task.release", "task.set-priority"]
+
+
+def test_hold_says_what_it_does_not_stop(home: Path, tmp_path: Path):
+    """A hold gates the next launch and nothing else: a run already in flight
+    and an adopted session both keep going, and the brake's own message is
+    the only place that could say so (#61)."""
+    from quorum import fsio
+    from quorum.tasks import TaskStore, runner_lock_path
+
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    live = r.output.split("queued task ")[1].split(" ")[0]
+    store = TaskStore(home)
+    # pid 1 is the fixtures' "live runner": same-process pids read as stale
+    fsio.atomic_write_json(runner_lock_path(home, store.resolve(live).id), {"pid": 1})
+    r = runner.invoke(app, ["task", "hold", live, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "live runner keeps going" in r.output and "task stop" in r.output
+
+    r = runner.invoke(app, ["task", "add", slug, "adopted", "--harness", "fake", "--home", str(home)])
+    adopted = r.output.split("queued task ")[1].split(" ")[0]
+    store.update(store.resolve(adopted).id, attached=True)
+    r = runner.invoke(app, ["task", "hold", adopted, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "live interactive session keeps going" in r.output and "task detach" in r.output
+
+    # nothing to say about an idle task: the plain message stands alone
+    r = runner.invoke(app, ["task", "add", slug, "idle", "--harness", "fake", "--home", str(home)])
+    idle = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "hold", idle, "--home", str(home)])
+    assert "keeps going" not in r.output

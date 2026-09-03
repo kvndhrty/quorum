@@ -1554,7 +1554,11 @@ def task_hold(task_id: str, home: Path | None = _HOME_OPT) -> None:
     queue position survive, and `quorum task release` puts it back. The
     runner refuses a held task (`--force` overrides), and the manager is told
     never to launch or release one.
+
+    It gates the next launch only: a run already in flight keeps going (stop
+    it with `task stop`), and an adopted session is not affected at all.
     """
+    from .runner import hold_note
     from .tasks import TaskStore
 
     target = get_home(home)
@@ -1569,6 +1573,11 @@ def task_hold(task_id: str, home: Path | None = _HOME_OPT) -> None:
         f"`quorum task release {task.short_id}` to unpark it",
         fg="green",
     )
+    # A brake on the next launch stops nothing already moving: say which,
+    # rather than let "held" read as if the live run had been parked too.
+    note = hold_note(target, task)
+    if note:
+        typer.secho(note, fg="yellow")
 
 
 @task_app.command("release")

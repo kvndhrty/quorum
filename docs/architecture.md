@@ -614,6 +614,11 @@ scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
   renders `held=true` *always* (a held task otherwise reads as launchable —
   `runner=dead`, `status queued` — and nothing else on its line would say
   differently) plus one line telling the manager not to launch or release it.
+  It gates the next *launch* and nothing else: a run already in flight keeps
+  going (`task stop` ends it) and an adopted session is untouched (the
+  runner refuses those outright), both of them invisible from the word
+  "held". `runner.hold_note` is the one line that says which, printed by
+  `quorum task hold` and by the TUI's `h`.
 - **The hold refusal is the fifth substrate rail**, next to `runner.lock`,
   the attached-task refusal, the dependency refusal ([above](#task-dependencies))
   and the budget gate. `run_task` raises `held_refusal(task)` before taking

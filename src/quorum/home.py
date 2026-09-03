@@ -178,6 +178,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         "54221d7f36b8228bbaa71a44aff59f589f41034c346d95be288a59c63aaa09b3",
         # the hung-session revision, replaced by the priority/hold rule (#61)
         "0a20ea04b9e1b0ccc7675b88fa193023b0f6e630c760574dd8d1a974a5a1ee5e",
+        # that rule's first cut, replaced by scoping "never launch a held
+        # task" to the relaunch rules too (#61)
+        "97deff6263bf3a2a927ee0bde9f3f9d15f430ddce67d84c20c7d9be3a32bb973",
     },
 }
 

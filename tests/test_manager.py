@@ -1296,3 +1296,21 @@ def test_the_manager_prompt_carries_the_priority_and_hold_rules(home: Path):
     assert "priority=N" in text and "held=true" in text
     assert "Never launch a held task" in text
     assert "never `quorum task release` one" in text
+
+
+def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
+    """"Never launch a held task" sits under the *queued* step, but a held
+    task also reads as an ordinary relaunch (rule 4) and a perpetual one is
+    told to relaunch forever (rule 12). A refused run is not journaled, so a
+    manager that only read those two rules would retry every tick with no
+    memory of having tried (#61)."""
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "not as a relaunch under" in text
+    # rule 4: the stopped-without-finishing relaunch
+    stopped = text.split("without finishing")[1].split("\n5.")[0]
+    assert "held=true" in stopped
+    # rule 12: the perpetual loop
+    perpetual = text.split("relaunch it with `task run --detach` whenever its runner is dead")[1]
+    assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]

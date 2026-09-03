@@ -317,10 +317,18 @@ class QuorumTUI(App):
         )
         if done is FAILED:
             return
+        if not held:
+            self.notify(f"task {task.short_id} released — launchable again")
+            self.refresh_data()
+            return
+        from ..runner import hold_note
+
+        # the same line `quorum task hold` prints: a brake on the next
+        # launch stops nothing already moving, and only this says so
+        note = hold_note(self.home, task)
         self.notify(
             f"task {task.short_id} held — status is still {task.status!r}"
-            if held
-            else f"task {task.short_id} released — launchable again"
+            + (f"; {note}" if note else "")
         )
         self.refresh_data()
 

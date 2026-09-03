@@ -573,3 +573,21 @@ def test_plus_and_minus_nudge_priority_without_reordering_the_table(home: Path):
         assert "↓1" in str(app.query_one("#tasks", DataTable).get_row_at(0)[2])
 
     drive(home, script)
+
+
+def test_h_says_a_live_run_keeps_going(home: Path):
+    """`h` speaks the same line `quorum task hold` does: the brake gates the
+    next launch, and the run already in flight is not stopped by it (#61)."""
+    from quorum import fsio
+
+    ids = populate(home)
+    fsio.atomic_write_json(runner_lock_path(home, ids[0]), {"pid": 1})
+
+    async def script(app, pilot):
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is True
+        message = str(list(app._notifications)[-1].message)
+        assert "live runner keeps going" in message and "task stop" in message
+
+    drive(home, script)
