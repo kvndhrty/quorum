@@ -205,6 +205,18 @@ so the record stays true.
   `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
   over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
   class as `possible-loop`; enforcement is deliberately not implemented.
+- `stats.py` — `quorum usage`: the aggregate read across tasks, harnesses,
+  weeks and agents (#96, theme #88). A pure reader in the views' mold over
+  `task.json`, each task's `reports.jsonl` (the instant it said `done`,
+  which `updated_at` does not hold) and the agent ledgers — no cache, no
+  network. Spend is one `usage.total` over every run in a group (never a
+  re-derived reduction); a task that reported nothing is counted, never
+  estimated, and `tasks_with_usage` says how many did. `share_merged` is
+  over tasks with *any* `pr_state`, never over done tasks (absence is not
+  "not merged"), and `done_to_merged` ends at `pr_state_at`, the tick that
+  first saw the merge. `--since` and `week` both read `created_at`.
+  Rendering (`_task_usage_table` / `_agent_usage_table`) lives in `cli.py`
+  beside the other table builders.
 - `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, a

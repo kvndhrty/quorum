@@ -391,6 +391,63 @@ transcript. So capture is one more look at each parsed event
   same bounded tail, separately from `agent_usage` (which stays `None` when
   no run in the window reported spend, and a timed-out run never does).
 
+**Usage and delivery statistics (`stats.py`, `quorum usage`).** The
+per-task and per-agent figures above answer "what did this run cost"; the
+questions asked after a week are aggregate — what did this project cost,
+is one harness cheaper than another per merged PR, how long from queue to
+merge, how many tasks needed a rerun — and until #96 each was a
+hand-written script over `task.json` files. `quorum usage [--by
+project|harness|week|agent] [--since 7d] [--json]` is that script, kept to
+the rules of theme #88:
+
+- **A pure reader, no cache.** It opens `tasks/<id>/task.json`, each task's
+  `reports.jsonl` and the agent ledgers, and nothing else — no network, no
+  state of its own, recomputed on every call, so it works with the
+  supervisor stopped and an archived task leaves the figures the moment
+  `task prune` moves it. `reports.jsonl` is read for exactly one fact: the
+  instant a task last said `done`, which `task.json` does not hold
+  (`updated_at` moves on every edit — a hold, a priority change, the run
+  record written after the report). Only a task whose *current* status is
+  `done` has a done time, so a task relaunched after a premature `done` is
+  not delivered however often it said so; a hand-edited `done` with no
+  report behind it is counted as done and has no queue-to-done figure.
+- **The reduction is reused, not re-derived.** A row's spend is one
+  `usage.total` over every run in the group — max within a run was applied
+  when the run was recorded, sum across runs is `total`'s own rule — and
+  `--by agent` reads every ledger line through the same call (the whole
+  file, not the bounded tail the views take: a report may spend the read a
+  tick may not). A task whose runs reported nothing is counted in `tasks`
+  and `runs` and adds nothing to `cost` or `tokens`; `tasks_with_usage`
+  (the `reported` column, shown only when not every task reported) says
+  how many did, so a total over three reporting tasks out of ten is never
+  read as the cost of ten. A harness that reports tokens but no cost gets
+  a token figure and an empty cost cell. Nothing is estimated.
+- **Delivery figures come only from the merged observation.** `merged` is
+  `pr_state == "merged"` on the record, and `share_merged` is measured over
+  the tasks with *any* `pr_state` — the PRs the manager observed — never
+  over every done task, because absence of a `pr_state` means no `gh`,
+  `[ci]` off or a supervisor that was never up while the PR was open, and
+  must not read as "not merged" (*The merged observation*, below).
+  `done_to_merged` runs from the `done` report to `pr_state_at`, the tick
+  that first saw the merge: late by up to one tick, never early, and a
+  merge seen before the harness said done is a zero wait rather than a
+  negative one. `queue_to_run` is queueing to the first run's `started_at`
+  (an attached task has none). Each is reported as a median with the mean
+  and count behind it in `--json`; `_build_table` drops the columns no row
+  fills, so a home without a forge shows no delivery columns at all.
+- **A task belongs to the moment it was queued.** `--since` and the `week`
+  dimension (ISO week, `2026-W36`) both read `created_at`: a task is in
+  exactly one week and a window is a set of tasks, never runs sliced
+  mid-task. Agent runs have no such anchor and filter on the ledger
+  line's own `at`. Unreadable timestamps degrade to "no figure" per field
+  and never fail the report, the same way a malformed usage dict degrades
+  in `usage.total`.
+
+Rendering lives in `cli.py` beside the other table builders
+(`_task_usage_table`, `_agent_usage_table`, right-aligned numeric columns,
+a `total` row when there is more than one), through the same `_print_table`
+as every listing — fitted on a terminal, plain text piped.
+
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
 `--output-format stream-json`) can opt into steering *during* a run: the

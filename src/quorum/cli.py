@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -635,6 +636,69 @@ def status(
         typer.echo("no projects registered — `quorum project add <dir>`")
 
 
+class UsageBy(StrEnum):
+    project = "project"
+    harness = "harness"
+    week = "week"
+    agent = "agent"
+
+
+@app.command("usage")
+def usage_cmd(
+    by: UsageBy = typer.Option(
+        UsageBy.project, "--by", case_sensitive=False, help="Group rows by this dimension."
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Only tasks queued (or agent runs made) in the last 7d / 36h / 2w / 90m.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Usage and delivery statistics by project, harness, week or agent:
+    tasks, runs, reruns, cost and tokens as the harness reported them, and
+    — where the manager observed a PR — queue-to-run, queue-to-done,
+    done-to-merged medians and the share merged. A pure reader over the
+    home; the supervisor need not be running."""
+    from . import stats
+
+    target = get_home(home)
+    window = None
+    if since is not None:
+        try:
+            window = stats.parse_since(since)
+        except ValueError as e:
+            raise _fail(str(e)) from None
+    payload = stats.report(target, by=by.value, since=window)
+    if json_out:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    what = "agent runs" if by is UsageBy.agent else "tasks queued"
+    scope = f"{what} since {payload['cutoff']} ({since.strip()})" if window else "all time"
+    typer.echo(f"usage by {by.value}, {scope}")
+    if not payload["rows"]:
+        typer.echo("nothing recorded" + (" in that window" if window else ""))
+        return
+    rows = list(payload["rows"])
+    if len(rows) > 1 and payload["total"]:
+        rows.append(payload["total"])
+    if by is UsageBy.agent:
+        _print_table(_agent_usage_table(rows))
+        typer.echo(
+            "cost/tokens: the harness's own figures, summed over the runs that reported them\n"
+            "reported: runs that reported any usage, when not all did; duration: the median run"
+        )
+        return
+    _print_table(_task_usage_table(by.value, rows))
+    typer.echo(
+        "cost/tokens: the harness's own figures, summed over the runs that reported them\n"
+        "reported: tasks that reported any usage, when not all did\n"
+        "queue→run / queue→done / done→merged: medians\n"
+        "merged: over the PRs the manager observed — none observed, no figure"
+    )
+
+
 # -- tables ----------------------------------------------------------------
 #
 # Every listing (`status`, `task list`, `agent list`, `project list`) is a
@@ -884,6 +948,107 @@ def _project_cells(p: dict) -> dict[str, str]:
 def _project_table(rows: list[dict]) -> Table:
     return _build_table(
         _PROJECT_COLUMNS, [_project_cells(p) for p in rows], keep=frozenset({"slug"})
+    )
+
+
+_NUM: dict[str, Any] = {"no_wrap": True, "justify": "right"}
+# `quorum usage`: one row per value of the `--by` dimension. Numeric columns
+# are right-aligned; the delivery columns are dropped by `_build_table` when
+# no task in the listing has the observation behind them.
+_USAGE_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("tasks", _NUM),
+    ("reported", _NUM),
+    ("runs", _NUM),
+    ("reruns", _NUM),
+    ("cost", _NUM),
+    ("tokens", _NUM),
+    ("done", _NUM),
+    ("merged", _NUM),
+    ("queue→run", _NUM),
+    ("queue→done", _NUM),
+    ("done→merged", _NUM),
+]
+_AGENT_USAGE_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("agent", _NO_WRAP),
+    ("runs", _NUM),
+    ("reported", _NUM),
+    ("raised", _NUM),
+    ("timeout", _NUM),
+    ("unknown", _NUM),
+    ("cost", _NUM),
+    ("tokens", _NUM),
+    ("duration", _NUM),
+]
+
+
+def _count(n: int) -> str:
+    return str(n) if n else ""
+
+
+def _spend_cells(spent: dict | None) -> dict[str, str]:
+    """`cost` and `tokens` off a `usage.total`: empty, never `$0.00`, when
+    the harness reported no figure for that field."""
+    cost = usage.number((spent or {}).get("cost_usd"))
+    tokens = usage.number((spent or {}).get("total_tokens"))
+    return {
+        "cost": usage.format_cost(cost) if cost else "",
+        "tokens": usage.format_tokens(tokens) if tokens else "",
+    }
+
+
+def _task_usage_cells(by: str, r: dict) -> dict[str, str]:
+    from . import stats
+
+    reported = r["tasks_with_usage"]
+    merged = ""
+    if r["observed"]:
+        merged = f"{r['merged']}/{r['observed']} ({round(100 * r['share_merged'])}%)"
+    return {
+        by: r["key"],
+        "tasks": str(r["tasks"]),
+        # Only when it differs: a column of `5/5` says nothing.
+        "reported": f"{reported}/{r['tasks']}" if reported != r["tasks"] else "",
+        "runs": str(r["runs"]),
+        "reruns": _count(r["reruns"]),
+        **_spend_cells(r["usage"]),
+        "done": _count(r["done"]),
+        "merged": merged,
+        "queue→run": stats.describe_summary(r["queue_to_run"]),
+        "queue→done": stats.describe_summary(r["queue_to_done"]),
+        "done→merged": stats.describe_summary(r["done_to_merged"]),
+    }
+
+
+def _task_usage_table(by: str, rows: list[dict]) -> Table:
+    return _build_table(
+        [(by, _NO_WRAP), *_USAGE_COLUMNS],
+        [_task_usage_cells(by, r) for r in rows],
+        keep=frozenset({by, "tasks", "runs", "cost", "tokens"}),
+    )
+
+
+def _agent_usage_cells(r: dict) -> dict[str, str]:
+    reported = r["runs_with_usage"]
+    return {
+        "agent": r["key"],
+        "runs": str(r["runs"]),
+        "reported": f"{reported}/{r['runs']}" if reported != r["runs"] else "",
+        "raised": _count(r["outcomes"]["raised"]),
+        "timeout": _count(r["outcomes"]["timeout"]),
+        # A ledger line written before outcomes existed (#59): `?` elsewhere.
+        "unknown": _count(r["outcomes"]["unknown"]),
+        **_spend_cells(r["usage"]),
+        "duration": (
+            usage.format_duration(r["duration"]["median_seconds"]) if r["duration"] else ""
+        ),
+    }
+
+
+def _agent_usage_table(rows: list[dict]) -> Table:
+    return _build_table(
+        _AGENT_USAGE_COLUMNS,
+        [_agent_usage_cells(r) for r in rows],
+        keep=frozenset({"agent", "runs", "cost", "tokens"}),
     )
 
 
