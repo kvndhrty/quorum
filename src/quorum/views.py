@@ -21,6 +21,7 @@ from .tasks import (
     TaskStore,
     attached_state,
     dependency_states,
+    issue_ref,
     read_reports,
     runner_alive,
     short_handle,
@@ -234,6 +235,12 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                         t.runs, budget.max_cost_per_run, budget.max_tokens_per_run
                     )
                 ),
+                # Where the task came from: the full url, plus the short
+                # `#62` every surface renders (tasks.issue_ref, so the CLI,
+                # TUI and browser abbreviate it identically). "" when the
+                # task was not queued from an issue.
+                "issue_url": t.issue_url,
+                "issue_ref": issue_ref(t.issue_url),
                 "pr_url": t.pr_url,
                 # What the forge last said about that PR (open/merged/closed)
                 # and when. The one field here that came from a probe rather

@@ -681,6 +681,7 @@ _TASK_COLUMNS: list[tuple[str, dict[str, Any]]] = [
     ("status", _NO_WRAP),
     ("harness", _NO_WRAP),
     ("report", _give_way(2)),
+    ("issue", _NO_WRAP),
     ("pr", _NO_WRAP),
     ("flags", _give_way(1)),
     ("usage", _NO_WRAP),
@@ -822,6 +823,9 @@ def _task_cells(t: dict) -> dict[str, str]:
         "status": status,
         "harness": t["harness"],
         "report": report,
+        # Where the task came from and where it went: both short forms,
+        # both dropped as whole columns on a home that uses neither.
+        "issue": t.get("issue_ref", ""),
         "pr": _pr_ref(t["pr_url"]) if t.get("pr_url") else "",
         "flags": _task_flags(t),
         "usage": usage_text,
@@ -909,9 +913,15 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
+def _task_prompt(prompt: str, prompt_file: Path | None, optional: bool = False) -> str:
     """The task prompt from exactly one of: the positional argument, stdin
-    (`-`), or --prompt-file.
+    (`-`), or --prompt-file. `""` when `optional` and none was given.
+
+    `optional` is what `--issue` passes: there the issue is the prompt and
+    anything given here is *appended*, so "nothing given" is the normal
+    case. Two sources at once is still an error, and so is empty input from
+    a source that was named — an explicitly empty prompt is a mistake either
+    way.
 
     Read as bytes and decoded here rather than through `read_text`, so what
     lands in task.json is byte-for-byte what was piped or written — a prompt
@@ -931,6 +941,8 @@ def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
     ]
     if len(given) > 1:
         raise _fail(f"pass the prompt exactly one way — got {' and '.join(given)}")
+    if not given and optional:
+        return ""
     if not given:
         raise _fail(
             "a task needs a prompt: pass it as an argument, `-` to read stdin, "
@@ -963,6 +975,7 @@ def task_add(
     project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
     prompt: str = typer.Argument("", help="What the harness should do — or `-` to read it from stdin."),
     prompt_file: Path | None = typer.Option(None, "--prompt-file", help="Read the prompt from this file instead of the argument."),
+    issue: str | None = typer.Option(None, "--issue", help="Queue this forge issue (number or URL): its title and body become the prompt."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
@@ -976,10 +989,15 @@ def task_add(
     Example: quorum task add my-api "fix the flaky auth tests"
 
     A long prompt does not have to fight the shell: `-` reads it from stdin
-    and --prompt-file reads it from a file, both verbatim. Queue a GitHub
-    issue without teaching quorum about `gh`:
+    and --prompt-file reads it from a file, both verbatim.
 
-    gh issue view 14 --json title,body -q '"\\(.title)\\n\\n\\(.body)"' | quorum task add my-api -
+    --issue queues an issue directly — `quorum task add my-api --issue 62`
+    (a number or a full URL) fetches its title and body through the forge
+    CLI, makes them the prompt, and records the issue url on the task so
+    every listing shows `#62` and the harness can reference it in its PR. A
+    prompt given as well is *appended* as extra instructions. Unlike the
+    manager's PR probe this fails loudly: no gh, no auth or an unknown issue
+    is an error, since the alternative is a task queued without its work.
 
     Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
     queues a task the manager will not launch until a1b2c3 finishes.
@@ -994,7 +1012,8 @@ def task_add(
 
     target = get_home(home)
     config = _load_config(target)
-    if ProjectRegistry(target).get(project) is None:
+    known_project = ProjectRegistry(target).get(project)
+    if known_project is None:
         known = ", ".join(p.slug for p in ProjectRegistry(target).list()) or "none"
         raise _fail(f"no project {project!r} (registered: {known}) — `quorum project add <dir>` first")
     name = harness or config.tasks.default_harness
@@ -1010,8 +1029,25 @@ def task_add(
         raise _fail(str(e)) from None
     # The prompt is read *last*, after everything that can be checked without
     # consuming it: a piped issue is gone the moment stdin is drained, so a
-    # typo in the slug must not eat it.
-    text = _task_prompt(prompt, prompt_file)
+    # typo in the slug must not eat it. With --issue the prompt is optional —
+    # the issue is the work, and anything given here is appended to it.
+    text = _task_prompt(prompt, prompt_file, optional=issue is not None)
+    # The forge call comes after every free check for the same reason, and
+    # it spends a subprocess and a network round trip besides. It runs in
+    # the project's own directory so a bare number resolves against its
+    # remote, exactly as gh does for a human standing in that checkout.
+    issue_url = None
+    if issue is not None:
+        from .forge import ForgeError, issue_prompt, issue_view
+
+        try:
+            fetched = issue_view(target, issue, known_project.dir)
+        except ForgeError as e:
+            raise _fail(str(e)) from None
+        issue_url = fetched["url"]
+        # Any prompt given as well is extra instructions *about* the issue,
+        # so it follows the issue rather than framing it.
+        text = issue_prompt(fetched) + (f"\n\n{text}" if text.strip() else "")
     _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
     task = store.add(
         project=project,
@@ -1021,9 +1057,12 @@ def task_add(
         depends_on=depends_on,
         perpetual=perpetual,
         priority=priority,
+        issue_url=issue_url,
     )
     kind = "perpetual task" if perpetual else "task"
     typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
+    if issue_url:
+        typer.echo(f"from issue: {issue_url}")
     if depends_on:
         waiting = ", ".join(short_handle(d) for d in depends_on)
         typer.echo(f"waits on: {waiting} — `task run` refuses until they finish (--force overrides)")
@@ -1314,6 +1353,10 @@ def task_show(
     typer.echo(f"  workdir:  {task.workdir or '(worktree created on first run)'}")
     if task.session:
         typer.echo(f"  session:  {task.session}")
+    if task.issue_url:
+        # The full url here, `#62` everywhere a listing has one column: this
+        # is the page a human opens.
+        typer.echo(f"  issue:    {task.issue_url}")
     if task.pr_url:
         typer.echo(f"  pr:       {task.pr_url}")
     if task.pr_state:

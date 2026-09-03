@@ -401,6 +401,21 @@ def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path):
     drive(home, script)
 
 
+def test_the_issue_a_task_came_from_is_shown_in_the_task_table(home: Path):
+    """Short form here (`#62`), the full url in `quorum task show` — one
+    renderer (tasks.issue_ref) behind both."""
+    store = TaskStore(home)
+    store.add("proj-a", "issue work", "fake", issue_url="https://github.com/o/r/issues/62")
+    store.add("proj-a", "prompt work", "fake")
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        issues = [str(table.get_row_at(i)[6]) for i in range(table.row_count)]
+        assert issues[0] == "#62" and issues[1] == "—"
+
+    drive(home, script)
+
+
 def test_selecting_an_agent_shows_its_notebook(home: Path):
     """The notebook is read-only here, like everything else in the TUI: a
     file reader, working with the supervisor stopped."""

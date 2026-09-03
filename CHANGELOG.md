@@ -190,6 +190,17 @@ minute it is posted.
   badges `⏸` everywhere. In the TUI, `h` toggles hold and `+` / `-` nudge
   priority; every verb is journaled and capped like any other mutating
   action.
+- Issue intake: `quorum task add <project> --issue <number|url>` fetches an
+  issue's title and body through `gh`, composes them (plus the issue URL)
+  into the prompt, and records `issue_url` on the task — so `task list`,
+  the TUI, the web dashboard and the manager's digest all show `issue=#62`,
+  `task show` prints the full URL, and the run preamble tells the harness
+  which issue it is working from. A prompt given as well is appended as
+  extra instructions. Unlike the manager's PR probe this fails loudly: no
+  `gh`, no auth, an unknown issue or a timeout is an error naming the fix
+  and nothing is queued. Every forge subprocess now lives in one new
+  module, `forge.py` (`ci.py` keeps the digest half); quorum still only
+  ever *reads* from a forge. (#62)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the
@@ -269,9 +280,9 @@ After installing, in each `QUORUM_HOME`:
 
 1. `quorum init` — both `manager.md` (merged/closed PRs, the budget gate,
    self-observations, overlaps, the hung-session ladder: eighteen rules now)
-   and `task-preamble.md` (rebase before push) changed. A copy you never
-   edited is upgraded in place, recognized by hash, including copies seeded
-   from any intermediate 0.2.x main; an edited one is left alone — move
+   and `task-preamble.md` (rebase before push, plus the `{issue}` slot)
+   changed. A copy you never edited is upgraded in place, including copies
+   seeded from any intermediate 0.2.x main; an edited one is left alone — move
    house rules into `prompts/<name>.local.md` and delete the edited copy, or
    `quorum prompt diff <name>` shows the gap.
 2. `quorum down && quorum up` — the manager tick and the new `_notify` job
@@ -281,8 +292,9 @@ After installing, in each `QUORUM_HOME`:
    `quorum notify test "hello"` to prove it.
 
 No file migrates: `task.json` gains `pr_state` fields only when the manager
-next observes a PR, `state/notify.json` appears on the first drain, and
-older `usage.jsonl` lines read back with an unknown outcome.
+next observes a PR and `issue_url` only on a task queued with `--issue`,
+`state/notify.json` appears on the first drain, and older `usage.jsonl`
+lines read back with an unknown outcome.
 
 ## [0.2.0] - 2026-09-01
 

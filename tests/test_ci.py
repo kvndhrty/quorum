@@ -1,71 +1,25 @@
 """The fail-soft `gh` CI/PR probe and its digest line.
 
-A fake `gh` (tests/bin/fake_gh.py, installed onto a stripped PATH) plays
+A fake `gh` (tests/bin/fake_gh.py, installed onto a stripped PATH by the
+shared `path_without_gh` fixture and `install_gh` helper — both in
+conftest.py, since `forge.py`'s loud half tests the same fake) plays
 GitHub. The probe's contract is the herdr contract, not the sandbox one: no
 gh, no auth, no PR, garbage output or a hung call must all degrade to None
 and leave the digest byte-identical to one built with the probe off.
+`auth_status` and `issue_view` live in tests/test_forge.py.
 """
 
 from __future__ import annotations
 
-import json
-import shutil
-import sys
 from pathlib import Path
 
 import pytest
 
+from conftest import FAILING_PR, install_gh
 from quorum import ci, fsio
 from quorum.agents.manager import build_digest
 from quorum.tasks import TaskStore
 from test_tasks import make_repo
-
-FAKE_GH = Path(__file__).parent / "bin" / "fake_gh.py"
-
-FAILING_PR = {
-    "number": 42,
-    "url": "https://github.com/o/r/pull/42",
-    "state": "OPEN",
-    "isDraft": False,
-    "mergeable": "MERGEABLE",
-    "statusCheckRollup": [
-        {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED", "conclusion": "FAILURE"},
-        {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"__typename": "CheckRun", "name": "build", "status": "IN_PROGRESS", "conclusion": None},
-    ],
-}
-
-
-@pytest.fixture
-def path_without_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A PATH holding only real git — so `gh` is provably absent until a test
-    installs one (the dev machine running these tests very likely has a real
-    gh, which would otherwise reach the network)."""
-    d = tmp_path / "shimbin"
-    d.mkdir()
-    git = shutil.which("git")
-    assert git, "these tests need git"
-    (d / "git").symlink_to(git)
-    monkeypatch.setenv("PATH", str(d))
-    return d
-
-
-def install_gh(
-    bindir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str = "pr",
-    pr: dict | None = None,
-    log: Path | None = None,
-) -> None:
-    # The shebang is the absolute interpreter: PATH holds no python3.
-    body = FAKE_GH.read_text().split("\n", 1)[1]
-    shim = bindir / "gh"
-    shim.write_text(f"#!{sys.executable}\n{body}")
-    shim.chmod(0o755)
-    monkeypatch.setenv("FAKE_GH_MODE", mode)
-    monkeypatch.setenv("FAKE_GH_PR_JSON", json.dumps(pr if pr is not None else FAILING_PR))
-    if log is not None:
-        monkeypatch.setenv("FAKE_GH_LOG", str(log))
 
 
 def make_task(home: Path, workdir: Path, status: str = "executing"):
@@ -150,39 +104,6 @@ def test_a_hung_gh_is_bounded_by_the_timeout(
     (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
     install_gh(path_without_gh, monkeypatch, mode="hang")
     assert ci.pr_state(home, make_task(home, make_repo(tmp_path))) is None
-
-
-def test_auth_status_answers_yes_no_or_nothing(
-    home: Path, path_without_gh: Path, monkeypatch
-):
-    """The doctor entry point. Three answers, and the third is not a failure:
-    a gh that never replied says nothing about whether it is logged in."""
-    assert ci.auth_status(home) is None  # no gh on PATH at all
-
-    install_gh(path_without_gh, monkeypatch, mode="pr")  # exits 0
-    assert ci.auth_status(home) is True
-
-    install_gh(path_without_gh, monkeypatch, mode="unauth")
-    assert ci.auth_status(home) is False
-
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
-    install_gh(path_without_gh, monkeypatch, mode="hang")
-    assert ci.auth_status(home) is None  # offline is not unauthenticated
-
-
-def test_auth_status_honours_the_same_ci_switches_as_the_probe(
-    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
-):
-    log = tmp_path / "gh.log"
-    install_gh(path_without_gh, monkeypatch, log=log)
-
-    (home / "config.toml").write_text("[ci]\nenabled = false\n")
-    assert ci.auth_status(home) is None
-    assert not log.exists()  # disabled means no subprocess, exactly like pr_state
-
-    (home / "config.toml").write_text("[ci]\nenabled = false\n[harness.broken\noops")
-    assert ci.auth_status(home) is None
-    assert not log.exists()  # and an unreadable config means off, never fail-open
 
 
 def test_no_gh_no_workdir_and_disabled_config_all_stay_quiet(

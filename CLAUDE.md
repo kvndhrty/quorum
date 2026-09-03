@@ -90,6 +90,12 @@ so the record stays true.
   unique prefixes or suffixes. `workdir_git_state` is the stranded-work probe
   (dirty/unpushed in a task's workdir) surfaced by views and the manager digest —
   the preamble tells harnesses to commit+push with plain git before reporting done.
+  `issue_url` (`task add --issue <number|url>`) is where a task came from:
+  written once at `add` from what the forge reported (never re-probed, never
+  written back), rendered by the total `issue_ref` as `#62` for the digest
+  and every view, full url in `task show`, and injected into the run
+  preamble's `{issue}` slot. Fetching it is `forge.issue_view` and it fails
+  **loud**, not soft — see `forge.py`.
   `depends_on` (`task add --after <id>`, repeatable) lists full ids a task
   must not start before — validated once at `add` (`resolve_dependencies`:
   unknown/ambiguous/self rejected, and a perpetual upstream refused because it
@@ -338,7 +344,18 @@ so the record stays true.
   content — no policy here. `quorum notify test` is the loud path (exit
   1 with the reason, touches neither board nor cursor); doctor's
   `check_notify` is static (`–` absent, `✗` argv[0] not on PATH).
-- `ci.py` — the *only* module that shells out to `gh`, and the second fail-soft
+- `forge.py` — the *only* module that shells out to a forge CLI (`gh` today),
+  and the one place two opposite failure contracts meet: `run_json` (soft,
+  behind `ci.pr_state`) and `auth_status` (soft, `True`/`False`/`None` for
+  doctor) versus `issue_view` (**loud** — `task add --issue` runs in front of
+  a person, so no gh / no auth / unknown issue / timeout / no url each raise
+  `ForgeError` naming the fix, and `issue_ref` rejects a bad reference before
+  spending a subprocess, and a full issue url is handed to the CLI whole so
+  it names its own repository). One `_invoke` for all three, so
+  unattended-invocation details are stated once; `cli_name(home)` is the single seam #51's
+  `gh | glab | none` switch lands on. **No write path** — quorum reads a
+  forge and never labels, comments on or closes anything.
+- `ci.py` — the digest-facing half over `forge.py`, and the second fail-soft
   probe (herdr's mold, not sandbox.py's; both read config through
   `try_load_config`, so an unreadable config.toml disables them):
   `pr_state(home, task)` runs one
@@ -350,7 +367,7 @@ so the record stays true.
   normalized (`normalize_state` → `tasks.PR_STATES`: `open|merged|closed`,
   anything else `unknown`) so a second forge backend fills the same field.
   Only `build_digest`
-  calls it (a `ci:` line per task, `CI-FAILING` on a finished task over red
+  calls `pr_state` (a `ci:` line per task, `CI-FAILING` on a finished task over red
   checks — suppressed explicitly for a merged PR, bounded by
   `manager.CI_MAX_PROBES` since digest build blocks the
   tick), which is what keeps `views.py` a pure file reader. Exactly **one**
@@ -363,10 +380,8 @@ so the record stays true.
   observation"). A second exception must earn all five again.
   What to *do* about red CI lives in `prompts/manager.md` and the shipped
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
-  `timeout_seconds`). The second (and only other) entry point is
-  `auth_status(home) -> bool | None` for `quorum doctor` — same `[ci]`
-  switches, same fail-soft shape, `None` for "no answer" (off, no gh,
-  timeout), so no module outside this one ever grows a `gh` subprocess.
+  `timeout_seconds`), shared with `forge.py` — the same two switches gate
+  issue intake.
 - `doctor.py` — `quorum doctor`: the one place that looks at everything that
   fails soft (config, `[harness.*]` binaries/templates, git, projects, gh
   auth, herdr, nono, prompt staleness, supervisor lock + version, orphaned
@@ -382,7 +397,7 @@ so the record stays true.
   gets its own session (`start_new_session=True`, so a timeout `killpg`s the
   wrapper's whole tree) and a *scratch* `QUORUM_HOME` (an installed
   integration hook firing mid-probe must never touch the live home).
-  It borrows rather than duplicates: gh through `ci.auth_status`, prompt
+  It borrows rather than duplicates: gh through `forge.auth_status`, prompt
   staleness through `home.classify_prompt`. A `✗` is reserved for something
   actually wrong — an offline gh and a fresh home with no harness yet are
   both `–`, so `quorum init && quorum doctor` exits 0. `check_config` is

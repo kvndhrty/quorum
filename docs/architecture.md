@@ -80,7 +80,10 @@ tasks/<id>/task.json              task spec + reported status + session + runs
                                   priority + depends_on:
                                   full ids this task waits on + pr_state /
                                   pr_state_at: what the forge last said about
-                                  the PR, the one materialized probe result
+                                  the PR, the one materialized probe result +
+                                  issue_url: the forge issue this task was
+                                  queued from (`task add --issue`), written
+                                  once and never re-read from the forge
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -439,10 +442,36 @@ indirect paths read *bytes* and decode UTF-8 themselves instead of going
 through `read_text`, so what lands in `task.json` is byte-for-byte its
 source: the prompt is quoted verbatim into the harness's context, and
 universal-newline translation or a stripped trailing newline would make a
-queued task differ from the issue it was piped from. This is what keeps the
-issue-driven loop out of quorum: `gh issue view N --json title,body | quorum
-task add <project> -` leaves the forge on the user's side of the pipe, with
-`ci.py` still the only module that knows `gh` exists.
+queued task differ from the issue it was piped from. `gh issue view N
+--json title,body | quorum task add <project> -` therefore still works, and
+still leaves the forge on the user's side of the pipe.
+
+**From an issue (`--issue`).** The pipe recipe queues the *text* of an issue
+and nothing else: the task carries no link back, so no view can say `#62`
+and the manager cannot tell a human "the task for #62 is done". `task add
+<project> --issue <number|url>` closes that (#62). It fetches title and
+body through `forge.issue_view`, composes the prompt as
+`<title>\n\n<body>\n\n(<url>)`, and records the url the forge itself
+reported as `issue_url` on `task.json`. A prompt given as well is *appended*
+— the issue is the work, anything typed alongside it is instructions about
+the work.
+
+`issue_url` is written once, at `add`, and never touched again: it says
+where the task came from, not what happened to it, so it is not an
+observation and nothing re-probes it. Four readers share one renderer
+(`tasks.issue_ref`, `#62` from the url): the CLI listing's `issue` column
+(dropped whole on a home that uses none), the TUI and web tables, and the
+digest's `issue=#62` mark on a task line. `quorum task show` prints the full
+url, and the run preamble's `{issue}` slot tells the harness which issue it
+is working from, to reference in its commits and PR — and not to touch the
+issue itself.
+
+Unlike the manager's PR probe, `--issue` **fails loudly**: a person typed a
+flag and is waiting, so no `gh`, no auth, an unknown issue, a timeout or a
+reply without a url is an error naming the fix, and no task is queued. The
+alternative — a task with an empty prompt, launched and spending a run — is
+much worse than an error. Quorum only ever *reads* from a forge: nothing
+labels, comments on or closes an issue, before or after a merge.
 ### Stopping and restarting a run
 
 (User-facing how-to: [guide.md](guide.md#when-a-session-hangs).)
@@ -1055,8 +1084,9 @@ same failure is the runner's stall watchdog, which is opt-in config rather
 than supervision.
 
 **CI observation (`ci:`).** `workdir_git_state` follows work as far as
-"pushed" and stops; `ci.py` — the only module that shells out to `gh` —
-carries it one step further, to whether what was pushed actually works. For
+"pushed" and stops; `ci.py` — the digest-facing half over `forge.py`, the
+one module that shells out to a forge CLI — carries it one step further, to
+whether what was pushed actually works. For
 each digested task with a workdir it runs one `gh pr view --json
 number,url,state,isDraft,mergeable,statusCheckRollup` *inside that
 directory*, so gh resolves the repository from the remote and the PR from
@@ -1092,16 +1122,49 @@ and the manager digest share — which fills in defaults but is never allowed
 to *enable* something a user may have switched off. Those are the only
 knobs, and none of them changes what anything *does* about the result.
 
-The module has exactly one other entry point, and it exists to keep the
-"only module that shells out to `gh`" rule true rather than convenient:
-`auth_status(home)` answers `True` / `False` / `None` for `quorum doctor`'s
-gh line, under the same `[ci]` switches and the same fail-soft shape, so the
-diagnostic never has to grow a gh subprocess of its own.
-
 Which is the point: like `possible-loop`, this is an observation, not a
 rail. Python never nudges, relaunches, or blocks on red CI. `prompts/manager.md`
 says how to read the line, and the shipped `prompts/babysitter.md` (below)
 is a whole reactive policy written as prompt text.
+
+#### The forge seam (`forge.py`)
+
+One rule, unchanged since the probe landed: **exactly one module shells out
+to a forge CLI.** It used to be `ci.py`, which was honest while every call
+was about a pull request. Issue intake (#62) made that a lie in the other
+direction — `task add --issue` is not CI observation — so the subprocess
+moved to `forge.py` and `ci.py` kept the digest half. There are three entry
+points and two contracts:
+
+- `run_json(home, workdir, *args)` — the **soft** call behind
+  `ci.pr_state`: any failure is `None`, because a digest must build.
+- `auth_status(home)` — `True` / `False` / `None` for `quorum doctor`'s gh
+  line, soft in the same way, so the diagnostic never grows a gh subprocess
+  of its own (`None` is "no answer", not "broken").
+- `issue_view(home, ref, workdir)` — the **loud** call behind `task add
+  --issue`: it raises `ForgeError` with the fix in the message. Its `ref`
+  parsing (`62`, `#62`, or a full issue url) is pure and happens *before*
+  the subprocess, so a typo costs nothing and a pull-request url is refused
+  rather than fetched as an issue. A url is handed to the CLI whole rather
+  than reduced to its number: it may name an issue in a different repository
+  than the project's, and only the url says which.
+
+Both contracts share `_invoke`, the single `subprocess.run` of the whole
+codebase for a forge, so the unattended-invocation details (`GH_PAGER=cat`,
+no prompts, no colour, stdin closed, `[ci].timeout_seconds`) are stated
+once; the soft half degrades every exception it raises to `None`, and the
+loud half tells a timeout apart from a call that never started, because
+those have different fixes. Config is read through `try_load_config` for both, so an unreadable
+config.toml means *off* — the soft half goes quiet and the loud half says
+so. Provider selection is `cli_name(home)`, today a constant: that one
+function is where #51's `[ci].provider = gh | glab | none` switch lands, and
+because every subprocess asks it, a second backend cannot re-introduce a
+`gh` call somewhere else.
+
+There is no write path. Not "not yet" — reading an issue to make a task out
+of it does not imply permission to comment on, label or close it, and a
+supervisor that edits a forge behind a human's back is exactly the kind of
+privileged infrastructure quorum refuses.
 
 #### The merged observation
 
@@ -1560,7 +1623,7 @@ Three rails, and they are the whole design:
 
 Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
-`ci.auth_status` (the module that owns every gh subprocess), prompt
+`forge.auth_status` (the module that owns every forge-CLI subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
 seeds by), sandbox support through `sandbox.availability()`. The
 `[notify]` line is static (argv[0] on PATH, `{text}` in the template);

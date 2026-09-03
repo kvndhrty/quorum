@@ -116,11 +116,13 @@ class HerdrConfig(BaseModel):
 
 
 class CIConfig(BaseModel):
-    """Optional [ci] table for the fail-soft `gh` PR/checks probe (ci.py).
+    """Optional [ci] table for every forge-CLI call (forge.py): the fail-soft
+    PR/checks probe behind `ci.pr_state`, and `task add --issue`.
 
     Absent config is fine: the probe auto-detects `gh` and silently does
     nothing without it. Set `enabled = false` to stop the manager's digest
-    from making one network call per digested task per tick."""
+    from making one network call per digested task per tick — issue intake
+    then says so rather than going quiet, since someone typed the flag."""
 
     enabled: bool = True
     timeout_seconds: float = 10.0

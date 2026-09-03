@@ -38,6 +38,7 @@ status.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -102,6 +103,14 @@ class Task(BaseModel):
     status: str = "queued"
     session: str | None = None
     pr_url: str | None = None
+    # The forge issue this task was queued from (`task add --issue`), as the
+    # full url the forge itself reported. Set once at `add` and never
+    # touched again: it says where the work came from, not what happened to
+    # it — quorum never writes back to the forge, so an issue that was
+    # closed meanwhile still reads as the origin of the task. None for a
+    # task queued from a prompt. `issue_ref` renders the short `#62` form
+    # every view and the digest show.
+    issue_url: str | None = None
     use_worktree: bool = True
     workdir: str | None = None  # resolved on first run
     # True: this task *is* a live interactive session the user adopted into
@@ -241,6 +250,7 @@ class TaskStore:
         session: str | None = None,
         attached: bool = False,
         status: str = "queued",
+        issue_url: str | None = None,
         depends_on: list[str] | None = None,
         perpetual: bool = False,
         priority: int = 0,
@@ -258,6 +268,7 @@ class TaskStore:
             session=session,
             attached=attached,
             status=status,
+            issue_url=issue_url,
             depends_on=list(depends_on or []),
             perpetual=perpetual,
             priority=priority,
@@ -372,6 +383,22 @@ def short_handle(task_id: str) -> str:
     """The short id of a task id, without needing the record — dependencies
     may name a task whose file is gone."""
     return task_id[-6:].lower()
+
+
+def issue_ref(issue_url: str | None) -> str:
+    """`#62` for an issue url, `""` when there is none.
+
+    The one renderer of the short form, shared by the CLI listing, `task
+    show`, the TUI, the web dashboard and the manager digest — the url on
+    the record is the truth, and every surface abbreviates it the same way.
+    An url whose tail is not a number renders whole rather than being
+    guessed at.
+    """
+    url = (issue_url or "").strip()
+    if not url:
+        return ""
+    m = re.search(r"/issues/(\d+)/?$", url)
+    return f"#{m.group(1)}" if m else url
 
 
 def resolve_dependencies(

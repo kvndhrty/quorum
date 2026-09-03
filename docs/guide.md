@@ -274,18 +274,39 @@ quorum up                      # the manager launches queued tasks
 ```
 
 A prompt does not have to survive shell quoting. `-` reads it from stdin and
-`--prompt-file` reads it from a file, both verbatim — so queuing a GitHub
-issue is a one-liner, and quorum never has to learn about `gh`:
+`--prompt-file` reads it from a file, both verbatim:
 
 ```bash
-gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' \
-  | quorum task add my-api -
-
 quorum task add my-api --prompt-file ~/notes/migration-plan.md
+cat ~/notes/plan.md | quorum task add my-api -
 ```
 
 Pass the prompt exactly one way — an argument, `-`, or `--prompt-file`; two
 at once is an error, and so is empty input.
+
+**From an issue.** `--issue` takes a number or a full URL, fetches the
+issue's title and body through `gh`, and makes them the prompt:
+
+```bash
+quorum task add my-api --issue 62
+quorum task add my-api --issue https://github.com/you/my-api/issues/62
+quorum task add my-api --issue 62 "start with the failing test in tests/auth"
+```
+
+The issue URL is recorded on the task, so `quorum task list` and both
+dashboards show `#62`, `quorum task show` prints the full link, and the run
+preamble tells the harness which issue it is working from so it can
+reference it in the pull request. A prompt given as well (the third line
+above) is appended as extra instructions. A number resolves against the
+project checkout's own remote; a full URL is fetched as written, so it can
+name an issue in a different repository than the one the task runs in.
+
+This needs `gh` on PATH, authenticated, and `[ci].enabled` left on (it is on
+by default) — the same switches the manager's PR probe uses. Unlike that
+probe, `--issue` fails loudly: a missing `gh`, an expired login or an issue
+number that does not exist is an error naming the fix, and nothing is
+queued. Quorum only reads from the forge — it never comments on, labels or
+closes your issues.
 
 You can also drive runs by hand — no supervisor required:
 
@@ -518,10 +539,11 @@ columns are the ones cut with `…` where the window runs out, so the id,
 status, harness, pr and usage columns stay whole on any window wide enough
 for the report to absorb the shortfall (about 60 columns). Squeeze it
 narrower and the fixed columns are clipped too — the id last of all, since
-it is the handle you retype. A pull request shows as `#53` (the
-URL itself, and the whole report, are in `task show`). Piped or redirected,
-the same tables come out plain and at full width, so `quorum task list |
-grep <id>` works:
+it is the handle you retype. A pull request shows as `#53`, and the issue a
+task was queued from as `#62` (the URLs themselves, and the whole report,
+are in `task show`; columns nothing uses are dropped entirely). Piped or
+redirected, the same tables come out plain and at full width, so `quorum
+task list | grep <id>` works:
 
 ```
 $ quorum status

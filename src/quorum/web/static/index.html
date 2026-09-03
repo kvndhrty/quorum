@@ -224,6 +224,10 @@ async function refresh() {
       + (t.pr_state === "closed" ? ` <span class="muted" title="pull request closed unmerged (observed ${esc(t.pr_state_at || "")})">⊘</span>` : "")
       + waiting + depFailed + depMissing;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
+    // The issue the task was queued from (task add --issue), short form and
+    // linked — quorum only ever read it, so this is just a pointer back.
+    const issue = t.issue_url
+      ? `<a href="${esc(t.issue_url)}" target="_blank" title="queued from this issue">${esc(t.issue_ref || "issue")}</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over
     // the configured budget — a mark, never a block. "GATED" is the sharper
     // case: the *last* run went over, so `quorum task run` refuses the next
@@ -240,6 +244,7 @@ async function refresh() {
       <td><b>${esc(t.project)}</b><br><span class="muted">${esc((t.last_report || t.prompt).slice(0, 90))}</span></td>
       <td class="${cls}">${status}</td>
       <td class="muted">${esc(t.harness)}${spent}</td>
+      <td>${issue}</td>
       <td>${pr}</td></tr>`;
   }).join("") || `<tr><td class="muted">no tasks — quorum task add &lt;project&gt; "&lt;prompt&gt;"</td></tr>`);
 

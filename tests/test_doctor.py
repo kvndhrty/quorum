@@ -288,16 +288,16 @@ def test_gh_check_flags_an_unauthenticated_gh(home: Path, bin_without_gh: Path, 
     assert "gh auth login" in check.fix
 
 
-def test_gh_check_calls_gh_only_through_the_ci_module(home: Path, monkeypatch):
-    """ci.py is the one module that shells out to gh; doctor asks it, so the
-    probe's own [ci] settings decide how the question is put."""
+def test_gh_check_calls_gh_only_through_the_forge_module(home: Path, monkeypatch):
+    """forge.py is the one module that shells out to a forge CLI; doctor asks
+    it, so the probe's own [ci] settings decide how the question is put."""
     calls: list[Path] = []
 
     def fake_auth_status(target: Path) -> bool:
         calls.append(Path(target))
         return True
 
-    monkeypatch.setattr("quorum.ci.auth_status", fake_auth_status)
+    monkeypatch.setattr("quorum.forge.auth_status", fake_auth_status)
     monkeypatch.setattr(shutil, "which", lambda exe: f"/usr/bin/{exe}")
     assert doctor.check_gh(home, Config()).status == OK
     assert calls == [home]

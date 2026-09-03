@@ -575,6 +575,10 @@ def build_digest(
             # nothing else on the line says otherwise.
             + (f" priority={t.priority}" if t.priority else "")
             + (" held=true" if t.held else "")
+            # Where the work came from, when it came from a forge issue
+            # (`task add --issue`): the short form, so you can tell the user
+            # "the task for #62 is done". `quorum task show` has the url.
+            + (f" issue={ref}" if (ref := tasks.issue_ref(t.issue_url)) else "")
             + _restart_marks(t)
             + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
@@ -693,6 +697,7 @@ def build_digest(
         for t in recent_terminal:
             line = (
                 f"- [{t.status}] {t.short_id} project={t.project}"
+                + (f" issue={ref}" if (ref := tasks.issue_ref(t.issue_url)) else "")
                 + (f" pr={t.pr_url}" if t.pr_url else "")
                 # What the forge last said, off task.json rather than off a
                 # probe: a merged task is not re-probed, so this is where
