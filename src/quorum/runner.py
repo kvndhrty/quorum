@@ -474,7 +474,28 @@ def issue_note(task: Task) -> str:
     )
 
 
-def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -> str:
+def project_block(home: Path, task: Task) -> str:
+    """The preamble's `{project}` block for `task`'s project — "" when there
+    is nothing to say (or the project is gone from the registry).
+
+    The two sources are the project's registry `notes` (already merged with
+    its `.quorum.toml` marker) and `.quorum/task-preamble.local.md` inside
+    the project directory. Both are reads: the block comes from the
+    *project* directory, not the task's worktree, because that is the one
+    copy the user maintains — a worktree only ever has whatever the task
+    branch happens to hold.
+    """
+    project = ProjectRegistry(home).get(task.project)
+    if project is None:
+        return ""
+    return prompts.project_block(project.dir, project.notes)
+
+
+def compose_prompt(
+    home: Path, task: Task, workdir: Path, guidance: list[str], project: str | None = None
+) -> str:
+    # `project` is the {project} block, passed in when the caller had to read
+    # it earlier than this (see `run`); None means read it here.
     # A perpetual task gets an extra block in place of the preamble's
     # {perpetual} placeholder: it never reaches "done", so its delivery step
     # is commit + push every cycle (prompts/task-perpetual.md, user-editable
@@ -492,6 +513,7 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
         project_path=str(workdir),
         perpetual=perpetual,
         issue=issue,
+        project=project_block(home, task) if project is None else project,
     )
     # An edited preamble from before the placeholder existed never
     # substitutes it (format_map preserves unknown keys but cannot invent
@@ -784,6 +806,13 @@ def run_task(
         raise RunnerError(f"task {task.short_id} already has a live run ({e})") from None
     try:
         workdir = prepare_workdir(home, task, store)
+        # The preamble's {project} block comes from the *project* directory
+        # (its .quorum.toml marker and .quorum/task-preamble.local.md), which
+        # the task sandbox does not grant — it grants the worktree and the
+        # project's .git, nothing else. Read it before sandboxing: afterwards
+        # the read fails soft and the block would silently vanish under
+        # [sandbox].use_nono.
+        project = project_block(home, task)
         if config.sandbox.use_nono:
             # Irreversibly sandbox this runner (and the harness it spawns).
             # Fails closed: no nono-py, no run.
@@ -791,7 +820,7 @@ def run_task(
 
             apply_task_sandbox(home, config, task, workdir)
         guidance = claim_guidance(home, task.id)
-        prompt = compose_prompt(home, task, workdir, guidance)
+        prompt = compose_prompt(home, task, workdir, guidance, project=project)
         if fresh_session and task.session:
             # Forget the damaged session before it can be resumed. Durable,
             # not just local: the *next* run must not resume it either, and

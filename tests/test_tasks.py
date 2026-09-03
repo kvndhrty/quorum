@@ -1404,3 +1404,100 @@ def test_priority_defaults_to_zero_and_orders_nothing(home: Path):
     # the listing stays chronological whatever the priorities say
     assert [t.id for t in store.list()] == [low.id, plain.id, high.id]
     assert store.update(high.id, priority=1).priority == 1
+
+
+# -- the per-project preamble block (#63) ------------------------------------
+
+
+def test_a_task_run_picks_up_its_project_block(home: Path, project: str, tmp_path: Path):
+    """A home with several projects cannot put per-repo conventions in the
+    home-wide overlay. The preamble's {project} slot takes them from the
+    registry notes and from the project's own .quorum file, in that order."""
+    harness_config(home)
+    ProjectRegistry(home).update(project, notes="Base every branch on main.")
+    repo = tmp_path / "proj"
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_text(
+        "In this repo, run `just check` before pushing.\n", encoding="utf-8"
+    )
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text
+    assert "In this repo, run `just check` before pushing." in text
+    assert text.index("Base every branch on main.") < text.index("`just check`")
+    assert "git push -u origin HEAD" in text  # the packaged preamble, unforked
+    assert "PROMPT| {project}" not in text
+
+
+def test_a_project_with_nothing_to_say_leaves_no_hole(home: Path, project: str):
+    harness_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    # the slot's own line goes with the empty block (the header comment's
+    # escaped {{project}} documentation is a different line, and stays)
+    assert "PROMPT| {project}" not in text
+    assert "Work autonomously" in text
+
+
+def test_an_unreadable_project_block_costs_the_block_not_the_run(
+    home: Path, project: str, tmp_path: Path
+):
+    """The project file is user-owned and read on every single run, so it
+    fails soft exactly like the overlay: the block is dropped, the run goes
+    ahead, and `quorum prompt list` is where the bad file is reported."""
+    harness_config(home)
+    ProjectRegistry(home).update(project, notes="Base every branch on main.")
+    repo = tmp_path / "proj"
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_bytes(b"run \xff\xfe just-check\n")
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text  # the readable source survives
+    assert "just-check" not in text
+    assert store.get(task.id).runs[-1].exit_code == 0
+
+
+def test_the_project_block_is_read_before_the_sandbox_shuts_the_project_dir(
+    home: Path, project: str, tmp_path: Path, monkeypatch
+):
+    """`build_task_capabilities` grants the worktree and the project's `.git`
+    — never the project directory, where both halves of the block live. Read
+    after `apply_task_sandbox`, the fail-soft read returns "" and the whole
+    feature silently does nothing under [sandbox].use_nono."""
+    harness_config(home)
+    repo = tmp_path / "proj"
+    (repo / ".quorum.toml").write_text('notes = "Base every branch on main."\n', encoding="utf-8")
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_text(
+        "In this repo, run `just check` before pushing.\n", encoding="utf-8"
+    )
+
+    # Stand in for the sandbox: from the moment it is applied the project
+    # directory is out of reach. A real ruleset denies the open; here the
+    # files are simply gone, which the same fail-soft read swallows.
+    def fake_apply(home_, config_, task_, workdir_):
+        (repo / ".quorum.toml").unlink()
+        shutil.rmtree(repo / ".quorum")
+
+    monkeypatch.setattr("quorum.sandbox.apply_task_sandbox", fake_apply)
+    config = load_config(home)
+    config.sandbox.use_nono = True
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, config, task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text  # the .quorum.toml marker's notes
+    assert "`just check`" in text  # .quorum/task-preamble.local.md

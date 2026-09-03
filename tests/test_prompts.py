@@ -149,3 +149,85 @@ def test_render_is_reached_through_every_agent_seam(home: Path, clock):
     write(home, "standup.local.md", "in this home, post to #ops\n")
     ctx = AgentContext(name="standup", home=home, now=clock)
     assert ctx.prompt("standup") == "do the standup\n\nin this home, post to #ops\n"
+
+
+# -- the per-project block (#63) --------------------------------------------
+
+
+def test_project_block_lands_in_the_project_slot(home: Path, tmp_path: Path):
+    write(home, "policy.md", "before\n\n{project}\n\nafter\n")
+    block = prompts.project_block(tmp_path, notes="base on main")
+
+    assert prompts.render(home, "policy", project=block) == (
+        "before\n\nbase on main\n\nafter\n"
+    )
+
+
+def test_project_block_is_notes_then_the_project_file(home: Path, tmp_path: Path):
+    """Two sources, in that order: short metadata stays in the registry,
+    longer conventions live in the repo, and a project may use either."""
+    (tmp_path / ".quorum").mkdir()
+    (tmp_path / ".quorum" / "task-preamble.local.md").write_text(
+        "Run `just check` before pushing.\n", encoding="utf-8"
+    )
+
+    assert prompts.project_block(tmp_path, notes="base on main") == (
+        "base on main\n\nRun `just check` before pushing."
+    )
+    assert prompts.project_block(tmp_path) == "Run `just check` before pushing."
+    assert prompts.project_block(tmp_path / "elsewhere", notes="base on main") == "base on main"
+
+
+@pytest.mark.parametrize("notes", ["", "   \n\n"])
+def test_an_empty_project_block_takes_its_line_with_it(home: Path, tmp_path: Path, notes: str):
+    write(home, "policy.md", "before\n\n{project}\n\nafter\n")
+
+    assert prompts.project_block(tmp_path, notes=notes) == ""
+    # no hole where the slot was, and no literal {project} left behind
+    assert prompts.render(home, "policy", project=notes) == "before\n\nafter\n"
+    assert prompts.render(home, "policy") == "before\n\nafter\n"
+
+
+def test_an_undecodable_project_file_renders_as_no_block(home: Path, tmp_path: Path):
+    """The read is on every task run and the file belongs to whoever owns the
+    repo: one stray byte must cost the block, not the run (`load_local`'s
+    contract, aimed at a project directory)."""
+    write(home, "policy.md", "before\n\n{project}\n\nafter\n")
+    (tmp_path / ".quorum").mkdir()
+    (tmp_path / ".quorum" / "task-preamble.local.md").write_bytes(b"convent\xff\xfeions\n")
+
+    assert prompts.load_project_local(tmp_path, "task-preamble") == ""
+    assert prompts.project_block(tmp_path, notes="base on main") == "base on main"
+    assert prompts.render(home, "policy", project="") == "before\n\nafter\n"
+
+
+def test_a_project_block_needs_a_slot_and_is_never_prepended(home: Path):
+    """Unlike the home overlay: an overlay is policy the home already had, so
+    prepending it is a rescue; a project block is new, and guessing where it
+    goes in a rewritten template would be worse than `quorum prompt list`
+    saying it is not rendered."""
+    write(home, "policy.md", "my own rewritten preamble\n")
+
+    assert prompts.render(home, "policy", project="base on main") == (
+        "my own rewritten preamble\n"
+    )
+    assert not prompts.has_slot("my own rewritten preamble\n", "project")
+
+
+def test_the_packaged_preamble_carries_the_project_slot():
+    text = prompts.packaged("task-preamble")
+    assert text is not None
+    assert prompts.has_slot(text, "project"), "task-preamble.md lost its {project} slot"
+    # the header documents the key as {{project}}; that is not the slot
+    assert "{{project}}" in text
+    # house policy first, then this project's — the home rule frames the repo's
+    assert text.index("\n{local}\n") < text.index("\n{project}\n")
+
+
+def test_an_escaped_project_key_is_not_a_slot(home: Path):
+    write(home, "policy.md", "<!-- {{project}} is the per-project block -->\nbody\n")
+
+    assert not prompts.has_slot(prompts.load(home, "policy"), "project")
+    assert prompts.render(home, "policy", project="base on main") == (
+        "<!-- {project} is the per-project block -->\nbody\n"
+    )

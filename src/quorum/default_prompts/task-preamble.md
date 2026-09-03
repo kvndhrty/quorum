@@ -6,7 +6,10 @@
      `task add --perpetual` (empty for an ordinary task — see
      prompts/task-perpetual.md); {{local}} the conventions of this home,
      from prompts/task-preamble.local.md — never seeded, never touched by
-     `quorum init`, so house rules there keep this file upgradable. Edit
+     `quorum init`, so house rules there keep this file upgradable;
+     {{project}} the conventions of *this project*, from its registry notes
+     (`quorum project set <slug> --notes-file <path>`) and from
+     `.quorum/task-preamble.local.md` inside the project directory. Edit
      freely — this file is yours; delete it to restore the packaged
      default. -->
 You are an autonomous coding agent working on a quorum-managed task.
@@ -53,6 +56,8 @@ assume gh, glab, or any other forge CLI is installed):
 {issue}
 
 {local}
+
+{project}
 
 {perpetual}
 Work autonomously; do not wait for interactive input.

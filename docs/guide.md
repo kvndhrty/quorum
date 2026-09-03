@@ -820,7 +820,22 @@ Re-run `quorum init` after upgrading quorum: a prompt you never edited is
 refreshed to the new packaged default (quorum recognizes a pristine seed by
 hash), and one you did edit is left alone.
 
-There are two ways to change one, and the difference matters:
+There are four layers, and they resolve in this order — each one optional,
+each one added on top of the last:
+
+1. the **packaged default** quorum ships;
+2. the **home copy** `prompts/<name>.md`, which replaces it outright;
+3. the **home overlay** `prompts/<name>.local.md`, merged in at the
+   template's `{local}` slot;
+4. for the task preamble only, the **project block** at its `{project}`
+   slot: the project's registry notes, then
+   `.quorum/task-preamble.local.md` inside the project directory.
+
+The first three are described below; the project block has its own section
+after them.
+
+There are two ways to change a template for the whole home, and the
+difference matters:
 
 - **An overlay — `prompts/<name>.local.md`.** Yours alone: never seeded,
   never read by `quorum init`, never upgraded. Its text is merged into the
@@ -858,6 +873,38 @@ rm ~/.quorum/prompts/manager.md && quorum init  # take the current default back
 
 After that, `quorum init` keeps `manager.md` current forever and your
 `manager.local.md` rides on top of every future version of it.
+
+### Per-project conventions
+
+An overlay applies to the whole home, which is the wrong scope for "base
+branches on `develop`" or "run `just check` before pushing" — true of one
+repo, wrong for the next. The task preamble has a second slot, `{project}`,
+filled per project from two places:
+
+```bash
+quorum project set api --notes "Base branches on develop; run just check."
+quorum project set api --notes-file CONVENTIONS.md    # or from a file ('-' for stdin)
+$EDITOR ~/work/api/.quorum/task-preamble.local.md     # ...or from inside the repo
+```
+
+The registry notes come first, then the project's own
+`.quorum/task-preamble.local.md`, so short metadata can stay in quorum while
+longer conventions live with the code and travel with the repo. Quorum only
+*reads* that file — like the `.quorum.toml` marker, it is yours. Neither
+source is required: with nothing to say, the slot leaves no trace in the
+prompt.
+
+Two things to know. A file quorum cannot read is dropped rather than failing
+the run, exactly like an overlay. And the block needs the `{project}` slot:
+if you rewrote `prompts/task-preamble.md` before this existed, the block has
+nowhere to go. `quorum prompt list` reports both — it lists every project
+that contributes a block, and warns when your preamble has no slot for them:
+
+```
+  task-preamble    seeded, matches the packaged default
+  per-project {project} block in task-preamble:
+    api            notes (registry) + .quorum/task-preamble.local.md
+```
 
 ## Guiding tasks
 
@@ -1536,8 +1583,10 @@ def test_milestone(tmp_path):
   plugins/                          your custom agents
 ```
 
-A `.quorum.toml` marker inside a project directory (written with
-`quorum project add --marker`, or by hand) carries `name`/`deadline`/`tags`/
-`notes` with the repo across machines; it merges over the registry at read
-time and quorum only ever *reads* project directories — task writes happen
-in worktrees.
+Two files in a project directory belong to quorum by convention, and it only
+ever *reads* either one (task writes happen in worktrees). A `.quorum.toml`
+marker (written with `quorum project add --marker`, or by hand) carries
+`name`/`deadline`/`tags`/`notes` with the repo across machines, merging over
+the registry at read time. `.quorum/task-preamble.local.md` carries this
+repo's conventions into every task prompt — see
+[Prompt customization](#prompt-customization).
