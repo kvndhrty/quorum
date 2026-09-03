@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from quorum import doctor, installed_version
+from quorum import doctor, fsio, installed_version
 from quorum import home as home_mod
 from quorum.cli import app
 from quorum.config import (
@@ -408,11 +408,9 @@ def test_prompts_check_flags_an_unedited_older_default(home: Path, monkeypatch):
     quietly running last release's policy."""
     stale = "an older packaged default\n"
     (home / "prompts" / "manager.md").write_text(stale, encoding="utf-8")
-    monkeypatch.setitem(
-        home_mod.SUPERSEDED_PROMPT_HASHES,
-        "manager.md",
-        {hashlib.sha256(stale.encode()).hexdigest()},
-    )
+    record = fsio.read_json(home_mod.seeded_record_path(home))
+    record["manager.md"] = hashlib.sha256(stale.encode()).hexdigest()
+    fsio.atomic_write_json(home_mod.seeded_record_path(home), record)
     check = find(doctor.check_prompts(home), "prompts.manager")
     assert check.status == PROBLEM
     assert "quorum init" in check.fix

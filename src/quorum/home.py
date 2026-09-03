@@ -123,69 +123,35 @@ def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
     return Path.home() / ".quorum"
 
 
-# sha256 of every *previously* shipped version of each default prompt. A
-# prompts/ file whose content hashes into this set is a pristine seed from an
-# older quorum, so `quorum init` upgrades it to the current default; any other
-# content is a user edit and is never touched. When you change a file in
-# default_prompts/, append the hash of the version you are replacing here
-# (`shasum -a 256 src/quorum/default_prompts/<name>` before editing, or
-# `git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256` after).
-SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
-    "task-preamble.md": {
-        "28f1079b09bfad2841dca8ebbeae8131969c81b97a0b6a7611deb4035f2048be",
-        # replaced by the {perpetual} placeholder revision (#12)
-        "ac344c667083649b04166a4801c8646240a67f37a078b90c13db922005079a6d",
-        # replaced by the {local} overlay-slot revision (#37)
-        "f564262f9fa66c42301e211c64e77433e981003f0df138964aa78174898845f0",
-        # the overlay-slot revision, replaced by the rebase-before-push
-        # delivery step (#58)
-        "fa56cbd13104899d52ba4169ed1829c4b4b29ebe2389d3f9e7f3ae390949f677",
-    },
-    "task-perpetual.md": {
-        # the original (#12) block, replaced by the {local} overlay-slot
-        # revision (#37)
-        "5023261d8d55f456570cba3df7c1212de7f7fd4c7fedd11a8c86f77330743934",
-    },
-    "manager.md": {
-        "ac136ce1d1da20740f949c88be16cef2e7fe83c5031b48c7434ebbe784227acb",
-        "04ccc56d28eb382b859d7073616a71dd2af5a6156b5b281e36e8fe8521ea2a55",
-        "5f2838b51db8ac07f830a668cae0d6c4d9afe181d7598d51a7dbd1afe5b89b15",
-        "02e3715e80b0bdb167b1c35bc354ba756efc00774772e1f6e0e9193c93a974f2",
-        # the #19 (usage/budget) revision, replaced by the merge with the
-        # ci-probe revision
-        "e9d9c79d5822a4f34b8237306ab87dc2c9dd4bcb6997f21dd3276e2e3665cca1",
-        # the ci-probe revision, replaced by the perpetual-task + self-cost
-        # revision (#12, #32)
-        "454fb62b2718f5303a7bb6623ed959aa8289d82613b47c2c006125e84960e96e",
-        # replaced by the {local} overlay-slot revision (#37)
-        "8afe70f5f190c23c22d18c5d6b90b8db68da37436d8ed3efba5a948af994116f",
-        # replaced by the notebook revision (#35): note vs remember vs forget
-        "634f2d9516e58f47d560374b26fa14089910d48c3ab1bd073ae81e33b5a3e950",
-        # the notebook revision, replaced by the #31 task-dependency rule
-        "3ea524332199f2330240e647847e2dcf9165ce33985d6e61544bbc731e0455e9",
-        # the task-dependency revision, replaced by the budget-gate rule (#19)
-        "27622474013b1a239267e9e3deacfd488077e952c17e4b5c0b28e1133c743ed2",
-        # the budget-gate revision, replaced by the merged-observation
-        # revision (#57): how to read `state=merged` / `state=closed`
-        "e082bdb1588d389285bca08c991dd5b79da6af4be441a634460a09bec7ed2ef3",
-        # the merged-observation revision, replaced by the self-observation
-        # revision (#59): timing-out runs and a cap hit two runs running
-        "3b060014ec4fac03637df6c9185ea1fc8e3b3ab7065935ad36a8ace2388e3600",
-        # the self-observation revision, replaced by the overlaps= rule (#58)
-        "7f3d25f7faf4d5ced1ddc557c2611b23df15fd35d6b32192e2dde00b05a970a3",
-        # the overlaps= revision, replaced by the #42 hung-session policy (stop,
-        # --fresh-session, STALLED)
-        "54221d7f36b8228bbaa71a44aff59f589f41034c346d95be288a59c63aaa09b3",
-        # the hung-session revision, replaced by the priority/hold rule (#61)
-        "0a20ea04b9e1b0ccc7675b88fa193023b0f6e630c760574dd8d1a974a5a1ee5e",
-        # that rule's first cut, replaced by scoping "never launch a held
-        # task" to the relaunch rules too (#61)
-        "97deff6263bf3a2a927ee0bde9f3f9d15f430ddce67d84c20c7d9be3a32bb973",
-        # the #61 revision on main, replaced by the #81 note that a merged
-        # task is observed once and then read off `pr_state=merged`
-        "fe1789d8c0f1b0c1c20bea6e481e7f3935297344f6e82e7d49bf560dec63edea",
-    },
-}
+# The seed record: prompts/.seeded.json maps each packaged prompt filename to
+# the sha256 of the text `quorum init` last wrote there (or last found
+# identical to the packaged default). A home copy whose hash still equals
+# its record is a pristine seed, so init may replace it with the current
+# default; anything else is a user edit and is never touched. The record is
+# local to the home, so changing a file in default_prompts/ needs no
+# bookkeeping here. Dot-prefixed so `sorted_entries` skips it.
+SEEDED_RECORD = ".seeded.json"
+
+
+def seeded_record_path(home: Path) -> Path:
+    return Path(home) / "prompts" / SEEDED_RECORD
+
+
+def read_seeded_record(home: Path) -> dict[str, str]:
+    """{filename: sha256} of what init last seeded. Fail-soft: a missing,
+    unreadable or malformed record reads as empty, which classifies every
+    differing copy as "edited" — the direction that never overwrites."""
+    try:
+        data = fsio.read_json(seeded_record_path(home))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def scaffold(home: Path) -> tuple[bool, dict[str, str]]:
@@ -221,20 +187,21 @@ def packaged_prompts() -> dict[str, str]:
     return {e.name: e.read_text(encoding="utf-8") for e in entries}
 
 
-def classify_prompt(existing: str | None, current: str, filename: str) -> str:
+def classify_prompt(existing: str | None, current: str, seeded: str | None) -> str:
     """One home prompt copy against the packaged default.
 
     "missing" (nothing seeded), "default" (identical to what ships now),
-    "upgradable" (a pristine seed from an older quorum — recognized by hash,
-    so `quorum init` may safely replace it) or "edited" (anything else: the
-    user's own words, over a default that has since moved on).
+    "upgradable" (still byte-for-byte what init last seeded — `seeded` is
+    that hash from the seed record — so `quorum init` may safely replace it)
+    or "edited" (anything else: the user's own words, over a default that
+    has since moved on; also any differing copy with no record, since a
+    lost record must never turn into an overwrite).
     """
     if existing is None:
         return "missing"
     if existing == current:
         return "default"
-    digest = hashlib.sha256(existing.encode("utf-8")).hexdigest()
-    if digest in SUPERSEDED_PROMPT_HASHES.get(filename, set()):
+    if seeded is not None and _sha256(existing) == seeded:
         return "upgradable"
     return "edited"
 
@@ -243,6 +210,7 @@ def classify_prompts(home: Path) -> dict[str, str]:
     """`classify_prompt` for every packaged default — the read-only view of
     prompt staleness `quorum doctor` reports and `_seed_prompts` acts on."""
     target = Path(home) / "prompts"
+    record = read_seeded_record(home)
     states = {}
     for filename, current in packaged_prompts().items():
         dest = target / filename
@@ -250,33 +218,42 @@ def classify_prompts(home: Path) -> dict[str, str]:
             existing = dest.read_text(encoding="utf-8") if dest.is_file() else None
         except OSError:
             existing = None
-        states[filename] = classify_prompt(existing, current, filename)
+        states[filename] = classify_prompt(existing, current, record.get(filename))
     return states
 
 
 def _seed_prompts(home: Path) -> dict[str, str]:
     """Seed packaged prompt templates into prompts/ and upgrade stale seeds.
 
-    A missing file is seeded. An existing file is replaced only when it is a
-    pristine seed from an older quorum (`classify_prompts` → "upgradable").
-    An edited file is never touched; when the packaged default has moved on
-    it is reported as "edited" so the CLI can tell the user. Returns
+    A missing file is seeded. An existing file is replaced only when it is
+    still the seed init wrote (`classify_prompts` → "upgradable", by the
+    seed record). An edited file is never touched; when the packaged default
+    has moved on it is reported as "edited" so the CLI can tell the user.
+    Every file seeded, upgraded or found identical to the current default
+    is (re)recorded in prompts/.seeded.json — so a home that predates the
+    record picks one up as long as its copies are pristine. Returns
     {filename: "seeded" | "upgraded" | "edited"} covering only files that
     changed or need attention.
     """
     target = home / "prompts"
     outcomes: dict[str, str] = {}
     states = classify_prompts(home)
+    record = read_seeded_record(home)
+    recorded = dict(record)
     for filename, current in packaged_prompts().items():
         state = states.get(filename)
         dest = target / filename
         if state == "missing":
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(current, encoding="utf-8")
+            fsio.atomic_write_text(dest, current)
             outcomes[filename] = "seeded"
         elif state == "upgradable":
             fsio.atomic_write_text(dest, current)
             outcomes[filename] = "upgraded"
         elif state == "edited":
             outcomes[filename] = "edited"
+        if state != "edited":
+            recorded[filename] = _sha256(current)
+    if recorded != record:
+        fsio.atomic_write_json(seeded_record_path(home), recorded)
     return outcomes

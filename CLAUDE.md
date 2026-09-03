@@ -408,9 +408,12 @@ so the record stays true.
 - `prompts.py` — `QUORUM_HOME/prompts/<name>.md` overrides the packaged
   `default_prompts/` (`task-preamble`, `task-perpetual`, `manager`, `babysitter`); deleting a file restores the
   default. `format_map` with a missing-key-preserving dict. Re-running `quorum
-  init` upgrades seeded-but-never-edited copies, recognized by hash — **when you
-  change a file in `default_prompts/`, append the replaced version's sha256 to
-  `home.py::SUPERSEDED_PROMPT_HASHES`** (`git show HEAD:src/quorum/default_prompts/<name> | shasum -a 256`).
+  init` upgrades seeded-but-never-edited copies, recognized by the seed record
+  `prompts/.seeded.json` (`home.read_seeded_record`: {filename: sha256 of what
+  init last wrote or found identical to the default}; written by `_seed_prompts`
+  only, fail-soft — no/malformed record classifies a differing copy as `edited`,
+  never overwrites). Changing a file in `default_prompts/` therefore needs no
+  bookkeeping in `home.py`.
   `prompts/<name>.local.md` is the *overlay* (#37): user-owned, never seeded,
   never touched by `init`, merged by `render` at the template's first unescaped
   `{local}` slot (packaged `manager.md`, `task-preamble.md` and

@@ -500,7 +500,7 @@ def check_prompts(home: Path) -> list[Check]:
 
     Classification is `home.classify_prompts` — a loop over the same
     `home.classify_prompt` that `quorum init` seeds by and `quorum prompt
-    list` displays, hashes and all — so doctor can never disagree with
+    list` displays, seed record and all — so doctor can never disagree with
     either about what "edited" means.
     """
     states = home_mod.classify_prompts(Path(home))
