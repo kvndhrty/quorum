@@ -74,6 +74,9 @@ def create_app(home: Path) -> FastAPI:
             "running": runner_alive(home, task.id),
             "transcript": read_transcript_tail(home, task.id, limit=40),
             "reports": read_reports(home, task.id, limit=20),
+            # The task's life in one list (views.task_history), rendered by
+            # the page as its own block under the transcript.
+            "history": views.task_history(home, task),
         }
 
     @app.post("/api/tasks/{task_id}/nudge")

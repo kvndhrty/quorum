@@ -104,6 +104,8 @@
     <div id="task-detail">
       <div id="task-detail-head" class="muted"></div>
       <pre class="tail" id="task-tail"></pre>
+      <div class="muted" id="task-history-head">history — oldest first</div>
+      <pre class="tail" id="task-history"></pre>
       <form id="nudge-form">
         <input type="text" id="nudge-text" placeholder="guidance for this task…" required>
         <button>Nudge</button>
@@ -336,6 +338,11 @@ async function renderTaskDetail() {
   const reports = (t.reports || []).map(r => `» [${r.status}] ${r.text}`);
   const text = [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
   if ($("task-tail").textContent !== text) $("task-tail").textContent = text;
+  // One line per event, the same `[at] text` shape `quorum task history`
+  // and the TUI print — the rows arrive rendered, so the surfaces agree.
+  const history = (t.history || []).map(h =>
+    `[${(h.at || "").replace("T", " ").replace("Z", "")}] ${h.text}`).join("\n") || "nothing yet";
+  if ($("task-history").textContent !== history) $("task-history").textContent = history;
 }
 
 function openDeadlineEditor(cell, slug, current) {

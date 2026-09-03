@@ -255,3 +255,16 @@ def test_task_rows_expose_priority_and_hold(client: TestClient, home: Path):
     by_id = {r["id"]: r for r in rows}
     assert (by_id[first.id]["priority"], by_id[first.id]["held"]) == (0, False)
     assert (by_id[second.id]["priority"], by_id[second.id]["held"]) == (4, True)
+
+
+def test_task_detail_carries_the_history(client: TestClient, home: Path):
+    """The task page's history block is the same list `quorum task history`
+    prints — rows with `at`, `kind` and the rendered `text`."""
+    task = TaskStore(home).add("proj", "do it", "fake")
+    tasks.nudge(home, task, "steer left", sender="user@web")
+    tasks.report(home, task.id, status="executing", text="working")
+    detail = client.get(f"/api/tasks/{task.id}").json()
+    rows = detail["history"]
+    assert [r["kind"] for r in rows] == ["queued", "guidance", "report"]
+    assert rows[1]["text"] == "guidance from user@web (waiting): steer left"
+    assert all({"at", "kind", "text"} <= set(r) for r in rows)

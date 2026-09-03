@@ -639,6 +639,52 @@ not progress*, so set it well above the longest quiet stretch your harness
 has (a full test suite, a cold build, a long provider turn) — it cannot tell
 thinking from hanging. It is off by default for exactly that reason.
 
+### Watching: the life of a task
+
+A task's life is spread over several files — `task.json` holds its runs
+and the PR observation, `reports.jsonl` what it said, its inbox and the
+message archive the guidance it was sent, the manager's journal what was
+done to it. `task history` reads them all and prints one list, oldest
+first:
+
+```bash
+quorum task history a3f2k9
+```
+
+```
+task a3f2k9  (01M1…A3F2K9)  9 event(s), oldest first
+[2026-09-03 09:00:12] queued on my-api · harness claude · from #62
+[2026-09-03 09:00:40] manager: task.run — a3f2k9 (status then queued)
+[2026-09-03 09:00:41] run 1 started
+[2026-09-03 09:01:05] reported planning: reading the issue and the auth module
+[2026-09-03 09:14:30] guidance from user: use the existing retry helper
+[2026-09-03 09:31:02] reported pr: Add rate limiting · https://github.com/you/my-api/pull/71
+[2026-09-03 09:31:04] reported done: opened #71
+[2026-09-03 09:31:09] run 1 ended · exit 0 · $4.12 · 1.8M tok
+[2026-09-03 11:00:03] pr state observed: merged · https://github.com/you/my-api/pull/71
+```
+
+Every kind of event a task can have is a row: queued (with the issue and
+the tasks it waited on), each run's start and end — exit code, what the
+harness said it cost, whether `task stop` ended it, whether the stall
+watchdog did, whether it was a fresh session, what auto-commit did — every
+report, guidance sent to it and by whom, the PR state the manager's probe
+recorded, everything the manager (or any agent) journaled against it, and
+its archival by `task prune`. `--json` gives the same rows with their raw
+fields (`kind`, `at`, and per kind the exit code, usage, sender, status,
+and so on) for scripts.
+
+Two things to know when reading it. Guidance is stamped when it was
+*sent*: delivery writes no time of its own, so a nudge shows where it was
+queued, and one the task has not consumed yet says `(waiting)` (`(claimed)`
+while a run is injecting it). And the whole list is read from files, so it
+works with the supervisor stopped and still answers for a task you have
+pruned — the pruned task resolves out of `tasks/.archive` and its list ends
+with an `archived` row.
+
+The same list is a tab in the TUI (`t` on a task) and a block on the web
+dashboard's task page.
+
 ## The manager
 
 Supervision in quorum is not a set of thresholds — it's your harness reading
@@ -1108,6 +1154,7 @@ quietly ignored.
   | key | does |
   | --- | --- |
   | `enter` | open the highlighted task's transcript and reports |
+  | `t` | open the highlighted task's history (its life, oldest first); again for the transcript |
   | `esc` | back to the board feed (or cancel what you're typing) |
   | `n` | nudge the highlighted task — guidance into its inbox |
   | `m` | tell the manager — a directive for its next run, no task needed |
@@ -1116,6 +1163,10 @@ quietly ignored.
   | `a` | open the `#attention` list and ack the highlighted escalation |
   | `r` | refresh now |
   | `q` | quit |
+
+  `enter` and `t` are the two tabs of a task's detail — the transcript
+  tail and its history ([the life of a task](#watching-the-life-of-a-task))
+  — and the one you chose sticks as you open other tasks.
 
   `n`, `s` and `c` act on the row you're pointing at, so you never have to
   open a task to act on it; while you're reading one task's transcript they
@@ -1141,8 +1192,10 @@ quietly ignored.
   agent…" form, post to the board, and click a project's deadline to edit or
   clear it — all without leaving the browser. Live escalations get their own
   Attention panel at the top, one **Ack** button each, archiving that
-  message exactly as the CLI and the TUI do. It has no run, cancel or
-  manager directive; those live in the TUI and the CLI.
+  message exactly as the CLI and the TUI do. A task's page shows its
+  transcript tail and, under it, its history — the `task history` list.
+  It has no run, cancel or manager directive; those live in the TUI and
+  the CLI.
 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
@@ -1152,6 +1205,8 @@ quietly ignored.
 - `quorum board read [topic]` — the raw message stream (`--json` for
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
+- `quorum task history <id>` — one task's life, oldest first (`--json`
+  for scripting); see [the life of a task](#watching-the-life-of-a-task).
 - `quorum manager journal` — what the manager did and why.
 - `quorum manager notes` — what it is carrying forward between runs.
 

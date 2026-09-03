@@ -11,20 +11,23 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import fsio, usage
+from . import fsio, prune, usage
 from .config import Config, load_config_or_default, parse_schedule
 from .messages import MessageBus
 from .projects import ProjectRegistry
 from .supervisor import LOCK_TOUCH_SECONDS
 from .tasks import (
     TERMINAL_STATUSES,
+    Task,
     TaskStore,
     attached_state,
     dependency_states,
+    inbox_name,
     issue_ref,
     read_reports,
     runner_alive,
     short_handle,
+    task_dir,
     workdir_git_state,
 )
 
@@ -267,6 +270,309 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 "last_report": last[-1].get("text", "") if last else "",
             }
         )
+    return rows
+
+
+# -- task history ----------------------------------------------------------
+#
+# One chronological list of what happened to a task, read back out of the
+# files that already record it — `task.json` (queued, runs, the PR
+# observation), `reports.jsonl`, the task's inbox and the message archive
+# (guidance), every agent's action journal (what was done to it), and the
+# archive directory (that it was pruned). Nothing here is recorded for the
+# list's sake: if a fact is missing, the fix is to record it where it
+# happens, never to cache it here. See docs/architecture.md ("Task history").
+
+#: how far back into an agent's journal the history looks. Journals are
+#: append-only and unbounded, and a task's actions can be anywhere in one, so
+#: this is a completeness bound, not a tail: well past the digest's own
+#: window, and a history over an older journal says nothing about what fell
+#: outside it — an agent that acted on a task a hundred megabytes ago is a
+#: home nobody has pruned.
+HISTORY_JOURNAL_BYTES = 8 * 1024 * 1024
+
+# Row kinds, in the order the list emits them for one instant — a stable sort
+# on `at` keeps this order among rows stamped the same second, so a task
+# queued and launched inside one second still reads queued → run started.
+_HISTORY_KINDS = (
+    "queued",
+    "action",
+    "guidance",
+    "run.started",
+    "report",
+    "run.ended",
+    "pr_state",
+    "archived",
+)
+
+
+def _human_at(at: str) -> str:
+    return str(at or "").replace("T", " ").rstrip("Z")
+
+
+def history_line(row: dict[str, Any]) -> str:
+    """One history row as the line every surface prints: `[at] text`."""
+    return f"[{_human_at(row.get('at', ''))}] {row.get('text', '')}"
+
+
+def _run_started_text(n: int, fresh: bool, live: bool) -> str:
+    text = f"run {n} started"
+    if fresh:
+        text += " · fresh session"
+    if live:
+        text += " · still running"
+    return text
+
+
+def _run_ended_text(n: int, run: Any) -> str:
+    parts = [f"run {n} ended"]
+    code = run.exit_code
+    if run.stopped:
+        how = "stopped by `task stop`"
+        if isinstance(code, int) and code < 0:
+            try:
+                import signal
+
+                how += f" ({signal.Signals(-code).name})"
+            except ValueError:
+                pass
+        parts.append(how)
+    elif code is None:
+        parts.append("exit —")
+    else:
+        parts.append(f"exit {code}")
+    if run.stalled:
+        parts.append("stalled (no harness output)")
+    spent = usage.describe(run.usage)
+    if spent:
+        parts.append(spent)
+    if run.auto_commit:
+        parts.append(run.auto_commit)
+    return " · ".join(parts)
+
+
+def _journal_rows(home: Path, task: Task) -> list[dict[str, Any]]:
+    """Every agent's journaled actions on this task: entries whose `target` is
+    the task's short id, plus a `task.prune` whose args name it (a prune is
+    journaled once per command, listing the tasks it swept)."""
+    from .actor import journal_path
+
+    paths = [journal_path(home, "manager")]
+    agents_root = home / "state" / "agents"
+    if agents_root.is_dir():
+        for entry in sorted(agents_root.iterdir()):
+            if entry.is_dir() and not fsio.is_tmp(entry.name) and entry.name != "manager":
+                paths.append(journal_path(home, entry.name))
+    rows = []
+    for path in paths:
+        for e in fsio.read_jsonl_tail(path, max_bytes=HISTORY_JOURNAL_BYTES):
+            if not isinstance(e, dict):
+                continue
+            action = str(e.get("action") or "")
+            args = str(e.get("args") or "")
+            if e.get("target") == task.short_id:
+                pass
+            elif action == "task.prune" and task.short_id in _pruned_ids(args):
+                pass
+            else:
+                continue
+            actor = str(e.get("actor") or "?")
+            text = f"{actor}: {action}"
+            if args:
+                text += f" — {args}"
+            then = e.get("target_status")
+            if then:
+                text += f" (status then {then})"
+            rows.append(
+                {
+                    "at": str(e.get("at") or ""),
+                    "kind": "action",
+                    "text": text,
+                    "actor": actor,
+                    "action": action,
+                    "args": args or None,
+                    "target_status": then,
+                    "agent_run": e.get("run") or None,
+                }
+            )
+    return rows
+
+
+def _pruned_ids(args: str) -> set[str]:
+    """The short ids a `task.prune` journal entry lists: `"N task(s): a, b
+    +worktrees"` → {a, b}. Anything not in that shape yields nothing."""
+    if ":" not in args:
+        return set()
+    listing = args.split(":", 1)[1].replace("+worktrees", "")
+    return {part.strip() for part in listing.split(",") if part.strip()}
+
+
+def _guidance_rows(home: Path, task: Task) -> list[dict[str, Any]]:
+    """Guidance sent to the task's inbox, in the three states it can be in on
+    disk: waiting (`new/`), claimed but not yet acked (`cur/`), and consumed
+    (the message archive — what a run acks after injecting it, and also what
+    `task inbox --clear` archives without delivering; the record does not say
+    which). Stamped when it was *sent*: delivery itself writes no time."""
+    bus = MessageBus(home)
+    inbox = inbox_name(task.id)
+    try:
+        since = fsio.parse_iso(task.created_at)
+    except ValueError:
+        since = None
+    found: list[tuple[str, Any]] = []
+    found += [("delivered", m) for m in bus.archived_direct(inbox, since=since)]
+    found += [("claimed", m) for m in bus.inbox_messages(inbox, "cur")]
+    found += [("waiting", m) for m in bus.inbox_messages(inbox, "new")]
+    rows = []
+    for state, m in found:
+        note = str(m.payload.get("text", ""))
+        marker = "" if state == "delivered" else f" ({state})"
+        rows.append(
+            {
+                "at": m.created_at,
+                "kind": "guidance",
+                "text": f"guidance from {m.sender}{marker}: {note}",
+                "from": m.sender,
+                "note": note,
+                "state": state,
+                "id": m.id,
+            }
+        )
+    return rows
+
+
+def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[str, Any]]:
+    """Everything that happened to one task, oldest first.
+
+    A pure reader over what is already on disk; every row carries `at`
+    (ISO-8601 UTC), `kind` (one of `_HISTORY_KINDS`) and `text` (the line
+    every surface prints — `history_line`), plus the raw fields of its kind.
+    `root` is the task's directory, which for a pruned task is under
+    `tasks/.archive/` (the caller resolved it there; see
+    `prune.resolve_archived`) — the one row with no record of its own,
+    `archived`, is stamped from that directory's ctime, which a rename
+    updates.
+
+    Bounded reads throughout (`HISTORY_JOURNAL_BYTES`; the archive from the
+    task's own month on) and fail-soft in the read model's way: a torn line
+    or an unreadable file costs the rows it held, never the list.
+    """
+    home = Path(home)
+    root = Path(root) if root is not None else task_dir(home, task.id)
+    rows: list[dict[str, Any]] = []
+    queued = f"queued on {task.project} · harness {task.harness}"
+    if ref := issue_ref(task.issue_url):
+        queued += f" · from {ref}"
+    if task.depends_on:
+        queued += " · after " + ", ".join(short_handle(d) for d in task.depends_on)
+    if task.attached:
+        queued = f"adopted on {task.project} · harness {task.harness} (a live session)"
+    rows.append(
+        {
+            "at": task.created_at,
+            "kind": "queued",
+            "text": queued,
+            "project": task.project,
+            "harness": task.harness,
+            "issue_url": task.issue_url,
+        }
+    )
+    rows += _journal_rows(home, task)
+    rows += _guidance_rows(home, task)
+    for n, run in enumerate(task.runs, start=1):
+        rows.append(
+            {
+                "at": run.started_at,
+                "kind": "run.started",
+                "text": _run_started_text(n, run.fresh_session, live=False),
+                "run": n,
+                "fresh_session": run.fresh_session,
+                "live": False,
+            }
+        )
+        if run.ended_at:
+            rows.append(
+                {
+                    "at": run.ended_at,
+                    "kind": "run.ended",
+                    "text": _run_ended_text(n, run),
+                    "run": n,
+                    "exit_code": run.exit_code,
+                    "stopped": run.stopped,
+                    "stalled": run.stalled,
+                    "fresh_session": run.fresh_session,
+                    "usage": run.usage,
+                    "usage_text": usage.describe(run.usage),
+                    "auto_commit": run.auto_commit,
+                }
+            )
+    # The run in progress has no record yet — the runner writes one when it
+    # ends — but its lock says when it began, and a live process holds it.
+    if runner_alive(home, task.id):
+        try:
+            started = str(fsio.read_json(root / "runner.lock").get("started_at") or "")
+        except (OSError, ValueError, AttributeError):
+            started = ""
+        if started:
+            n = len(task.runs) + 1
+            rows.append(
+                {
+                    "at": started,
+                    "kind": "run.started",
+                    "text": _run_started_text(n, False, live=True),
+                    "run": n,
+                    "fresh_session": False,
+                    "live": True,
+                }
+            )
+    for r in fsio.read_jsonl(root / "reports.jsonl"):
+        if not isinstance(r, dict):
+            continue
+        status = str(r.get("status") or "")
+        note = str(r.get("text") or "")
+        text = f"reported {status}" + (f": {note}" if note else "")
+        if r.get("pr_url"):
+            text += f" · {r['pr_url']}"
+        rows.append(
+            {
+                "at": str(r.get("at") or ""),
+                "kind": "report",
+                "text": text,
+                "status": status,
+                "note": note,
+                "pr_url": r.get("pr_url"),
+            }
+        )
+    if task.pr_state and task.pr_state_at:
+        text = f"pr state observed: {task.pr_state}"
+        if task.pr_url:
+            text += f" · {task.pr_url}"
+        rows.append(
+            {
+                "at": task.pr_state_at,
+                "kind": "pr_state",
+                "text": text,
+                "state": task.pr_state,
+                "pr_url": task.pr_url,
+            }
+        )
+    archived = prune.archived_task_dir(home, task.id)
+    if archived.is_dir():
+        try:
+            from datetime import UTC, datetime
+
+            at = fsio.iso(datetime.fromtimestamp(archived.stat().st_ctime, tz=UTC))
+        except OSError:
+            at = ""
+        rows.append(
+            {
+                "at": at,
+                "kind": "archived",
+                "text": "archived by `task prune` (moved to tasks/.archive; `mv` restores it)",
+            }
+        )
+    order = {kind: i for i, kind in enumerate(_HISTORY_KINDS)}
+    rows.sort(key=lambda r: (r["at"], order.get(r["kind"], len(order))))
     return rows
 
 

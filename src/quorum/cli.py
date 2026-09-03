@@ -1406,6 +1406,49 @@ def task_show(
     typer.echo(f"more: `quorum task tail {task.short_id}` for the transcript, `--json` for the raw record")
 
 
+@task_app.command("history")
+def task_history(
+    task_id: str,
+    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Everything that happened to a task, oldest first: queued, each run's
+    start and end (exit, cost, stopped, stalled, fresh session), every
+    report, guidance sent to it and by whom, the PR state the manager
+    observed, what the manager (or any agent) did to it, and its archival.
+
+    Read straight off the files — task.json, reports.jsonl, the inbox and
+    the message archive, the agents' journals — so it works with the
+    supervisor stopped, and it still answers for a task `task prune` has
+    moved into tasks/.archive.
+    """
+    from . import views
+    from .prune import archived_task_dir, resolve_archived
+    from .tasks import TaskStore
+
+    target = get_home(home)
+    root = None
+    try:
+        task = TaskStore(target).resolve(task_id)
+    except KeyError:
+        try:
+            task = resolve_archived(target, task_id)
+        except KeyError:
+            raise _fail(f"no task matching {task_id!r} — `quorum task list`") from None
+        except ValueError as e:
+            raise _fail(str(e)) from None
+        root = archived_task_dir(target, task.id)
+    except ValueError as e:
+        raise _fail(str(e)) from None
+    rows = views.task_history(target, task, root=root)
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    typer.echo(f"task {task.short_id}  ({task.id})  {len(rows)} event(s), oldest first")
+    for row in rows:
+        typer.echo(views.history_line(row))
+
+
 @task_app.command("run")
 def task_run(
     task_id: str,

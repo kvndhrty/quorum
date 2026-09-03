@@ -630,3 +630,33 @@ def test_h_says_a_live_run_keeps_going(home: Path):
         assert "live runner keeps going" in message and "task stop" in message
 
     drive(home, script)
+
+
+def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path):
+    """`t` is the detail pane's second tab: the task's life, oldest first,
+    rendered by the same rows `quorum task history` prints. Pressed again it
+    returns to the transcript; the choice sticks when another task is opened."""
+    ids = populate(home)
+    from quorum import tasks
+
+    tasks.report(home, ids[1], status="executing", text="on it")
+
+    async def script(app, pilot):
+        await pilot.press("down", "t")
+        await pilot.pause()
+        assert app.selected_task == ids[1]
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — history")
+        assert any(line.endswith("queued on proj-a · harness fake") for line in app._log_lines)
+        assert any("reported executing: on it" in line for line in app._log_lines)
+        await pilot.press("t")
+        await pilot.pause()
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — transcript")
+        await pilot.press("t", "up", "enter")  # history on, then open another task
+        await pilot.pause()
+        assert app.selected_task == ids[0]
+        assert mode_text(app).startswith(f"task {ids[0][-6:].lower()} — history")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert mode_text(app).startswith("board")
+
+    drive(home, script)
