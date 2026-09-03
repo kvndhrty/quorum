@@ -140,6 +140,8 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the overlay-slot revision, replaced by the rebase-before-push
         # delivery step (#58)
         "fa56cbd13104899d52ba4169ed1829c4b4b29ebe2389d3f9e7f3ae390949f677",
+        # the rebase-before-push revision, replaced by the {project} slot (#63)
+        "1880ad68f597d0a7ff2f59959bc27163f5a6ff564d5b3c36365ccb7b921bba5e",
     },
     "task-perpetual.md": {
         # the original (#12) block, replaced by the {local} overlay-slot

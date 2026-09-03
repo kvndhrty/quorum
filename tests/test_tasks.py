@@ -1307,3 +1307,65 @@ def test_priority_defaults_to_zero_and_orders_nothing(home: Path):
     # the listing stays chronological whatever the priorities say
     assert [t.id for t in store.list()] == [low.id, plain.id, high.id]
     assert store.update(high.id, priority=1).priority == 1
+
+
+# -- the per-project preamble block (#63) ------------------------------------
+
+
+def test_a_task_run_picks_up_its_project_block(home: Path, project: str, tmp_path: Path):
+    """A home with several projects cannot put per-repo conventions in the
+    home-wide overlay. The preamble's {project} slot takes them from the
+    registry notes and from the project's own .quorum file, in that order."""
+    harness_config(home)
+    ProjectRegistry(home).update(project, notes="Base every branch on main.")
+    repo = tmp_path / "proj"
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_text(
+        "In this repo, run `just check` before pushing.\n", encoding="utf-8"
+    )
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text
+    assert "In this repo, run `just check` before pushing." in text
+    assert text.index("Base every branch on main.") < text.index("`just check`")
+    assert "git push -u origin HEAD" in text  # the packaged preamble, unforked
+    assert "PROMPT| {project}" not in text
+
+
+def test_a_project_with_nothing_to_say_leaves_no_hole(home: Path, project: str):
+    harness_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    # the slot's own line goes with the empty block (the header comment's
+    # escaped {{project}} documentation is a different line, and stays)
+    assert "PROMPT| {project}" not in text
+    assert "Work autonomously" in text
+
+
+def test_an_unreadable_project_block_costs_the_block_not_the_run(
+    home: Path, project: str, tmp_path: Path
+):
+    """The project file is user-owned and read on every single run, so it
+    fails soft exactly like the overlay: the block is dropped, the run goes
+    ahead, and `quorum prompt list` is where the bad file is reported."""
+    harness_config(home)
+    ProjectRegistry(home).update(project, notes="Base every branch on main.")
+    repo = tmp_path / "proj"
+    (repo / ".quorum").mkdir()
+    (repo / ".quorum" / "task-preamble.local.md").write_bytes(b"run \xff\xfe just-check\n")
+
+    store = TaskStore(home)
+    task = store.add(project, "fix the docs", "fake")
+    assert run_task(home, load_config(home), task.id) == 0
+
+    text = transcript_text(home, task.id)
+    assert "Base every branch on main." in text  # the readable source survives
+    assert "just-check" not in text
+    assert store.get(task.id).runs[-1].exit_code == 0

@@ -46,6 +46,19 @@ minute it is posted.
   the TUI notifies and stays up, and the CLI archives the path it already
   resolved instead of resolving twice. `--topic` alongside `--all` is refused
   — the `--all` argument is itself the topic. (#56)
+- Per-project prompt conventions (#63): the task preamble gains a
+  `{project}` slot filled from the project's registry `notes` (now editable
+  with `quorum project set <slug> --notes-file <path>`, `-` for stdin) and
+  from `.quorum/task-preamble.local.md` inside the project directory — a
+  read-only, user-owned file, like the `.quorum.toml` marker. Repo
+  conventions ("base on develop", "run just check") no longer have to go
+  into the home-wide overlay, which is wrong for a home with several
+  projects. It follows the `{local}` rules: rendered through
+  `prompts.render`, read fail-soft (an undecodable file costs the block, not
+  the run), and an empty block takes its line with it. It has no prepend
+  fallback — `quorum prompt list` now lists every project that contributes a
+  block, marks one it cannot decode, and warns when a rewritten
+  `task-preamble.md` has no `{project}` slot to render them into.
 - On-demand cleanup, all of it "archive, never delete" (#53):
   - `quorum task prune [--status] [--older-than] [--worktrees] [--dry-run]
     [--force]` moves finished tasks into `tasks/.archive/<id>/`. The

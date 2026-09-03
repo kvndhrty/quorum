@@ -455,6 +455,23 @@ def dependency_note(home: Path, task: Task) -> str | None:
 _PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
 
 
+def project_block(home: Path, task: Task) -> str:
+    """The preamble's `{project}` block for `task`'s project — "" when there
+    is nothing to say (or the project is gone from the registry).
+
+    The two sources are the project's registry `notes` (already merged with
+    its `.quorum.toml` marker) and `.quorum/task-preamble.local.md` inside
+    the project directory. Both are reads: the block comes from the
+    *project* directory, not the task's worktree, because that is the one
+    copy the user maintains — a worktree only ever has whatever the task
+    branch happens to hold.
+    """
+    project = ProjectRegistry(home).get(task.project)
+    if project is None:
+        return ""
+    return prompts.project_block(project.dir, project.notes)
+
+
 def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -> str:
     # A perpetual task gets an extra block in place of the preamble's
     # {perpetual} placeholder: it never reaches "done", so its delivery step
@@ -471,6 +488,7 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
         task_id=task.short_id,
         project_path=str(workdir),
         perpetual=perpetual,
+        project=project_block(home, task),
     )
     # An edited preamble from before the placeholder existed never
     # substitutes it (format_map preserves unknown keys but cannot invent
