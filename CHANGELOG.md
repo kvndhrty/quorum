@@ -201,6 +201,17 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- Handoffs: `quorum task report <id> --status done --handoff <file|->`
+  stores a body for the tasks that depend on this one — what changed,
+  what is not done, what to check first — whole and atomically at
+  `tasks/<id>/handoff.md` (one per task, a later `--handoff` replaces it,
+  an empty one is refused). A dependent's prompt gains a `## Handoff from
+  <id>` section per upstream that left one, cut at 8 KiB per dependency
+  with a note on what was dropped; `task show` prints it in full and adds
+  a `dependents:` line listing the tasks waiting on this one; the digest
+  says only `handoff=true`. The task preamble tells a task with
+  dependents to leave one. Quorum never writes or summarizes a handoff
+  itself. (#92)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the

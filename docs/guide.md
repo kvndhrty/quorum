@@ -348,6 +348,8 @@ quorum task report <id> --status <word> "<note>"     # at every phase change
 quorum task inbox <id> --claim                       # check for guidance
 quorum task report <id> --status pr --pr-url <url> "<title>"
 quorum task report <id> --status done "<summary>"
+# with a handoff, when other tasks depend on this one:
+quorum task report <id> --status done --handoff <file|-> "<summary>"
 quorum task report <id> --status blocked "<what you need>"
 ```
 
@@ -455,6 +457,35 @@ Read the full record of any of them — reports, PR url, branch — with
 `quorum task show <id>` (add `--json` for the raw record) is the rest of the
 channel: reports, branch, runs, spend. That is the whole mechanism — the
 harness has the CLI and `QUORUM_HOME`, so nothing else is needed.
+
+**The handoff.** Status and PR url say whether the upstream finished; they
+do not say what it changed, what it left undone or what to check first. A
+task that has dependents can say so with its final report:
+
+```bash
+quorum task report a3f2k9 --status done --handoff handoff.md "PR #42"
+cat <<'EOF' | quorum task report a3f2k9 --status done --handoff - "PR #42"
+Added a token-bucket limiter in `api/limits.py`, wired into the public
+router only. Not done: the admin endpoints still have no limit, and the
+config knob is hard-coded to 100/min. Check first: the new tests in
+`tests/test_limits.py` mock the clock — if they flake, that is why.
+EOF
+```
+
+The body is stored whole as `tasks/a3f2k9/handoff.md` (written atomically,
+one file per task — a later `--handoff` replaces it, because it describes
+the finished state rather than logging progress; an empty one is refused).
+Every task that waits on `a3f2k9` then finds it in its prompt, under a
+`## Handoff from a3f2k9` heading inside the *Tasks this one depends on*
+block, cut at 8 KiB per dependency with a note saying how much was dropped.
+`quorum task show a3f2k9` prints it in full, and the manager's digest shows
+only `handoff=true` on the finished task's line — the body is for the
+dependent, not the manager.
+
+The task preamble asks for one: a task whose `quorum task show <id>` output
+has a `dependents:` line is told to leave a handoff with its `done` report,
+naming what changed, what is not done and what to look at first. Quorum
+never writes or summarizes one on a task's behalf.
 
 **The review-task recipe.** Queue both at once and let the manager sequence
 them:
@@ -1566,6 +1597,7 @@ def test_milestone(tmp_path):
                                     dependencies (`--after`)
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
+  tasks/<id>/handoff.md             its handoff for dependents (`--handoff`)
   tasks/<id>/runner.lock            pid of a live run
   tasks/.archive/<id>/              pruned tasks (moved here whole, never deleted)
   worktrees/<id>/                   the task's git worktree

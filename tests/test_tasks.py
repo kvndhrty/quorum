@@ -1501,3 +1501,121 @@ def test_the_project_block_is_read_before_the_sandbox_shuts_the_project_dir(
     text = transcript_text(home, task.id)
     assert "Base every branch on main." in text  # the .quorum.toml marker's notes
     assert "`just check`" in text  # .quorum/task-preamble.local.md
+
+
+# -- handoffs (#92) ---------------------------------------------------------
+
+
+def test_report_with_a_handoff_stores_it_whole_and_atomically(home: Path):
+    """The body of `task report --handoff` lands at tasks/<id>/handoff.md,
+    written whole (no tmp file survives), flagged on the report entry."""
+    store = TaskStore(home)
+    t = store.add("proj", "build it", "fake")
+    body = "Changed the parser.\n\nNot done: the CLI flag.\nCheck first: tests/test_parse.py\n"
+    tasks.report(home, t.id, "done", "shipped", handoff=body)
+    assert tasks.read_handoff(home, t.id) == body
+    assert tasks.has_handoff(home, t.id)
+    leftovers = [p.name for p in tasks.task_dir(home, t.id).iterdir() if p.name.startswith(".")]
+    assert leftovers == []  # the atomic write's tmp file was renamed away
+    entries = tasks.read_reports(home, t.id)
+    assert entries[-1]["handoff"] is True and entries[-1]["status"] == "done"
+    assert store.get(t.id).status == "done"
+
+
+def test_a_handoff_is_one_file_per_task_and_the_last_write_wins(home: Path):
+    store = TaskStore(home)
+    t = store.add("proj", "build it", "fake")
+    tasks.report(home, t.id, "blocked", "stuck", handoff="first draft")
+    tasks.report(home, t.id, "done", "unstuck", handoff="the finished state")
+    assert tasks.read_handoff(home, t.id) == "the finished state"
+    # a report without --handoff leaves the stored one alone
+    tasks.report(home, t.id, "done", "re-reported")
+    assert tasks.read_handoff(home, t.id) == "the finished state"
+    assert "handoff" not in tasks.read_reports(home, t.id)[-1]
+
+
+def test_read_handoff_fails_soft(home: Path):
+    """Missing → None (most tasks never write one); undecodable → None
+    (the readers sit on the prompt-composition and digest paths)."""
+    store = TaskStore(home)
+    t = store.add("proj", "x", "fake")
+    assert tasks.read_handoff(home, t.id) is None
+    assert not tasks.has_handoff(home, t.id)
+    tasks.handoff_path(home, t.id).write_bytes(b"\xff\xfe not utf-8")
+    assert tasks.read_handoff(home, t.id) is None
+
+
+def test_a_dependent_gets_the_upstream_handoff_in_its_prompt(
+    home: Path, project: str
+):
+    from quorum.runner import dependency_note
+
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "build the thing", "fake")
+    tasks.report(
+        home, upstream.id, "done", "shipped", pr_url="https://x/pr/7",
+        handoff="Changed: the thing.\nNot done: its docs.\nCheck first: tests/test_thing.py",
+    )
+    silent = store.add(project, "another upstream", "fake", status="done")
+    dependent = store.add(
+        project, "review the PR", "fake", depends_on=[upstream.id, silent.id]
+    )
+
+    note = dependency_note(home, store.get(dependent.id))
+    assert f"- {upstream.short_id}: status=done pr=https://x/pr/7" in note
+    assert "it left a handoff (below)" in note
+    assert f"## Handoff from {upstream.short_id}\n\nChanged: the thing." in note
+    assert "Check first: tests/test_thing.py" in note
+    # the upstream that wrote none gets no section and no mention of one
+    assert f"## Handoff from {silent.short_id}" not in note
+    assert note.count("it left a handoff") == 1
+
+    assert run_task(home, config, dependent.id) == 0
+    text = transcript_text(home, dependent.id)
+    assert f"## Handoff from {upstream.short_id}" in text
+    assert "Not done: its docs." in text
+
+
+def test_a_long_handoff_is_clipped_per_dependency_with_a_pointer_at_task_show(
+    home: Path,
+):
+    from quorum.runner import HANDOFF_MAX_BYTES, clip_handoff, dependency_note
+
+    store = TaskStore(home)
+    # multi-byte characters, so a byte cap that split one would be visible
+    long_body = ("é" * 100 + "\n") * 200  # 200 * 201 bytes, well over the cap
+    chatty = store.add(project="proj", prompt="write a lot", harness="fake")
+    tasks.report(home, chatty.id, "done", "done", handoff=long_body)
+    terse = store.add(project="proj", prompt="write a little", harness="fake")
+    tasks.report(home, terse.id, "done", "done", handoff="one line, kept whole")
+    dependent = store.add("proj", "next", "fake", depends_on=[chatty.id, terse.id])
+
+    note = dependency_note(home, dependent)
+    section = note.split(f"## Handoff from {chatty.short_id}\n\n")[1].split("\n\n## ")[0]
+    kept, _, tail = section.rpartition("\n")
+    assert len(kept.encode("utf-8")) <= HANDOFF_MAX_BYTES
+    assert kept.startswith("é" * 100)  # cut on a character boundary, nothing mangled
+    dropped = len(long_body.encode("utf-8")) - HANDOFF_MAX_BYTES
+    assert tail == (
+        f"[… {dropped} more bytes — `quorum task show {chatty.short_id}` prints the "
+        "whole handoff]"
+    )
+    # the cap is per dependency: the terse upstream's handoff is untouched
+    assert f"## Handoff from {terse.short_id}\n\none line, kept whole" in note
+    # and a body under the cap is returned as is (trailing whitespace aside)
+    assert clip_handoff("short\n", "abc123") == "short"
+    # the stored file is never clipped — only the rendering is
+    assert tasks.read_handoff(home, chatty.id) == long_body
+
+
+def test_the_preamble_tells_a_task_how_to_leave_a_handoff(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "do it", "fake")
+    assert run_task(home, config, task.id) == 0
+    text = transcript_text(home, task.id)
+    assert f"quorum task show {task.short_id}" in text
+    assert "`dependents:` line" in text
+    assert f"quorum task report {task.short_id} --status done --handoff <file|->" in text

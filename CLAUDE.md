@@ -104,7 +104,14 @@ so the record stays true.
   a dependency that still *might* finish blocks: `failed` and `missing` are
   both unsatisfiable upstreams, so both are reported and neither is waited on
   — a task that silently never runs would hide the decision. Not a DAG engine:
-  the manager still decides every launch.
+  the manager still decides every launch. The *handoff* (`task report
+  --handoff <file|->`, `write_handoff`/`read_handoff`, `tasks/<id>/handoff.md`)
+  is what a dependent is told beyond status and pr_url: one file per task,
+  atomic, last write wins, written before the status changes; rendered by
+  `runner.dependency_note` under `HANDOFF_MAX_BYTES` per dependency, in
+  full by `task show` (which also lists `dependents:`), existence-only in
+  the digest. Never written or summarized by Python — the preamble asks a
+  task with dependents to leave one.
   `priority` (`task add --priority N`, `task set-priority`) and `held`
   (`task hold` / `task release`) are the user's two hands on the queue and
   neither is a scheduler: priority is an int the digest renders (only when

@@ -62,6 +62,7 @@ from .tasks import (
     dependency_state,
     inbox_name,
     issue_ref,
+    read_handoff,
     runner_alive,
     runner_lock_path,
     runner_log_path,
@@ -420,19 +421,43 @@ def claim_guidance(home: Path, task_id: str) -> list[str]:
     return notes
 
 
+# How much of one upstream's handoff a dependent's prompt carries. Per
+# dependency rather than shared, following the notebook's rule that every
+# read into a prompt has a budget nothing else spends: a chatty upstream
+# cannot crowd out a terse one. The full text is one `task show` away, and
+# the clip says so.
+HANDOFF_MAX_BYTES = 8 * 1024
+
+
+def clip_handoff(text: str, dep_short_id: str, max_bytes: int = HANDOFF_MAX_BYTES) -> str:
+    """`text` cut to `max_bytes` of UTF-8 on a character boundary, with a
+    line naming what was dropped and where the rest is."""
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text.rstrip()
+    kept = data[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    return (
+        f"{kept}\n[… {len(data) - max_bytes} more bytes — "
+        f"`quorum task show {dep_short_id}` prints the whole handoff]"
+    )
+
+
 def dependency_note(home: Path, task: Task) -> str | None:
     """What this task's dependencies ended up as, or None when it has none.
 
-    The cheapest sufficient answer to "how does a dependent task read its
-    upstream's outcome": the fields are already in task.json, so composing
-    the prompt costs one read per dependency and no new state. Anything
-    deeper — the full record, reports, transcript — is a
+    The cheapest sufficient answer to "may I start": the fields are already
+    in task.json, so composing the prompt costs one read per dependency and
+    no new state. The answer to "what do I build on" is the upstream's
+    *handoff* (`tasks.read_handoff`), appended under `HANDOFF_MAX_BYTES`
+    per dependency when the upstream wrote one. Anything deeper — the full
+    record, reports, transcript, the uncut handoff — is a
     `quorum task show <id>` away, which the note says out loud.
     """
     if not task.depends_on:
         return None
     store = TaskStore(home)
     lines = []
+    handoffs = []
     for dep_id in task.depends_on:
         dep = store.get(dep_id)
         if dep is None:
@@ -444,12 +469,19 @@ def dependency_note(home: Path, task: Task) -> str | None:
         first = dep.prompt.strip().splitlines()[0] if dep.prompt.strip() else ""
         if first:
             line += f"\n  it was asked to: {first[:160]}"
+        handoff = read_handoff(home, dep.id)
+        if handoff and handoff.strip():
+            line += "\n  it left a handoff (below)"
+            handoffs.append(
+                f"## Handoff from {dep.short_id}\n\n{clip_handoff(handoff, dep.short_id)}"
+            )
         lines.append(line)
     return (
         "# Tasks this one depends on\n\n"
         + "\n".join(lines)
-        + "\n\nRead the full record of any of them — reports, PR url, branch — with "
-        "`quorum task show <id>`."
+        + ("\n\n" + "\n\n".join(handoffs) if handoffs else "")
+        + "\n\nRead the full record of any of them — reports, PR url, branch, the whole "
+        "handoff — with `quorum task show <id>`."
     )
 
 
