@@ -116,6 +116,14 @@ def test_cadence_says_when_the_manager_is_disabled(home: Path):
 # -- doctor ----------------------------------------------------------------------
 
 
+def disable_ci(home: Path) -> None:
+    """The machine running the tests (CI included) may have an unauthenticated
+    gh, which is a legitimate ✗ from a check that is not the one under test."""
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[ci]\nenabled = true", "[ci]\nenabled = false"))
+
+
+
 def test_doctor_dial_lines_are_informational_only(home: Path):
     checks = doctor.check_dials(home, Config())
     assert [c.status for c in checks] == [NA] * len(dials.DIALS)
@@ -133,6 +141,7 @@ def test_doctor_dial_lines_show_the_configured_value(home: Path):
 
 
 def test_doctor_command_prints_the_dials_and_stays_green(home: Path):
+    disable_ci(home)
     result = runner.invoke(app, ["doctor", "--home", str(home)])
     assert result.exit_code == 0, result.output
     assert "– dial concurrent launches:" in result.output
@@ -142,6 +151,7 @@ def test_doctor_command_prints_the_dials_and_stays_green(home: Path):
 
 
 def test_doctor_json_carries_every_dial(home: Path):
+    disable_ci(home)
     result = runner.invoke(app, ["doctor", "--json", "--home", str(home)])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
