@@ -225,6 +225,10 @@ home: /Users/you/.quorum
     is running last release's policy
       → run `quorum init`: it upgrades unedited seeds in place
   ✓ supervisor running (pid 40680, since 2026-08-31T23:40:50Z)
+  – dial concurrent launches: house rule in prompts/manager.local.md (not parsed)
+      → dials explained: docs/guide.md#loosening-the-rails-as-trust-is-earned
+  – dial actions per agent run: manager 20 (default)
+  – dial manager cadence: every 5m
 ```
 
 `✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
@@ -248,7 +252,11 @@ seed `quorum init` would upgrade / your own edit over a default that has
 since moved); and the state earlier runs left behind — a supervisor lock
 whose pid is gone or whose heartbeat stopped, an installed version newer
 than the running supervisor's, orphaned `runner.lock`s, inbox messages
-claimed and never acked, agents with a failure streak.
+claimed and never acked, agents with a failure streak. It ends with the
+current value of every trust dial (launch cap, action cap, budget, cadence,
+who launches, decomposes and merges), one `–` line each, so the posture
+described under [the trust dials](#loosening-the-rails-as-trust-is-earned)
+is read from the same command as the home's health; a dial is never a `✗`.
 
 **`--smoke` is the one thing doctor does actively**, and the only one that
 spends tokens: it runs your harness once, in a scratch directory, through
@@ -811,6 +819,100 @@ The same file exists for every agent (`quorum manager remember --agent
 own notebook — and the same self-observation lines above it — wherever its
 template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it.
+
+## Loosening the rails as trust is earned
+
+Quorum's constraints are of two kinds, and the difference matters when a
+better model arrives. Some encode distrust of the *environment*: rate
+limits, money, a laptop with no root and no open ports, a signal that must
+never be dropped silently. Those do not change with model capability, and
+they are listed under "What does not move" below. The rest are dials. Each
+one records how far you currently trust the model, and each should loosen
+as that trust is earned. A dial left at its cautious default forever costs
+throughput for nothing; an invariant loosened by mistake costs the property
+it protected. This table is every dial, where it lives, what an untouched
+home has, and the condition under which moving it is the right call.
+`quorum doctor` prints the current value of each one as a `–` line, so a
+home's trust posture is visible in the same place as its health.
+
+| dial | lives in | default | move it when |
+| --- | --- | --- | --- |
+| concurrent launches | `prompts/manager.local.md` house rule | none | rate-limit headroom, `overlaps=` rare |
+| actions per agent run (`max_actions_per_run`) | `[agents.<name>.settings]` | 20 | `cap.hit` on legitimate work |
+| seconds per agent run (`run_timeout_seconds`) | `[agents.<name>.settings]` | 300 | `TIMEOUT` on runs that progressed |
+| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account; before #43 (not built) |
+| stall watchdog (`run_stall_timeout_seconds`) | `[tasks]` | 0 (off) | a healthy run is silent for longer |
+| manager cadence | `[agents.manager]` `schedule` | `every 5m` (dogfood: `every 1h`) | events carry the facts (#83, not built) |
+| who launches | `prompts/manager.md` | the manager | tasks self-schedule (#83, not built) |
+| who decomposes | a person | a person | a spawn cap exists (#43, not built) |
+| merge gate | a person | a person | never removed; may move later |
+
+Row by row:
+
+- **Concurrent launches.** The packaged manager prompt sets no cap and
+  quorum counts nothing; a cap is a house rule in the manager's overlay
+  (the dogfood home says two). Raise it when the rate limit has headroom
+  and the digest rarely shows `overlaps=` marks.
+- **Actions per agent run.** Raise it when the journal shows `cap.hit` on
+  legitimate work rather than on a repeated intervention. A run that keeps
+  hitting the cap on the same action is the case the cap exists for.
+- **Seconds per agent run.** Raise it when the manager's self-observation
+  line shows `TIMEOUT` on runs that were making progress. A longer run also
+  spends more on a tick that has gone wrong.
+- **Per-run budget.** Set it on a metered account, and before task-spawned
+  tasks (#43, not built) exist. It flags a run and gates the next one; it
+  never stops a run in progress. Raise it as runs come in under it.
+- **Stall watchdog.** This one measures the harness, not trust: it counts
+  silence, not progress. Set it above the longest quiet step a healthy run
+  has (a full test suite, a cold build), and raise it when a healthy run
+  is silent for longer.
+- **Manager cadence.** The scaffold says `every 5m`; the dogfood home runs
+  `every 1h`. Slow it when events carry the facts (wake conditions, #83,
+  not built) and the tick is only a heartbeat. Every tick is one harness
+  run, so cadence is spend.
+- **Who launches.** Today every launch is a manager judgement made from the
+  digest, following `prompts/manager.md`. It moves when tasks can state
+  what they wait for and the supervisor fires them (#83, not built).
+- **Who decomposes.** Today a person queues every task with `task add`. It
+  moves when #43 lands with a spawn cap, and the cap is raised as spawned
+  work merges clean.
+- **Merge gate.** A person merges; quorum has no forge write path. This is
+  never removed. A review agent may later recommend a merge, and performing
+  one stays with a person.
+
+**What does not move.** These are the constraints the dials sit inside.
+They encode the environment, not the model, and a more capable model does
+not change what a laptop, a rate limit or a lost message is.
+
+- **No privileged infrastructure.** One ordinary process hosts the
+  scheduler, task runs are detached child processes, and there is no cron,
+  systemd, root or open port.
+- **All state is plain files** under `QUORUM_HOME`. No database, so `ls`
+  and `cat` remain the debugger and copying the directory remains the
+  migration.
+- **Fail loudly, recover automatically.** Views degrade to reading files.
+  Supervision does not degrade at all: without a working harness the
+  manager's tick raises every time and keeps firing until the service
+  returns. There is no reduced-capability supervisor.
+- **No decisions in Python.** Every launch, nudge, cancel and escalation is
+  the harness reading a digest and typing a command. A threshold in the
+  code is rendered into the digest, never acted on by the code.
+- **Observations are never rails.** `possible-loop`, `BUDGET-EXCEEDED`,
+  `CI-FAILING`, `overlaps=` and `waiting-on=` are data the manager judges.
+  The only rails are rate limits (the action cap, the budget gate) and the
+  substrate refusals that protect a checkout (`runner.lock`, an attached or
+  held task, unfinished dependencies), and none of them second-guesses a
+  decision.
+- **A dropped signal is a bug.** A report, a nudge, a directive or a board
+  message that goes missing is a defect, not acceptable degradation. The
+  notification hook is the one deliberate exception: it loses a message on
+  a crash rather than repeat it every fifteen seconds, and logs that it did.
+
+These two lists are where a change to either is argued: the design record
+([architecture.md](architecture.md)) and the contributor notes (`CLAUDE.md`)
+both point here. To loosen a dial, change the value where the table says it
+lives. To move an invariant, open an issue: that is a design change, and it
+updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 
 ## Prompt customization
 

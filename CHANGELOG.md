@@ -14,6 +14,18 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- The trust dials in one place (#85): a guide section, "Loosening the rails
+  as trust is earned", tables every setting that records how far a home
+  currently trusts its models — the launch cap, `max_actions_per_run`,
+  `run_timeout_seconds`, the per-run budget, the stall watchdog, the
+  manager's cadence, who launches, who decomposes, who merges — with where
+  it lives, its default and the condition for moving it, facing a list of
+  what does not move (the invariants). `dials.py` is the registry behind
+  it: `quorum doctor` ends with each dial's current value as an
+  informational `–` line (`dial.*` in `--json`, never a ✗), and a test
+  fails when a numeric `[tasks]`/`[agents]` option with a default has no
+  row in the table. `docs/architecture.md` and `CLAUDE.md` link to the
+  section as the place a change to either list is argued.
 - Notification hook: a `[notify]` table holds an argv template
   (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
   no shell) that the supervisor runs once for every new message on the

@@ -16,11 +16,14 @@ import time
 from pathlib import Path
 
 from .. import fsio, usage
-from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, actor_env, transcript_path
+from ..actor import (
+    DEFAULT_MAX_ACTIONS_PER_RUN,
+    DEFAULT_RUN_TIMEOUT_SECONDS,
+    actor_env,
+    transcript_path,
+)
 from ..agent import AgentContext
 from ..runner import build_harness_argv, guidance_pump, resolve_harness, stream_transcript
-
-DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
 
 def resolve_agent_harness(ctx: AgentContext):
