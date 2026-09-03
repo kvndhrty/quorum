@@ -201,6 +201,16 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- `quorum usage [--by project|harness|week|agent] [--since 7d] [--json]`:
+  the report that used to be a hand-written script over `task.json` files.
+  Rows of tasks, runs, reruns, cost and tokens (the harness's own figures,
+  summed with `usage.py`'s rules; a task that reported nothing is counted,
+  never estimated, and a harness that reports tokens but no cost gets an
+  empty cost cell), and — where the manager recorded a `pr_state` — the
+  delivery figures: median queue-to-first-run, queue-to-done,
+  done-to-merged and the share merged over the PRs it observed. A Rich
+  table on a terminal, plain text piped; a pure reader over `task.json`,
+  `reports.jsonl` and the agent ledgers, no cache. (#96)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the

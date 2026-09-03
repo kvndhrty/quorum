@@ -85,6 +85,11 @@ def _number(value: Any) -> float | None:
     return value
 
 
+# The same check, for readers outside this module (`stats.py`, the CLI's
+# usage cells) that re-read a figure off disk and must degrade the same way.
+number = _number
+
+
 def _token_source(event: dict) -> dict:
     """The sub-dict of a result event that holds its token counts.
 

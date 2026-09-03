@@ -103,7 +103,9 @@ and quorum records whatever it sees on the run's entry in `task.json`. It
 then shows up wherever tasks do — `$0.42 · 11.0k tok` in the `usage` column
 of `quorum status` and `task list`, broken out by `quorum task show`, summed
 per task in the manager's digest. A harness that reports nothing is fully
-supported: you simply see nothing, never a misleading `$0.00`.
+supported: you simply see nothing, never a misleading `$0.00`. Across tasks — per project, harness or
+week — `quorum usage` totals the same figures
+([below](#what-it-cost-what-it-delivered)).
 
 **Quorum prices nothing.** The `$` figure is the harness CLI's own reported
 cost, copied as-is: claude's `total_cost_usd` on its `result` event, next to
@@ -1154,6 +1156,57 @@ quietly ignored.
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
 - `quorum manager notes` — what it is carrying forward between runs.
+
+### What it cost, what it delivered
+
+`quorum status` shows spend one task or one agent at a time. The questions
+you ask after a week are aggregate — what did this project cost, is one
+harness cheaper than another per merged PR, how long from queue to merge,
+how many tasks needed a second run — and `quorum usage` answers them off
+the same files:
+
+```
+$ quorum usage --by harness --since 7d
+usage by harness, tasks queued since 2026-08-27T09:00:00Z (7d)
+harness       tasks  reported  runs  reruns    cost  tokens  done     merged  queue→run  queue→done  done→merged
+claude            4       3/4     5       1  $11.31   15.8M     4  2/3 (67%)      2h25m       2h50m          35m
+codex             3            3               6.2M     2  1/2 (50%)        40m       3h10m        1d02h
+total             7       6/7     8       1  $11.31   22.0M     6  3/5 (60%)      1h38m       2h52m          40m
+```
+
+- `--by project` (the default), `harness`, `week` (ISO week, by when the
+  task was queued) or `agent` (the manager and every prompt agent, off
+  their ledgers: runs, how many raised or timed out, spend, median run
+  time). `--since 7d` / `36h` / `2w` / `90m` keeps the tasks queued in that
+  window — a task belongs to the moment it was queued, so a window is a
+  set of tasks, never runs sliced mid-task — and for `--by agent` the runs
+  made in it. `--json` gives the rows with every figure unrounded (spans in
+  seconds, with the median, mean and count behind each).
+- **`$` is the harness CLI's own figure**, summed over runs exactly as in
+  `status` (*What runs cost*, under [Setup](#setup)): for a subscription
+  claude session it is the CLI's notional API-rate cost, not a bill, and
+  quorum prices nothing. A harness that reports tokens but no cost — codex
+  — gets a token figure and an empty cost cell; one that reports nothing
+  is still *counted* in `tasks` and `runs`, and the `reported` column
+  (shown only when not every task reported) says how many tasks the cost
+  and token figures actually cover, so `$11.31` over three reporting tasks
+  is never read as the cost of four.
+- The delivery columns come only from what was recorded: `queue→run` is
+  queueing to the first run, `queue→done` queueing to the `done` report,
+  `done→merged` the `done` report to the manager tick that first saw the
+  PR merged ([Merged pull requests](#merged-pull-requests)) — so it is late
+  by up to one tick, never early, and a merge seen before the harness said
+  done reads as zero. Each is a median over the tasks that have the figure.
+  `merged` is `2/3 (67%)`: merged PRs over the PRs the manager *observed*
+  in any state, not over every done task — with no `gh`, `[ci]` off or a
+  supervisor that was never up while the PR was open there is no
+  observation, and no observation is not "not merged". Columns nothing
+  fills are dropped, so a home without a forge shows no delivery columns
+  at all rather than a column of zeros.
+- It is a pure reader — `task.json`, each task's `reports.jsonl` and the
+  agent ledgers — with no cache and no network, so it works with the
+  supervisor stopped and always reflects the files as they are now. An
+  archived task (`task prune`) leaves the figures the moment it is moved.
 
 ## Getting notified
 
