@@ -320,6 +320,49 @@ def prompt_list(home: Path | None = _HOME_OPT) -> None:
                 f"  {entry.name}: no prompt named {stem!r} — this overlay is never rendered",
                 fg="yellow",
             )
+    _print_project_blocks(target)
+
+
+PREAMBLE = "task-preamble"
+
+
+def _print_project_blocks(target: Path) -> None:
+    """The fourth prompt layer: what each project puts in the preamble's
+    `{project}` slot (its registry notes, its own .quorum file, or both).
+
+    Only projects that actually contribute a block are listed — the point is
+    to make per-project prompt text findable, not to re-list the registry.
+    """
+    from .projects import ProjectRegistry
+
+    rows: list[tuple[str, str]] = []
+    for project in ProjectRegistry(target).list():
+        sources = []
+        if project.notes.strip():
+            sources.append("notes (registry)")
+        block = prompts_mod.project_local_path(project.dir, PREAMBLE)
+        if block.is_file():
+            shown = f"{prompts_mod.PROJECT_DIR_NAME}/{block.name}"
+            # render() ignores a block it cannot decode, exactly as it does
+            # an overlay; silently dead policy is the failure that hurts.
+            unreadable = _read_prompt_file(block) is None
+            sources.append(f"? {shown} unreadable — ignored when rendering" if unreadable else shown)
+        if sources:
+            rows.append((project.slug, " + ".join(sources)))
+    if not rows:
+        return
+    typer.echo(f"  per-project {{project}} block in {PREAMBLE}:")
+    for slug, sources in rows:
+        typer.echo(f"    {slug:<14} {sources}")
+    try:
+        template = prompts_mod.load(target, PREAMBLE)
+    except (KeyError, OSError, UnicodeDecodeError):
+        return  # already reported above as missing or unreadable
+    if not prompts_mod.has_slot(template, "project"):
+        typer.secho(
+            f"    prompts/{PREAMBLE}.md has no {{project}} slot — these blocks are never rendered",
+            fg="yellow",
+        )
 
 
 @prompt_app.command("diff")
@@ -2000,21 +2043,61 @@ def project_list(
     _print_table(_project_table(rows))
 
 
+def _notes_text(source: Path) -> str:
+    """`--notes-file`, read the way `_task_prompt` reads a prompt: as bytes
+    decoded here, not through `read_text`/`sys.stdin.read`.
+
+    Notes are prompt text now — they are quoted verbatim into the preamble's
+    {project} block — so what lands in the registry has to be byte-for-byte
+    what was written, instead of whatever the locale encoding and universal
+    newlines make of it."""
+    if str(source) == "-":
+        # Nothing is piped in: say so, or the blocking read looks like a hang.
+        if _stdin_is_tty():
+            typer.echo("reading the notes from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
+        return _stdin_prompt()
+    try:
+        return source.read_bytes().decode("utf-8")
+    except OSError as e:
+        raise _fail(f"cannot read {source}: {e}") from None
+    except UnicodeDecodeError:
+        raise _fail(f"cannot read {source}: it is not valid UTF-8") from None
+
+
 @project_app.command("set")
 def project_set(
     slug: str,
     deadline: str | None = typer.Option(None, "--deadline", help="ISO date; an empty string clears it."),
     notes: str | None = typer.Option(None, "--notes"),
+    notes_file: Path | None = typer.Option(
+        None,
+        "--notes-file",
+        help="Read the notes from a file ('-' for stdin); they fill the preamble's {project} block.",
+    ),
     name: str | None = typer.Option(None, "--name"),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Update a project's metadata in the registry."""
+    """Update a project's metadata in the registry.
+
+    Notes are not just a label: they fill the `{project}` block of the task
+    preamble, so every task on this project starts with them. That is why
+    they can come from a file — `--notes-file conventions.md`.
+    """
     from .projects import ProjectRegistry
 
+    if notes_file is not None and notes is not None:
+        raise _fail("pass --notes or --notes-file, not both")
     target = get_home(home)
-    _actor_guard(target, "project.set", target=slug)
     registry = ProjectRegistry(target)
+    if notes_file is not None:
+        # Read last, after everything that can be checked without it: piped
+        # notes are gone the moment stdin is drained, so a typo in the slug
+        # must not eat them (`task add` reads its prompt the same way round).
+        if registry.get(slug) is None:
+            raise _fail(f"no project {slug!r}")
+        notes = _notes_text(notes_file)
+    _actor_guard(target, "project.set", target=slug)
     try:
         project = registry.update(
             slug,

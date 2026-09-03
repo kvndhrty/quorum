@@ -173,6 +173,51 @@ not a replacement. `quorum prompt list` and `quorum prompt diff <name>`
 (home copy vs packaged default) make the state of both levers visible, and
 `init`'s `edited` line points at them.
 
+The overlay is home-wide, which is the wrong scope for a home holding
+several projects: "base on `develop`, run `just check`" is true of one repo
+and wrong for the next. The **`{project}` slot** is the fourth layer, and
+task-facing only (the manager digest does not change). `prompts.project_block`
+assembles it from two sources, in that order:
+
+1. the project's registry `notes` — `projects/<slug>.json`, already merged
+   with the `.quorum.toml` marker, editable with `quorum project set <slug>`
+   and either `--notes` or `--notes-file` (`-` for stdin, read as bytes and
+   decoded as UTF-8 like a task prompt, and read only after the slug checks
+   out so a typo cannot eat piped text);
+2. `.quorum/<name>.local.md` *inside the project directory*
+   (`.quorum/task-preamble.local.md` in practice) — user-owned, versioned
+   with the repo if the user wants, and **read only**, like every other
+   project-dir read. It is read from the project directory rather than the
+   task's worktree because that is the copy the user maintains; a worktree
+   holds whatever the task branch happens to have.
+
+Both reads are fail-soft, for `load_local`'s reason and more so: this one is
+on every task run and the file belongs to whoever owns the repo. An
+unreadable block is no block; the run goes ahead.
+
+Both are also *project-directory* reads, so the runner takes them before it
+applies the task sandbox: `build_task_capabilities` grants the worktree and
+the project's `.git`, never the project directory itself, and a read taken
+afterwards would fail soft into no block at all — the feature would silently
+do nothing under `[sandbox].use_nono`. `compose_prompt` takes the block as
+an argument for that reason.
+
+`{project}` follows the `{local}` rules with one deliberate difference:
+same empty-slot removal (nothing to say leaves no hole), but **no prepend
+fallback**. An overlay is policy the home already had, so rescuing it into a
+slotless template is right; a project block is new, and there is no
+defensible place to put it in a template the user rewrote. `quorum prompt
+list` says so instead — it lists every project that contributes a block,
+marks one it cannot decode `?`, and warns when the home's `task-preamble.md`
+has no `{project}` slot to render them into.
+
+So the full order for the task preamble is: packaged default →
+`prompts/task-preamble.md` (home copy, wins outright) →
+`prompts/task-preamble.local.md` (home overlay, at `{local}`) →
+project notes + `<project>/.quorum/task-preamble.local.md` (at `{project}`).
+No new state file: the notes were already in the registry, and the project
+file is the user's.
+
 ## Tasks and the runner
 
 The unit of control for a *generic* harness is the **run**: every CLI
@@ -1408,6 +1453,10 @@ project directory merges over the registry record at read time
 synced repo. Quorum only ever *reads* project directories — the one scoped
 exception is task execution, which writes to the task's own worktree (and,
 via git's shared object store, the project's `.git`).
+
+Two files in a project directory are quorum's by convention, both read-only:
+the `.quorum.toml` marker above, and `.quorum/task-preamble.local.md`, which
+fills the task preamble's `{project}` slot (see [Prompts](#prompts)).
 
 ## LLM layer
 

@@ -424,6 +424,20 @@ so the record stays true.
   policy does not fork the whole template and strand the home on an old default —
   a rewritten `<name>.md` still wins. `quorum prompt list|diff <name>` shows
   home-copy-vs-packaged-default and degrades per file (`?`) over an unreadable one.
+  `{project}` (#63) is the fourth layer and task-facing only: `project_block`
+  assembles the preamble's per-project text from the registry `notes`
+  (`project set --notes-file`) then `<project>/.quorum/task-preamble.local.md`
+  — a **read**, fail-soft for `load_local`'s reason doubled (every run, a
+  file quorum does not own), taken from the *project* dir rather than the
+  worktree because that is the copy the user maintains — and read *before*
+  `apply_task_sandbox`, which grants the worktree and the project's `.git`
+  but never the project dir, so `compose_prompt` takes the block as an
+  argument. Same empty-slot rule
+  as `{local}`, deliberately **no prepend fallback** (a rescued overlay is
+  policy the home already had; a project block is new and has no defensible
+  place in a rewritten template) — `prompt list` names the projects that
+  contribute one and warns when the template has no slot. Full order:
+  packaged default → home copy → home overlay → project slot.
 - `examples/steward.py` — the one shipped example plugin (file organizer with undo),
   loaded by path in `tests/test_example_steward.py` so the docs' worked example stays
   true. Not a builtin; users copy it into `plugins/`.
