@@ -489,8 +489,10 @@ def test_a_merged_task_never_carries_a_red_flag(
     assert "state=merged" in digest and "checks=failing" in digest
     assert "CI-FAILING" not in digest
 
-    # ... while the very same rollup on an open PR still is one.
+    # ... while the very same rollup on an open PR still is one. A second
+    # task, because the first is now recorded merged and is never re-probed.
     install_gh(path_without_gh, monkeypatch, pr=dict(FAILING_PR, mergeable="CONFLICTING"))
+    make_task(home, make_repo(tmp_path, "second"), status="done")
     assert "CI-FAILING" in build_digest(home, TaskStore(home).list(), clock(), directives=[])
 
 
@@ -509,6 +511,72 @@ def test_a_view_never_probes_and_reads_the_recorded_state_back(
     row = next(r for r in views.task_rows(home) if r["id"] == task.id)
     assert row["pr_state"] == "merged" and row["pr_state_at"]
     assert len(log.read_text().splitlines()) == probes  # the view spent no gh call
+
+
+def test_a_live_task_is_probed_but_never_written(
+    home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """`open` is not materialized onto a live task: its task.json is being
+    written by its own detached runner, and `open` — the state a PR sits in
+    for the whole of a task's working life — is rendered by no surface, so
+    taking that race for it buys nothing."""
+    install_gh(path_without_gh, monkeypatch)  # an open PR
+    store = TaskStore(home)
+    task = make_task(home, make_repo(tmp_path), status="executing")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    assert "ci: pr=#42 state=open" in digest  # still observed, and still shown
+    after = store.get(task.id)
+    assert after.pr_state is None and after.pr_state_at is None
+
+
+def test_a_live_task_still_records_a_merge_it_sees(
+    home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The narrowing is about `open`, not about live tasks. A PR can land
+    while its task is still working, and a perpetual task never reaches a
+    terminal status at all — so a merge dropped here would be one the views
+    could badge only if the task happened to finish."""
+    from quorum import views
+
+    install_gh(path_without_gh, monkeypatch, pr=merged_pr())
+    store = TaskStore(home)
+    task = make_task(home, make_repo(tmp_path), status="executing")
+
+    build_digest(home, store.list(), clock(), directives=[])
+    assert store.get(task.id).pr_state == "merged"
+    row = next(r for r in views.task_rows(home) if r["id"] == task.id)
+    assert row["pr_state"] == "merged"  # ✔ without waiting for the task to end
+
+    # ... and it is not re-probed, so its own line has to carry the fact for
+    # the same reason a finished task's does.
+    second = build_digest(home, store.list(), clock(), directives=[])
+    assert f"{task.short_id} project=p" in second and "pr_state=merged" in second
+    assert "ci: " not in second
+
+
+def test_a_merged_task_is_not_probed_again(
+    home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """Merge is final: nothing the forge could say next would change it, so
+    the recorded observation is rendered instead of spending a probe (and a
+    slot of the digest's budget) on every tick for 24h."""
+    log = tmp_path / "gh.log"
+    install_gh(path_without_gh, monkeypatch, pr=merged_pr(), log=log)
+    store = TaskStore(home)
+    task = make_task(home, make_repo(tmp_path), status="done")
+
+    build_digest(home, store.list(), clock(), directives=[])
+    assert store.get(task.id).pr_state == "merged"
+    probes = len(log.read_text().splitlines())
+    assert probes  # it was probed exactly once, to learn that
+
+    second = build_digest(home, store.list(), clock(), directives=[])
+    assert len(log.read_text().splitlines()) == probes  # no second gh call
+    # ... and the fact survives the silence: no `ci:` line, but the task's
+    # own line carries what was observed.
+    assert f"{task.short_id} project=p pr_state=merged" in second
+    assert "ci: " not in second
 
 
 # -- record_pr_state, the single writer --------------------------------------

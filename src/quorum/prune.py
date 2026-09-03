@@ -149,7 +149,10 @@ def refusal(
     )
     if dependents:
         return f"{', '.join(dependents)} still depends on it"
-    if not force:
+    # Only a worktree quorum made is quorum's to judge. A `--no-worktree`
+    # task ran in the project checkout itself, where the dirt is the user's
+    # own and has nothing to do with the task record being archived.
+    if not force and task.use_worktree:
         state = workdir_git_state(task)
         if state is not None:
             stranded = []

@@ -59,8 +59,24 @@ MAX_PER_TICK = 25
 # deliver, and the second would overwrite the first's advance. Non-blocking:
 # a skipped tick is a tick, and the next one is 15 seconds away.
 _drain_lock = threading.Lock()
+# Set by `request_stop` while the supervisor is shutting down. A drain checks
+# it between messages, so `quorum down` waits for at most the delivery in
+# flight instead of the whole batch behind it (MAX_PER_TICK × timeout_seconds
+# in the worst case). Cleared by the next drain that starts.
+_stop = threading.Event()
 
 log = logging.getLogger("quorum.notify")
+
+
+def request_stop() -> None:
+    """Ask an in-flight drain to stop after the message it is delivering.
+
+    What is skipped is not lost: the cursor only advances per delivered
+    message, so the rest are still pending and go out on the next drain —
+    which, since the supervisor catches up at startup, is the next
+    `quorum up`.
+    """
+    _stop.set()
 
 
 # -- the cursor ----------------------------------------------------------------
@@ -173,6 +189,10 @@ def drain(home: Path, cfg: NotifyConfig, bus: MessageBus | None = None) -> int:
     if not _drain_lock.acquire(blocking=False):
         log.debug("notify: a drain is already running — skipping this one")
         return 0
+    # Whoever asked the last drain to stop was talking about that drain: this
+    # one was started deliberately (a fresh `quorum up`, a test) and must not
+    # inherit the request.
+    _stop.clear()
     try:
         return _drain(Path(home), cfg, bus or MessageBus(home))
     except Exception:
@@ -191,6 +211,9 @@ def _drain(home: Path, cfg: NotifyConfig, bus: MessageBus) -> int:
         cursors = {}
     attempted = 0
     for topic in cfg.topics:
+        if _stop.is_set():
+            log.info("notify: stopping — %d delivery(s) attempted, the rest wait for the next drain", attempted)
+            break
         if topic not in cursors:
             # Only the name is wanted here: parsing the backlog to learn it
             # would be a month of escalations read to be discarded.
@@ -202,6 +225,13 @@ def _drain(home: Path, cfg: NotifyConfig, bus: MessageBus) -> int:
             continue
         entries = bus.entries_after_cursor(topic, cursors[topic], limit=MAX_PER_TICK)
         for filename, message in entries:
+            if _stop.is_set():
+                # Between messages, never mid-delivery: the cursor has not
+                # advanced past what is left, so the next drain resumes here.
+                log.info(
+                    "notify: stopping mid-batch on %r — %d delivery(s) attempted", topic, attempted
+                )
+                return attempted
             # Advance *before* delivering, and persist it: a crash — or a
             # failed cursor write — then loses one notification instead of
             # repeating it at every tick forever. At-most-once is the right

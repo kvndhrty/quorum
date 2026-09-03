@@ -901,6 +901,14 @@ def _stdin_prompt() -> str:
         raise _fail("stdin is not valid UTF-8") from None
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is a terminal — False for anything that cannot say."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
     """The task prompt from exactly one of: the positional argument, stdin
     (`-`), or --prompt-file.
@@ -929,6 +937,9 @@ def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
             "or --prompt-file <path>"
         )
     if from_stdin:
+        # Nothing is piped in: say so, or the blocking read looks like a hang.
+        if _stdin_is_tty():
+            typer.echo("reading the prompt from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
         text = _stdin_prompt()
         source = "stdin"
     elif prompt_file is not None:
@@ -981,7 +992,6 @@ def task_add(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, resolve_dependencies, short_handle
 
-    text = _task_prompt(prompt, prompt_file)
     target = get_home(home)
     config = _load_config(target)
     if ProjectRegistry(target).get(project) is None:
@@ -998,6 +1008,10 @@ def task_add(
         depends_on = resolve_dependencies(store, after or [])
     except ValueError as e:
         raise _fail(str(e)) from None
+    # The prompt is read *last*, after everything that can be checked without
+    # consuming it: a piped issue is gone the moment stdin is drained, so a
+    # typo in the slug must not eat it.
+    text = _task_prompt(prompt, prompt_file)
     _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
     task = store.add(
         project=project,

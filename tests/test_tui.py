@@ -248,6 +248,30 @@ def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
     drive(home, script)
 
 
+def test_a_gated_task_says_so_in_the_table(home: Path):
+    """`s` refuses a gated task (above); the table has to say so first, or
+    the reader learns of the gate only from the refusal."""
+    ids = populate(home)
+    (home / "config.toml").write_text("[tasks]\nmax_cost_per_run = 0.10\n")
+    over = {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+            "usage": {"cost_usd": 0.42, "total_tokens": 100, "events": 1}}
+    store = TaskStore(home)
+    store.update(ids[0], runs=[over])
+    # The same overage one run back: over budget once, but the next run is
+    # not gated — "$!" without the word.
+    store.update(ids[1], runs=[over, {**over, "usage": {"cost_usd": 0.01}}])
+
+    def spent(app, row: int) -> str:
+        return str(app.query_one("#tasks", DataTable).get_cell_at(Coordinate(row, 4)))
+
+    async def script(app, pilot):
+        assert "GATED" in spent(app, 0)
+        assert "$!" in spent(app, 1) and "GATED" not in spent(app, 1)
+        assert spent(app, 2) == ""  # nothing reported, nothing to mark
+
+    drive(home, script)
+
+
 def test_cancel_confirms_first_and_only_then_cancels(home: Path):
     ids = populate(home)
 

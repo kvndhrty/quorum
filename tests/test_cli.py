@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from quorum import fsio
 from quorum.cli import app
 
 runner = CliRunner()
@@ -237,6 +238,50 @@ def test_task_add_refuses_empty_input(home: Path, tmp_path: Path, source: str):
     from quorum.tasks import TaskStore
 
     assert TaskStore(home).list() == []
+
+
+def test_task_add_checks_everything_it_can_before_consuming_stdin(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """A piped issue is gone the moment stdin is drained, so nothing that can
+    be checked without it — the slug, the harness, `--after` — may be checked
+    after it."""
+    from quorum import cli
+
+    slug = setup_task_env(home, tmp_path)
+    read: list[str] = []
+    monkeypatch.setattr(cli, "_stdin_prompt", lambda: read.append("drained") or ISSUE_PROMPT)
+
+    for args, expected in (
+        (["ghots", "-", "--harness", "fake"], "no project"),
+        ([slug, "-", "--harness", "nope"], "no [harness.nope]"),
+        ([slug, "-", "--harness", "fake", "--after", "ZZZZZZ"], "ZZZZZZ"),
+    ):
+        r = runner.invoke(app, ["task", "add", *args, "--home", str(home)], input=ISSUE_PROMPT)
+        assert r.exit_code == 1 and expected in r.output
+        assert read == []
+
+    r = runner.invoke(
+        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 0, r.output
+    assert read == ["drained"] and stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_says_it_is_waiting_on_a_typed_prompt(home: Path, tmp_path: Path, monkeypatch):
+    """`-` with nothing piped in blocks on a read that otherwise looks like a
+    hang; a piped one says nothing extra."""
+    from quorum import cli
+
+    slug = setup_task_env(home, tmp_path)
+    args = ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)]
+    assert "ctrl-D" not in runner.invoke(app, args, input=ISSUE_PROMPT).output
+
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    r = runner.invoke(app, args, input=ISSUE_PROMPT)
+    assert r.exit_code == 0, r.output
+    assert "reading the prompt from stdin" in r.output and "ctrl-D" in r.output
 
 
 def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
@@ -495,15 +540,14 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     assert outcomes["task-preamble.md"] == "seeded"
     assert outcomes["task-perpetual.md"] == "seeded"  # the perpetual block (#12)
 
-    # a pristine seed from an older quorum: content whose hash is registered
+    # a pristine seed from an older quorum: the file is still what init
+    # recorded writing, and the packaged default has since moved on
     old_default = "old packaged preamble\n"
-    monkeypatch.setitem(
-        home_mod.SUPERSEDED_PROMPT_HASHES,
-        "task-preamble.md",
-        {hashlib.sha256(old_default.encode()).hexdigest()},
-    )
     preamble = target / "prompts" / "task-preamble.md"
     preamble.write_text(old_default)
+    record = fsio.read_json(home_mod.seeded_record_path(target))
+    record["task-preamble.md"] = hashlib.sha256(old_default.encode()).hexdigest()
+    fsio.atomic_write_json(home_mod.seeded_record_path(target), record)
     # a user-edited prompt: never touched, only reported
     manager = target / "prompts" / "manager.md"
     manager.write_text("my custom manager policy\n")
@@ -674,20 +718,57 @@ def test_shipped_prompts_only_name_real_cli_commands():
     assert checked > 10  # the extractor still finds things
 
 
-def test_superseded_hashes_never_contain_the_current_defaults():
-    """A current default hashed into SUPERSEDED_PROMPT_HASHES would make
-    `quorum init` treat up-to-date files as stale forever; the set must only
-    hold *replaced* versions."""
+def test_init_records_what_it_seeds(tmp_path: Path):
+    """prompts/.seeded.json holds the hash of every file init wrote, keyed by
+    filename, and is dot-prefixed so prompt listings skip it."""
     import hashlib
-    from importlib import resources
 
     from quorum import home as home_mod
 
-    for entry in (resources.files("quorum") / "default_prompts").iterdir():
-        if not entry.name.endswith(".md"):
-            continue
-        digest = hashlib.sha256(entry.read_bytes()).hexdigest()
-        assert digest not in home_mod.SUPERSEDED_PROMPT_HASHES.get(entry.name, set())
+    target = tmp_path / "qhome"
+    home_mod.scaffold(target)
+    record = fsio.read_json(home_mod.seeded_record_path(target))
+    assert set(record) == set(home_mod.packaged_prompts())
+    for name, text in home_mod.packaged_prompts().items():
+        assert record[name] == hashlib.sha256(text.encode()).hexdigest()
+    assert not [e for e in fsio.sorted_entries(target / "prompts") if e.name.startswith(".")]
+
+
+def test_init_adopts_a_pristine_home_that_predates_the_record(tmp_path: Path):
+    """A home seeded before the record existed: its copies match the packaged
+    defaults, so init records them and future upgrades work — without the
+    record ever having been shipped as a list in Python."""
+    from quorum import home as home_mod
+
+    target = tmp_path / "qhome"
+    home_mod.scaffold(target)
+    home_mod.seeded_record_path(target).unlink()
+    _, outcomes = home_mod.scaffold(target)
+    assert outcomes == {}
+    assert set(fsio.read_json(home_mod.seeded_record_path(target))) == set(
+        home_mod.packaged_prompts()
+    )
+
+
+def test_a_lost_record_never_turns_into_an_overwrite(tmp_path: Path):
+    """No record (or a malformed one) plus a differing copy is 'edited':
+    the failure direction is 'not upgraded', never 'your words replaced'."""
+    from quorum import home as home_mod
+
+    target = tmp_path / "qhome"
+    home_mod.scaffold(target)
+    manager = target / "prompts" / "manager.md"
+    manager.write_text("older seed, maybe\n")
+    home_mod.seeded_record_path(target).unlink()
+    assert home_mod.classify_prompts(target)["manager.md"] == "edited"
+    home_mod.seeded_record_path(target).write_text("[not, an, object")
+    assert home_mod.classify_prompts(target)["manager.md"] == "edited"
+    _, outcomes = home_mod.scaffold(target)
+    assert outcomes == {"manager.md": "edited"}
+    assert manager.read_text() == "older seed, maybe\n"
+    # and the malformed record was replaced by a sound one for the rest
+    record = fsio.read_json(home_mod.seeded_record_path(target))
+    assert "manager.md" not in record and "task-preamble.md" in record
 
 
 # -- Phase-A UX rails: help rendering, version, attention surfacing ----------

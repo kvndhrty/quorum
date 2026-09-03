@@ -4,7 +4,7 @@ Templates live in QUORUM_HOME/prompts/<name>.md (seeded by `quorum init`
 from the packaged defaults in quorum/default_prompts/). Editing the file
 retunes the agent; deleting it restores the packaged default on next use.
 Re-running `quorum init` after upgrading quorum refreshes any seed the user
-never edited (recognized by hash — `home.SUPERSEDED_PROMPT_HASHES`) and
+never edited (recognized by the seed record `prompts/.seeded.json`) and
 leaves edited files alone, reporting when their default has moved on.
 Placeholders use str.format-style {names}; unknown braces are left intact.
 

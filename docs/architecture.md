@@ -91,6 +91,8 @@ tasks/.archive/<id>/              pruned tasks, moved here whole; dot-prefixed
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
 prompts/<name>.md                 user-editable prompt templates (re-running
                                   `quorum init` upgrades never-edited seeds)
+prompts/.seeded.json              {filename: sha256} of what init last seeded;
+                                  what makes "never edited" a local fact
 prompts/<name>.local.md           per-prompt overlay: user-owned, never
                                   seeded, merged at the template's {local}
                                   slot (else prepended) — see "Prompts"
@@ -125,8 +127,16 @@ dict, so a template may contain braces quorum knows nothing about
 examples) without any escaping discipline at the call sites.
 
 `quorum init` seeds the packaged defaults and, on re-run, upgrades any copy
-whose sha256 is in `home.SUPERSEDED_PROMPT_HASHES` — i.e. a pristine seed
-from an older quorum. Anything else is a user edit and is never touched.
+whose sha256 still equals what the seed record `prompts/.seeded.json` says
+init last wrote there — i.e. a pristine seed from an older quorum. Anything
+else is a user edit and is never touched, and so is any differing copy with
+no record: a lost or malformed record degrades to "not upgraded", never to
+"overwritten". The record is written by init only (atomically, once per
+run) and also re-records a copy it finds identical to the current default,
+so a home from before the record existed picks one up while its copies are
+pristine. Keeping the fact in the home, not in a list of superseded hashes
+in Python, is what lets a change to `default_prompts/` ship without
+bookkeeping in `home.py`.
 That rule has a cliff: the first edit to `<name>.md`, however small, opts
 the home out of every future upgrade to that prompt, silently. A home that
 prepended five lines of house policy to `manager.md` kept running the
@@ -362,7 +372,9 @@ transcript. So capture is one more look at each parsed event
   at a turn boundary), and a detached run past budget finishes its turn
   and is gated afterwards. The gate never sets status, never cancels, and
   never touches the views' `$!` mark (`budget_gated` on `task_rows` is the
-  same read, rendered).
+  same read, rendered — as `$! GATED` in `task list`, the TUI's spend column
+  and the web dashboard alike, so nobody learns of the gate from a refused
+  launch).
   usually the largest. `usage.agent_runs` reads the outcomes back over the
   same bounded tail, separately from `agent_usage` (which stays `None` when
   no run in the window reported spend, and a timed-out run never does).
@@ -771,7 +783,10 @@ worktree, read with the same `workdir_git_state` probe the digest uses — is
 exactly what the rest of quorum works to keep visible, so archiving the one
 record that surfaces it would hide it. Only the last is overridable, with
 `--force`; the other three name an action the user can take instead (wait,
-detach, prune the dependent too).
+detach, prune the dependent too). The stranded-work check is skipped
+entirely for a `use_worktree = false` task: that workdir is the user's own
+checkout, where the dirt is theirs and says nothing about the task record —
+the same reasoning that keeps an attached task's checkout off limits.
 
 `--worktrees` adds `git worktree remove` plus branch deletion, and treats the
 two asymmetrically because git does. **`--force` is never passed to `git
@@ -1103,7 +1118,18 @@ as of now. The narrow exception is fenced by five properties, and a second
 materialized probe result would have to earn all of them again:
 
 - **one writer**, `record_pr_state`, called from **one place**, the
-  digest's probe closure. Never from a view, a CLI command or the runner.
+  digest's probe closure — and `open` only for a task whose status is
+  terminal. A live task's `task.json` is being written by its own detached
+  runner (the one file race quorum has no lock for), and `open`, the state
+  a PR sits in for the whole of a task's working life, is rendered by no
+  surface, so taking that race for it buys nothing. A merge or a close is
+  written wherever it is seen, live task included: it is durable, every
+  surface badges it, a PR can land while its task is still running, and a
+  perpetual task never reaches a terminal status at all. A task already
+  recorded `merged` is not probed again at all: merge is final, so the
+  remaining ticks of its 24h window would spend a subprocess to re-learn
+  it. Its line in the digest carries `pr_state=merged` instead of a `ci:`
+  line.
 - **closed vocabulary**: only the three known states are written. `unknown`
   writes nothing, so a forge shape quorum does not understand can never
   badge a task as delivered — and nothing re-probes a task once its worktree
@@ -1233,7 +1259,11 @@ One `Message` schema serves two channels:
   view-local write logic: the TUI's `a` opens the attention list and acks the
   highlighted line through `_write` (an unwritable home notifies, it never
   takes the dashboard down), and the web dashboard's per-escalation **Ack**
-  button posts to `/api/board/{topic}/ack/{message_id}`.
+  button posts to `/api/board/{topic}/ack/{message_id}`. Both lists carry
+  `views.ATTENTION_LIST_LIMIT` entries rather than the banner's handful:
+  every line one of them renders is one the reader may want to ack, so a
+  count the list cannot reach would be an escalation nobody can dismiss
+  from that surface.
 
 The **control channel** rides the same machinery: `quorum agent
 pause|resume|run-now|reload` sends to the `supervisor` inbox, which the
@@ -1315,7 +1345,13 @@ from now**: the first drain arms each topic's cursor at its current tail
 without delivering, so turning the hook on does not replay a month of
 old escalations the banner already showed. A per-tick cap
 (`MAX_PER_TICK`) keeps a suddenly busy listed topic from wedging the job
-thread; the rest waits for the next tick. The template runs with the
+thread; the rest waits for the next tick. Shutdown shortens that further:
+`quorum down` ends in `scheduler.shutdown(wait=True)`, which waits for the
+running job, so the supervisor calls `notify.request_stop()` first and the
+drain stops between messages — `down` is bounded by the one delivery in
+flight rather than by a whole batch (`MAX_PER_TICK` × `timeout_seconds`).
+Nothing is lost: the cursor advanced only past what actually went out, and
+the startup catch-up delivers the rest. The template runs with the
 supervisor's environment, as a harness does — not a security boundary.
 
 `quorum notify test "…"` runs the template once, directly and loudly (exit

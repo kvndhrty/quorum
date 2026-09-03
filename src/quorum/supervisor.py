@@ -153,7 +153,15 @@ class Supervisor:
         would replace the original traceback and skip the lock release,
         leaving a stale supervisor.lock that makes `quorum status` report a
         dead process as running.
+
+        `shutdown(wait=True)` waits for whatever job is running, and the one
+        job here that can legitimately run for minutes is the notify drain
+        (up to `MAX_PER_TICK` deliveries, each up to `timeout_seconds`). Ask
+        it to stop first: it finishes the delivery in flight and leaves the
+        rest for the next `quorum up`, so `quorum down` is bounded by one
+        hook instead of a whole batch.
         """
+        notify_mod.request_stop()
         try:
             self.scheduler.shutdown(wait=True)
         except Exception:
