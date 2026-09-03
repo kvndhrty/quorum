@@ -163,6 +163,13 @@ minute it is posted.
   (#60)
 
 ### Changed
+- `quorum init` recognizes a never-edited prompt seed by a record in the
+  home (`prompts/.seeded.json`: the sha256 of what init last wrote, kept
+  up to date by init alone) instead of a list of superseded hashes in
+  Python. Changing a packaged prompt no longer needs a hash appended to
+  `home.py`, and a lost or malformed record classifies a differing copy as
+  edited — never upgraded — so the failure direction stays "not
+  overwritten".
 - `quorum status`, `task list`, `agent list` and `project list` render
   Rich tables instead of concatenated lines: one headed column per field,
   fitted to the terminal (the report and flags columns are ellipsized
@@ -209,6 +216,12 @@ minute it is posted.
   and the count now happen under the same lock the close check takes.
 
 ### Upgrading
+- Prompt seeds are now recognized by `prompts/.seeded.json`, which the
+  first `quorum init` on this version writes for every prompt copy that
+  matches the packaged default. A copy that is an *older* unedited seed at
+  that moment is not recognized (the superseded-hash list is gone) and is
+  reported as edited: run `quorum init` on the previous version first, or
+  delete the file and re-run `quorum init` to reseed it.
 After installing, in each `QUORUM_HOME`:
 
 1. `quorum init` — both `manager.md` (merged/closed PRs, the budget gate,

@@ -90,6 +90,8 @@ tasks/.archive/<id>/              pruned tasks, moved here whole; dot-prefixed
 worktrees/<id>/                   git worktree (branch quorum/<short-id>)
 prompts/<name>.md                 user-editable prompt templates (re-running
                                   `quorum init` upgrades never-edited seeds)
+prompts/.seeded.json              {filename: sha256} of what init last seeded;
+                                  what makes "never edited" a local fact
 prompts/<name>.local.md           per-prompt overlay: user-owned, never
                                   seeded, merged at the template's {local}
                                   slot (else prepended) — see "Prompts"
@@ -124,8 +126,16 @@ dict, so a template may contain braces quorum knows nothing about
 examples) without any escaping discipline at the call sites.
 
 `quorum init` seeds the packaged defaults and, on re-run, upgrades any copy
-whose sha256 is in `home.SUPERSEDED_PROMPT_HASHES` — i.e. a pristine seed
-from an older quorum. Anything else is a user edit and is never touched.
+whose sha256 still equals what the seed record `prompts/.seeded.json` says
+init last wrote there — i.e. a pristine seed from an older quorum. Anything
+else is a user edit and is never touched, and so is any differing copy with
+no record: a lost or malformed record degrades to "not upgraded", never to
+"overwritten". The record is written by init only (atomically, once per
+run) and also re-records a copy it finds identical to the current default,
+so a home from before the record existed picks one up while its copies are
+pristine. Keeping the fact in the home, not in a list of superseded hashes
+in Python, is what lets a change to `default_prompts/` ship without
+bookkeeping in `home.py`.
 That rule has a cliff: the first edit to `<name>.md`, however small, opts
 the home out of every future upgrade to that prompt, silently. A home that
 prepended five lines of house policy to `manager.md` kept running the
