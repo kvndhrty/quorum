@@ -350,8 +350,9 @@ so the record stays true.
   doctor) versus `issue_view` (**loud** — `task add --issue` runs in front of
   a person, so no gh / no auth / unknown issue / timeout / no url each raise
   `ForgeError` naming the fix, and `issue_ref` rejects a bad reference before
-  spending a subprocess). One `_run` for all three, so unattended-invocation
-  details are stated once; `cli_name(home)` is the single seam #51's
+  spending a subprocess, and a full issue url is handed to the CLI whole so
+  it names its own repository). One `_invoke` for all three, so
+  unattended-invocation details are stated once; `cli_name(home)` is the single seam #51's
   `gh | glab | none` switch lands on. **No write path** — quorum reads a
   forge and never labels, comments on or closes anything.
 - `ci.py` — the digest-facing half over `forge.py`, and the second fail-soft

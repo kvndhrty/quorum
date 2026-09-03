@@ -132,13 +132,26 @@ def test_issue_view_reads_title_body_and_url(
     assert read_log(log) == [["issue", "view", "62", "--json", "number,title,body,url"]]
 
 
-def test_a_url_resolves_to_the_same_call_as_its_number(
+def test_a_url_is_handed_to_the_cli_whole(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
+    """A url may name an issue in a *different* repository than the project
+    the task is queued on, and only the url says which. Reduced to its
+    number it would resolve against the project's own remote instead — a
+    different issue, silently, with nothing in the output saying so."""
     log = tmp_path / "gh.log"
     install_gh(path_without_gh, monkeypatch, issue=ISSUE, log=log)
     assert forge.issue_view(home, ISSUE["url"], tmp_path)["url"] == ISSUE["url"]
-    assert read_log(log)[0][2] == "62"
+    assert read_log(log)[0] == ["issue", "view", ISSUE["url"], "--json", forge.ISSUE_FIELDS]
+
+    elsewhere = "https://github.com/other/tracker/issues/62"
+    assert forge.issue_view(home, elsewhere, tmp_path)
+    assert read_log(log)[1][2] == elsewhere  # not "62"
+
+    # a number still goes over as a number: it is the workdir's remote that
+    # resolves it, exactly as it does for a human standing in that checkout
+    assert forge.issue_target("#62") == (62, "62")
+    assert forge.issue_target(f"  {elsewhere}  ") == (62, elsewhere)
 
 
 def test_the_prompt_is_title_body_and_url(home: Path, tmp_path: Path, path_without_gh, monkeypatch):
@@ -202,6 +215,19 @@ def test_a_reply_without_a_url_or_title_is_an_error(
     with pytest.raises(forge.ForgeError) as e:
         forge.issue_view(home, "62", tmp_path)
     assert "no title" in str(e.value)
+
+
+def test_a_call_that_never_started_is_not_reported_as_a_timeout(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The loud half names the fix, so it may not blame the timeout for a
+    workdir that is gone — raising `[ci].timeout_seconds` would never help."""
+    install_gh(path_without_gh, monkeypatch, issue=ISSUE)
+    missing = tmp_path / "project-that-moved"
+    with pytest.raises(forge.ForgeError) as e:
+        forge.issue_view(home, "62", missing)
+    assert "could not run" in str(e.value) and str(missing) in str(e.value)
+    assert "timeout_seconds" not in str(e.value)
 
 
 def test_a_hung_gh_is_an_error_naming_the_timeout(

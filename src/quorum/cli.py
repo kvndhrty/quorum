@@ -1041,7 +1041,7 @@ def task_add(
         from .forge import ForgeError, issue_prompt, issue_view
 
         try:
-            fetched = issue_view(target, issue, Path(known_project.path))
+            fetched = issue_view(target, issue, known_project.dir)
         except ForgeError as e:
             raise _fail(str(e)) from None
         issue_url = fetched["url"]

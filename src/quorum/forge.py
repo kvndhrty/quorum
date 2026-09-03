@@ -13,7 +13,7 @@ Three callers need the forge, and they want opposite failure behaviour:
   a garbled reply each raise `ForgeError` naming the fix. Silently queuing
   a task with an empty prompt would be much worse than an error.
 
-Both shapes share one subprocess site (`_run`) so there is exactly one
+Both shapes share one subprocess site (`_invoke`) so there is exactly one
 place that knows how to invoke a forge CLI unattended, and one place to
 extend when a second provider lands.
 
@@ -107,23 +107,31 @@ def _timeout(home: Path) -> float:
     return cfg.timeout_seconds if cfg is not None else DEFAULT_TIMEOUT_SECONDS
 
 
-def _run(home: Path, workdir: Path | None, args: list[str]) -> subprocess.CompletedProcess | None:
-    """One forge-CLI call, bounded by `[ci].timeout_seconds`. None when the
-    process could not be run to completion at all.
+def _invoke(home: Path, workdir: Path | None, args: list[str]) -> subprocess.CompletedProcess:
+    """One forge-CLI call, bounded by `[ci].timeout_seconds`. **Raises** what
+    the subprocess raised.
 
     The single subprocess site of the whole codebase. Callers decide what a
-    failure means: `run_json` degrades to None, `run_json_or_raise` raises.
+    failure means: `_run` (and so `run_json` and `auth_status`) degrades every
+    exception to None, while the loud `issue_view` tells a timeout apart from
+    a call that never started, because they have different fixes.
     """
+    return subprocess.run(
+        [cli_name(home), *args],
+        cwd=str(workdir) if workdir is not None else None,
+        capture_output=True,
+        text=True,
+        timeout=_timeout(home),
+        env={**os.environ, **GH_ENV},
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def _run(home: Path, workdir: Path | None, args: list[str]) -> subprocess.CompletedProcess | None:
+    """`_invoke`, soft: None when the process could not be run to completion
+    at all."""
     try:
-        return subprocess.run(
-            [cli_name(home), *args],
-            cwd=str(workdir) if workdir is not None else None,
-            capture_output=True,
-            text=True,
-            timeout=_timeout(home),
-            env={**os.environ, **GH_ENV},
-            stdin=subprocess.DEVNULL,
-        )
+        return _invoke(home, workdir, args)
     except Exception:
         # Fail-soft like herdr.py's bare except: timeouts and exec errors are
         # the usual suspects, but text=True can also raise UnicodeDecodeError
@@ -185,18 +193,35 @@ def issue_ref(ref: str) -> int:
     )
 
 
+def issue_target(ref: str) -> tuple[int, str]:
+    """`(number, argument)`: the issue number, and what to hand the forge CLI.
+
+    A bare number (`62`, `#62`) goes over as a number and resolves against
+    the remote of the directory the call runs in. A URL goes over **whole**,
+    because it may name an issue in a different repository than the
+    project's and only the URL says which (`gh issue view` takes
+    `{<number> | <url>}`); reducing it to its number would quietly fetch the
+    project's own issue with that number instead — a different issue, with
+    nothing in the output saying so.
+    """
+    text = (ref or "").strip()
+    number = issue_ref(text)
+    return number, (text if _ISSUE_URL.match(text) else str(number))
+
+
 def issue_view(home: Path, ref: str, workdir: Path) -> dict:
     """One issue as `{number, title, body, url}`. **Raises** on every failure.
 
     `ref` is a number or a URL; a bare number resolves against the remote of
     `workdir` (a registered project's directory), exactly as `gh` does for a
-    human standing in that checkout.
+    human standing in that checkout, and a URL names its own repository (see
+    `issue_target`).
 
     The loud counterpart of `run_json`: this runs for `task add --issue`,
     where the alternative to an error is a task queued with a prompt that is
     missing the work. Every disappointment names its fix.
     """
-    number = issue_ref(ref)
+    number, target = issue_target(ref)
     cfg = _config(home)
     if cfg is None:
         raise ForgeError(
@@ -214,16 +239,27 @@ def issue_view(home: Path, ref: str, workdir: Path) -> dict:
             f"no `{cli}` on PATH — install it (brew install {cli}) and `{cli} auth login`, "
             "or paste the issue text with `--prompt-file`"
         )
-    proc = _run(home, workdir, ["issue", "view", str(number), "--json", ISSUE_FIELDS])
-    if proc is None:
+    try:
+        proc = _invoke(home, workdir, ["issue", "view", target, "--json", ISSUE_FIELDS])
+    except subprocess.TimeoutExpired:
         raise ForgeError(
-            f"`{cli} issue view {number}` did not finish within "
+            f"`{cli} issue view {target}` did not finish within "
             f"[ci].timeout_seconds ({cfg.timeout_seconds}s) — raise it or retry"
-        )
+        ) from None
+    except Exception as e:
+        # The call never ran (a project directory that has moved or gone) or
+        # its output would not decode. Both are the soft half's "no answer";
+        # here they have to say what actually happened, because "raise the
+        # timeout" is a fix that would never work.
+        raise ForgeError(
+            f"could not run `{cli} issue view {target}` in {workdir}: "
+            f"{e.__class__.__name__}: {e} — check the directory still exists "
+            f"and `{cli}` runs there"
+        ) from None
     if proc.returncode != 0:
         detail = " ".join((proc.stderr or proc.stdout or "").split())[:300] or "no output"
         raise ForgeError(
-            f"`{cli} issue view {number}` failed in {workdir}: {detail}\n"
+            f"`{cli} issue view {target}` failed in {workdir}: {detail}\n"
             f"check the issue exists and `{cli} auth status` is happy, or pass the full "
             "issue URL"
         )
@@ -232,11 +268,11 @@ def issue_view(home: Path, ref: str, workdir: Path) -> dict:
     except (ValueError, TypeError):
         detail = " ".join((proc.stdout or "").split())[:200]
         raise ForgeError(
-            f"`{cli} issue view {number}` did not return JSON: {detail!r}"
+            f"`{cli} issue view {target}` did not return JSON: {detail!r}"
         ) from None
     if not isinstance(payload, dict) or not str(payload.get("url") or "").strip():
         raise ForgeError(
-            f"`{cli} issue view {number}` returned no issue url — quorum needs one to "
+            f"`{cli} issue view {target}` returned no issue url — quorum needs one to "
             "record where the task came from"
         )
     title = str(payload.get("title") or "").strip()

@@ -297,7 +297,9 @@ The issue URL is recorded on the task, so `quorum task list` and both
 dashboards show `#62`, `quorum task show` prints the full link, and the run
 preamble tells the harness which issue it is working from so it can
 reference it in the pull request. A prompt given as well (the third line
-above) is appended as extra instructions.
+above) is appended as extra instructions. A number resolves against the
+project checkout's own remote; a full URL is fetched as written, so it can
+name an issue in a different repository than the one the task runs in.
 
 This needs `gh` on PATH, authenticated, and `[ci].enabled` left on (it is on
 by default) — the same switches the manager's PR probe uses. Unlike that

@@ -1142,12 +1142,16 @@ points and two contracts:
   --issue`: it raises `ForgeError` with the fix in the message. Its `ref`
   parsing (`62`, `#62`, or a full issue url) is pure and happens *before*
   the subprocess, so a typo costs nothing and a pull-request url is refused
-  rather than fetched as an issue.
+  rather than fetched as an issue. A url is handed to the CLI whole rather
+  than reduced to its number: it may name an issue in a different repository
+  than the project's, and only the url says which.
 
-Both contracts share `_run`, the single `subprocess.run` of the whole
+Both contracts share `_invoke`, the single `subprocess.run` of the whole
 codebase for a forge, so the unattended-invocation details (`GH_PAGER=cat`,
 no prompts, no colour, stdin closed, `[ci].timeout_seconds`) are stated
-once. Config is read through `try_load_config` for both, so an unreadable
+once; the soft half degrades every exception it raises to `None`, and the
+loud half tells a timeout apart from a call that never started, because
+those have different fixes. Config is read through `try_load_config` for both, so an unreadable
 config.toml means *off* — the soft half goes quiet and the loud half says
 so. Provider selection is `cli_name(home)`, today a constant: that one
 function is where #51's `[ci].provider = gh | glab | none` switch lands, and

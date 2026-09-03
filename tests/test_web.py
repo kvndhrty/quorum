@@ -155,6 +155,8 @@ def test_task_rows_expose_the_observed_pr_state(client: TestClient, home: Path):
 
     page = (Path(web_app.__file__).parent / "static" / "index.html").read_text()
     assert 't.pr_state === "merged"' in page and 't.pr_state === "closed"' in page
+
+
 def test_task_rows_expose_the_issue_a_task_came_from(client: TestClient, home: Path):
     """The browser links back to the issue; quorum only ever read it."""
     from quorum.web import app as web_app
