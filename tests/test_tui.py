@@ -248,6 +248,30 @@ def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
     drive(home, script)
 
 
+def test_a_gated_task_says_so_in_the_table(home: Path):
+    """`s` refuses a gated task (above); the table has to say so first, or
+    the reader learns of the gate only from the refusal."""
+    ids = populate(home)
+    (home / "config.toml").write_text("[tasks]\nmax_cost_per_run = 0.10\n")
+    over = {"started_at": "t0", "ended_at": "t1", "exit_code": 0,
+            "usage": {"cost_usd": 0.42, "total_tokens": 100, "events": 1}}
+    store = TaskStore(home)
+    store.update(ids[0], runs=[over])
+    # The same overage one run back: over budget once, but the next run is
+    # not gated — "$!" without the word.
+    store.update(ids[1], runs=[over, {**over, "usage": {"cost_usd": 0.01}}])
+
+    def spent(app, row: int) -> str:
+        return str(app.query_one("#tasks", DataTable).get_cell_at(Coordinate(row, 4)))
+
+    async def script(app, pilot):
+        assert "GATED" in spent(app, 0)
+        assert "$!" in spent(app, 1) and "GATED" not in spent(app, 1)
+        assert spent(app, 2) == ""  # nothing reported, nothing to mark
+
+    drive(home, script)
+
+
 def test_cancel_confirms_first_and_only_then_cancels(home: Path):
     ids = populate(home)
 
@@ -508,5 +532,86 @@ def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
         assert app.is_running
         assert [n.severity for n in app._notifications] == ["error"]
         assert MessageBus(home).read_topic("attention") == []
+
+    drive(home, script)
+
+
+def test_h_holds_and_releases_the_highlighted_task(home: Path):
+    """`h` is a thin `TaskStore.update` on the highlighted row, and it toggles
+    — hold is not destructive, so unlike `c` it does not confirm (#61)."""
+    ids = populate(home)
+
+    async def script(app, pilot):
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is True
+        # a status the harness owns is untouched by the parking brake
+        assert TaskStore(home).get(ids[0]).status == "queued"
+        table = app.query_one("#tasks", DataTable)
+        assert "⏸" in str(table.get_row_at(0)[2])
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is False
+
+    drive(home, script)
+
+
+def test_run_refuses_a_held_task(home: Path, monkeypatch):
+    ids = populate(home)
+    TaskStore(home).update(ids[0], held=True)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "quorum.runner.launch_detached", lambda h, task_id: launched.append(task_id) or 1
+    )
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == []
+        # `h` is the release, and the run goes through afterwards
+        await pilot.press("h")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == [ids[0]]
+
+    drive(home, script)
+
+
+def test_plus_and_minus_nudge_priority_without_reordering_the_table(home: Path):
+    ids = populate(home)
+
+    async def script(app, pilot):
+        await pilot.press("plus", "plus")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).priority == 2
+        table = app.query_one("#tasks", DataTable)
+        assert "↑2" in str(table.get_row_at(0)[2])
+        # the row the reader is pointing at must not move under the cursor
+        assert [table.get_row_at(r)[0] for r in range(table.row_count)] == [
+            t[-6:].lower() for t in ids
+        ]
+        await pilot.press("minus", "minus", "minus")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).priority == -1
+        assert "↓1" in str(app.query_one("#tasks", DataTable).get_row_at(0)[2])
+
+    drive(home, script)
+
+
+def test_h_says_a_live_run_keeps_going(home: Path):
+    """`h` speaks the same line `quorum task hold` does: the brake gates the
+    next launch, and the run already in flight is not stopped by it (#61)."""
+    from quorum import fsio
+
+    ids = populate(home)
+    fsio.atomic_write_json(runner_lock_path(home, ids[0]), {"pid": 1})
+
+    async def script(app, pilot):
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is True
+        message = str(list(app._notifications)[-1].message)
+        assert "live runner keeps going" in message and "task stop" in message
 
     drive(home, script)

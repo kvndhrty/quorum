@@ -1256,3 +1256,54 @@ def test_the_perpetual_block_carries_its_own_overlay(home: Path, project: str):
     assert "PROMPT| {local}" not in text
     # the overlay lands inside the perpetual block, not ahead of the preamble
     assert text.index("You are an autonomous coding agent") < text.index("`just check`")
+
+
+def test_run_refuses_a_held_task(home: Path, project: str):
+    """The hold rail (#61): a task the user parked is refused before the lock
+    is taken or anything is spent, and the refusal names how to lift it."""
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "do the work", "fake", held=True)
+    with pytest.raises(RunnerError, match=f"task {task.short_id} is held"):
+        run_task(home, config, task.id)
+    assert store.get(task.id).runs == []
+    # hold is not a status: the harness's word is untouched by the refusal
+    assert store.get(task.id).status == "queued"
+
+
+def test_force_overrides_the_hold_refusal(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "do the work", "fake", held=True)
+    assert run_task(home, config, task.id, force=True) == 0
+    assert len(store.get(task.id).runs) == 1
+    # forcing a run does not release the hold — only a human does
+    assert store.get(task.id).held is True
+
+
+def test_releasing_a_held_task_makes_it_runnable_again(home: Path, project: str):
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    task = store.add(project, "do the work", "fake")
+    store.update(task.id, held=True)
+    with pytest.raises(RunnerError, match="is held"):
+        run_task(home, config, task.id)
+    store.update(task.id, held=False)
+    assert run_task(home, config, task.id) == 0
+
+
+def test_priority_defaults_to_zero_and_orders_nothing(home: Path):
+    """Priority is data the manager reads: it round-trips through task.json
+    and no reader in quorum sorts by it (#61)."""
+    store = TaskStore(home)
+    low = store.add("proj", "later", "fake", priority=-2)
+    plain = store.add("proj", "whenever", "fake")
+    high = store.add("proj", "first", "fake", priority=5)
+    assert (low.priority, plain.priority, high.priority) == (-2, 0, 5)
+    assert store.get(high.id).priority == 5
+    # the listing stays chronological whatever the priorities say
+    assert [t.id for t in store.list()] == [low.id, plain.id, high.id]
+    assert store.update(high.id, priority=1).priority == 1

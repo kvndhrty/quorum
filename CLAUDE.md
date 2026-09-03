@@ -99,6 +99,16 @@ so the record stays true.
   both unsatisfiable upstreams, so both are reported and neither is waited on
   — a task that silently never runs would hide the decision. Not a DAG engine:
   the manager still decides every launch.
+  `priority` (`task add --priority N`, `task set-priority`) and `held`
+  (`task hold` / `task release`) are the user's two hands on the queue and
+  neither is a scheduler: priority is an int the digest renders (only when
+  non-zero) and `prompts/manager.md` reads as an ordering preference —
+  **nothing in Python sorts by it** — while `held` is a parking brake that
+  is *not* a status (status stays the harness's word) and joins
+  `runner.lock`/attached/`depends_on`/the budget gate as a runner refusal
+  waivable only by `--force` (which never releases the hold). Only a human
+  releases one; the manager prompt is told so, which makes it a convention
+  and not a boundary.
   `perpetual = true` (`task add --perpetual`) marks a task that is not meant to
   finish: the substrate is unchanged, but the preamble's `{perpetual}` block
   softens delivery into commit+push per cycle, the digest renders
@@ -168,8 +178,8 @@ so the record stays true.
   transcript instead of raising. The runner **never sets task
   status**, and refuses attached tasks outright — a substrate rail (same class as
   `runner.lock`, a deliberate narrow bend of "the cap is the only rail") protecting
-  the user's live checkout. The same class of rail refuses a task whose
-  `depends_on` are unfinished unless `--force` (a premature dependent is pure
+  the user's live checkout. The same class of rail refuses a held task, and one whose
+  `depends_on` are unfinished, unless `--force` (a premature dependent is pure
   waste); `dependency_note` puts each dependency's status/pr_url in the
   composed prompt. `launch_detached` spawns `python -m quorum task run`
   in a new session.

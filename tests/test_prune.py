@@ -194,6 +194,22 @@ def test_prune_refuses_stranded_work_unless_forced(home: Path, repo: Path):
     assert short_ids(home) == set()
 
 
+def test_prune_never_judges_a_no_worktree_task_checkout(home: Path, repo: Path):
+    """A `--no-worktree` task ran in the user's own checkout. Dirt there is
+    theirs — it says nothing about whether the *task record* can be archived,
+    and refusing on it would make the task unprunable until they tidied up."""
+    task = finished(home, use_worktree=False)
+    TaskStore(home).update(task.id, workdir=str(repo))
+    (repo / "unrelated.txt").write_text("the user's own uncommitted file")
+
+    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    assert result.exit_code == 0, result.output
+    assert "stranded work" not in result.output
+    assert short_ids(home) == set()
+    assert prune.archived_ids(home) == [task.id]
+    assert (repo / "unrelated.txt").exists()  # and the file was never touched
+
+
 def test_prune_worktrees_removes_the_worktree_and_the_merged_branch(home: Path, repo: Path):
     from quorum import runner as runner_mod
 

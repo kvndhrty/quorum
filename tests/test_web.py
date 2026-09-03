@@ -192,6 +192,28 @@ def test_the_attention_summary_carries_the_id_an_ack_needs(client: TestClient, h
     assert attn["recent"][0]["short_id"] == msg.short_id
 
 
+def test_every_escalation_the_banner_counts_is_ackable_in_the_panel(
+    client: TestClient, home: Path
+):
+    """The panel renders `attention.recent` and puts an Ack button on each
+    line, so a banner count the list never reaches is an escalation nobody
+    can dismiss from the browser."""
+    bus = MessageBus(home)
+    posted = [bus.post("manager", "attention", text=f"stuck {i}") for i in range(12)]
+
+    attn = client.get("/api/overview").json()["attention"]
+    assert attn["count"] == len(posted)
+    assert len(attn["recent"]) == len(posted)
+    assert {m["id"] for m in attn["recent"]} == {m.id for m in posted}
+
+
+def test_the_page_marks_a_budget_gated_task(client: TestClient):
+    """`quorum task run` refuses a gated task, so the dashboard says GATED
+    where it says "$!" — the mark alone reads as an observation."""
+    page = client.get("/").text
+    assert "budget_gated" in page and "GATED" in page
+
+
 def test_the_page_ships_the_attention_panel_and_its_ack_button(client: TestClient):
     """The dashboard is one static file with no build step, so the only thing
     that keeps its markup and the route it posts to in step is a test."""
@@ -199,3 +221,17 @@ def test_the_page_ships_the_attention_panel_and_its_ack_button(client: TestClien
     assert 'id="attention-panel"' in page
     assert "/api/board/attention/ack/" in page
     assert "data-ack" in page
+
+
+def test_task_rows_expose_priority_and_hold(client: TestClient, home: Path):
+    """The browser reads the same fields off the same read model, and the
+    list is never reordered by priority — quorum sorts nothing (#61)."""
+    store = TaskStore(home)
+    first = store.add("web-proj", "whenever", "fake")
+    second = store.add("web-proj", "first", "fake", priority=4, held=True)
+
+    rows = client.get("/api/tasks").json()
+    assert [r["id"] for r in rows] == [first.id, second.id]
+    by_id = {r["id"]: r for r in rows}
+    assert (by_id[first.id]["priority"], by_id[first.id]["held"]) == (0, False)
+    assert (by_id[second.id]["priority"], by_id[second.id]["held"]) == (4, True)

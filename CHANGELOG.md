@@ -161,6 +161,22 @@ minute it is posted.
   issue-driven loop a one-liner without putting `gh` inside quorum:
   `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
   (#60)
+- **Task priority and hold/release** (#61): two ways to steer the queue
+  without editing `task.json` or cancelling anything. `task add --priority N`
+  and `task set-priority <id> N` record an ordering hint the manager reads
+  (higher first, negative to the back) — quorum sorts nothing by it, the
+  digest renders `priority=N` only when it is not 0, the views badge `↑N` /
+  `↓N`, and `prompts/manager.md` is what turns the number into a launch
+  order. `task hold <id>` parks a task and `task release <id>` puts it back:
+  a parking brake, not an ending, so unlike `task cancel` the status stays
+  the harness's word and the worktree, branch and queue position survive.
+  A held task is refused by the runner (`--force` runs it once and does not
+  release the hold) — the fifth substrate rail, beside `runner.lock`, the
+  attached-task, dependency and budget refusals — shows `held=true` on the
+  digest with a line telling the manager never to launch or release one, and
+  badges `⏸` everywhere. In the TUI, `h` toggles hold and `+` / `-` nudge
+  priority; every verb is journaled and capped like any other mutating
+  action.
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the
@@ -208,6 +224,20 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Fixed
+- Six review leftovers from the package (#81): a PR still `open` is no
+  longer recorded onto a live task's `task.json` — the one file its own
+  runner is concurrently writing, and a state no surface renders — while a
+  merge, which every surface badges, is recorded wherever it is seen; a task
+  already recorded `merged` is never probed again; `$! GATED` now renders in
+  the TUI and the web dashboard, not only in `task list`; `quorum task add
+  <slug> -` validates the project,
+  harness and `--after` ids *before* draining stdin, so a typo no longer eats
+  a piped issue (and says so when `-` is typed at a terminal); `task prune`
+  no longer refuses a `--no-worktree` task over unrelated dirt in the user's
+  own checkout; the web Attention panel lists every escalation the banner
+  counts, so each one has an Ack button; and `quorum down` asks an in-flight
+  notification drain to stop after the message it is delivering instead of
+  waiting for the whole batch.
 - The guidance pump could close a stream-json harness's stdin with a nudge
   in flight: a message was claimed (renamed out of `new/`) before it was
   counted as delivered, so a `result` event landing in that gap saw an

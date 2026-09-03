@@ -497,14 +497,33 @@ def build_digest(
             # not spend budget either — the budget exists so live and
             # finished work always gets probed.
             return None
+        if task.pr_state == "merged":
+            # Merge is final: there is nothing left for the forge to tell us
+            # about this task, and it would otherwise be probed on every tick
+            # for as long as it stays in the recently-finished window. The
+            # recorded observation is rendered instead (`pr_state=` on the
+            # task's line), so nothing is lost by not asking.
+            return None
         ci_budget -= 1
         state = ci.pr_state(home, task)
-        if state is not None:
+        if state is not None and (
+            task.status in tasks.TERMINAL_STATUSES or state["state"] != "open"
+        ):
             # The one place a probe result is written to disk: what the forge
             # says about the PR outlives the probe, so views that never make
             # a network call can still badge a merged task. An observation,
             # never a status change — see tasks.record_pr_state and
             # docs/architecture.md ("The merged observation").
+            #
+            # `open` is written only for a *finished* task. A live task's
+            # task.json is being written concurrently by its own detached
+            # runner — the one file race quorum has no lock for — and `open`,
+            # the state a PR sits in for the whole of a task's working life,
+            # is rendered by no surface, so taking that race for it buys
+            # nothing. A merge (or a close) is the opposite: durable, badged
+            # everywhere, and a PR can land while its task is still running —
+            # and a perpetual task never reaches a terminal status at all, so
+            # waiting for one would mean never recording its merge.
             tasks.record_pr_state(home, task, state["state"], now=now)
         return state
 
@@ -541,9 +560,21 @@ def build_digest(
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
             f"runner={'alive' if alive else 'dead'} runs={len(t.runs)} quiet={quiet}"
+            # What the forge last said, off task.json rather than off a
+            # probe — the same field the finished section renders. A live
+            # task whose PR has landed is not probed again, so without this
+            # the merge would be visible for exactly one tick.
+            + (f" pr_state={t.pr_state}" if t.pr_state else "")
             # Only when true: an ordinary task's line stays as it was, and
             # the marker reads as the exception it is.
             + (" perpetual=true" if t.perpetual else "")
+            # The user's two hands on the queue. `priority=` only when it is
+            # not 0, so an ordinary task's line is unchanged and the mark
+            # reads as the exception it is; `held=true` always, because a
+            # held task looks launchable (runner=dead, status queued) and
+            # nothing else on the line says otherwise.
+            + (f" priority={t.priority}" if t.priority else "")
+            + (" held=true" if t.held else "")
             + _restart_marks(t)
             + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
@@ -551,6 +582,11 @@ def build_digest(
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
+        if t.held:
+            lines.append(
+                "  held: the user parked this task with `task hold` — do not launch it "
+                "(the runner refuses it anyway) and do not release it; only the user does"
+            )
         if stalled is not None:
             lines.append(
                 f"  STALLED: runner=alive but the harness has printed nothing for "
@@ -655,8 +691,13 @@ def build_digest(
     if recent_terminal:
         lines.append("## Recently finished (last 24h)")
         for t in recent_terminal:
-            line = f"- [{t.status}] {t.short_id} project={t.project}" + (
-                f" pr={t.pr_url}" if t.pr_url else ""
+            line = (
+                f"- [{t.status}] {t.short_id} project={t.project}"
+                + (f" pr={t.pr_url}" if t.pr_url else "")
+                # What the forge last said, off task.json rather than off a
+                # probe: a merged task is not re-probed, so this is where
+                # "delivered" stays visible for the rest of the window.
+                + (f" pr_state={t.pr_state}" if t.pr_state else "")
             )
             git = tasks.workdir_git_state(t)
             if git and (git["dirty"] or git["unpushed"]):

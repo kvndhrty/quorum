@@ -116,8 +116,9 @@ read it as relative spend, never as an invoice.
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
 The budget also gates the **next** run: while a task's *last* run is over
-budget, `quorum task run` refuses it (`$! GATED` in `task list`, a `gated:`
-line in `task show`, and the TUI's `s` key says so) until you run it with
+budget, `quorum task run` refuses it (`$! GATED` in `task list`, the TUI and
+the dashboard, a `gated:` line in `task show`, and the TUI's `s` key says so
+if you try anyway) until you run it with
 `--force` or a run comes in under budget — a run that reports no usage
 counts as under, since silence is not spend. Quorum never kills a run in
 progress: a run past its budget finishes, and only the relaunch is held.
@@ -450,6 +451,58 @@ The reviewer cannot start before the PR exists, so it never spends a run
 reviewing nothing — and if the implementation ends up `blocked`, the digest
 says `DEP-FAILED` instead of silently launching a review of a PR that will
 never come.
+
+### Priority and holding a task
+
+Two ways to steer the queue without editing `task.json` — and neither is a
+scheduler: quorum still launches nothing on its own.
+
+```bash
+quorum task add my-api "the release blocker" --priority 3
+quorum task set-priority a3f2k9 5      # bump it
+quorum task set-priority b7c1x4 -1     # push it to the back
+```
+
+**Priority is an ordering hint the manager reads.** Higher goes first, `0`
+is the default, negative pushes work behind everything else. Nothing in
+quorum sorts by it: `task list`, the TUI and the dashboard stay in the order
+tasks were created, and the number only reaches a decision through
+`prompts/manager.md`, which is told to prefer the higher priority among the
+tasks it could launch this tick. It shows up as `priority=5` on the
+manager's digest (only when it is not 0) and as `↑5` / `↓1` in the views.
+So it is a preference, not a promise — the manager still judges what is
+actually worth launching, and you can change how it weighs priority by
+editing the prompt.
+
+```bash
+quorum task hold a3f2k9          # park it: nothing launches it
+quorum task release a3f2k9       # put it back
+```
+
+**Hold is a parking brake, not an ending.** Unlike `task cancel` it leaves
+the status exactly as the harness last reported it, keeps the worktree,
+branch, session and queue position, and `task release` undoes it completely.
+While a task is held:
+
+- `quorum task run` refuses it (`--force` runs it anyway for one run — and
+  does *not* release the hold), the same refusal `--after` gives a task
+  whose dependencies have not finished;
+- the manager's digest marks it `held=true`, and its prompt says never to
+  launch a held task and **never to release one** — releasing is yours
+  alone. If a hold is blocking work the manager thinks matters, it posts to
+  `#attention` instead;
+- the views badge it `⏸`.
+
+A hold is a brake on the *next* launch. Holding a task whose run is already
+going does not stop that run — `quorum task stop` does — and holding an
+adopted session (`task adopt`) changes nothing at all, since the runner
+already refuses those. Both `quorum task hold` and the TUI say which when
+you hold such a task.
+
+In the TUI, `h` toggles hold on the highlighted task and `+` / `-` nudge its
+priority by one. Neither asks for confirmation — nothing is lost by pressing
+the key again — and the table is not reordered, so the row you are pointing
+at stays where it is.
 
 **Watching.**
 
@@ -834,7 +887,9 @@ holds its lock, when it's attached to a live session, when another task
 still lists it under `--after`, and — the one that catches people — when its
 worktree holds uncommitted or unpushed work. That last one is the same
 stranded-work probe `quorum status` shows, and archiving the record would be
-the only thing that hid it. Commit and push, or pass `--force`.
+the only thing that hid it. Commit and push, or pass `--force`. A task queued
+with `--no-worktree` is exempt from it: it ran in your own checkout, and what
+is uncommitted there is yours, not the task's.
 
 **Worktrees and branches.** `--worktrees` runs `git worktree remove` and then
 deletes the task branch *only if git agrees it is merged*. An unmerged branch

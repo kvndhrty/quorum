@@ -57,8 +57,24 @@ TASK_STATUS_STYLE = {
 FAILED = object()
 
 #: how many escalations the `a` list shows — deeper than the banner's own
-#: summary, because every line in it is one the reader may want to ack
-ATTENTION_LIST_LIMIT = 50
+#: summary, because every line in it is one the reader may want to ack.
+#: Shared with the web dashboard's Attention panel, which acks the same way.
+ATTENTION_LIST_LIMIT = views.ATTENTION_LIST_LIMIT
+
+
+def _usage_cell(t: dict) -> str:
+    """The usage column: spend, plus the budget marks `task list` renders.
+
+    GATED is the one that matters here, because `s` is the binding it
+    refuses (runner.budget_blockers): without it the reader learns of the
+    gate only when the launch is turned down.
+    """
+    text = t.get("usage_text", "") or ""
+    if t.get("budget_gated"):
+        return f"{text} $! GATED".strip()
+    if t.get("budget_overages"):
+        return f"{text} $!".strip()
+    return text
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -157,6 +173,9 @@ class QuorumTUI(App):
         ("m", "directive", "tell manager"),
         ("s", "run_task", "run task"),
         ("c", "cancel_task", "cancel task"),
+        ("h", "toggle_hold", "hold/release"),
+        ("plus", "raise_priority", "priority +1"),
+        ("minus", "lower_priority", "priority -1"),
         ("a", "attention", "ack attention"),
         ("escape", "show_board", "board"),
     ]
@@ -255,7 +274,13 @@ class QuorumTUI(App):
             self.notify(f"task {task.short_id} is already running", severity="warning")
             return
         from ..config import load_config_or_default
-        from ..runner import budget_blockers, budget_refusal, launch_detached
+        from ..runner import budget_blockers, budget_refusal, held_refusal, launch_detached
+
+        if task.held:
+            # the hold rail, surfaced the same way as the two below: the TUI
+            # has no --force, so `h` (or the CLI) is how you lift it
+            self.notify(held_refusal(task), severity="warning")
+            return
 
         # the runner's budget gate, checked here so the refusal is a notice
         # on screen rather than a line in runner.log nobody reads; the TUI
@@ -292,6 +317,60 @@ class QuorumTUI(App):
             self.refresh_data()
 
         self.push_screen(ConfirmScreen(question), cancel)
+
+    def action_toggle_hold(self) -> None:
+        """`quorum task hold` / `task release` on the highlighted row — one
+        `TaskStore.update`, the same thin bus/store call the CLI makes. Hold
+        is not a status and nothing here is destructive, so unlike `c` it
+        does not confirm: `h` again puts it back."""
+        task = self._target_task()
+        if task is None:
+            return
+        held = not task.held
+        done = self._write(
+            f"{'hold' if held else 'release'} {task.short_id}",
+            lambda: TaskStore(self.home).update(task.id, held=held),
+        )
+        if done is FAILED:
+            return
+        if not held:
+            self.notify(f"task {task.short_id} released — launchable again")
+            self.refresh_data()
+            return
+        from ..runner import hold_note
+
+        # the same line `quorum task hold` prints: a brake on the next
+        # launch stops nothing already moving, and only this says so
+        note = hold_note(self.home, task)
+        self.notify(
+            f"task {task.short_id} held — status is still {task.status!r}"
+            + (f"; {note}" if note else "")
+        )
+        self.refresh_data()
+
+    def action_raise_priority(self) -> None:
+        self._bump_priority(1)
+
+    def action_lower_priority(self) -> None:
+        self._bump_priority(-1)
+
+    def _bump_priority(self, delta: int) -> None:
+        """`+`/`-`: nudge the highlighted task's priority by one. The table is
+        deliberately *not* reordered — priority is a hint the manager reads,
+        and a row that jumped under the cursor as you pressed the key would
+        make the next keystroke act on something else."""
+        task = self._target_task()
+        if task is None:
+            return
+        value = task.priority + delta
+        done = self._write(
+            f"set {task.short_id}'s priority",
+            lambda: TaskStore(self.home).update(task.id, priority=value),
+        )
+        if done is FAILED:
+            return
+        self.notify(f"task {task.short_id} priority {task.priority} → {value}")
+        self.refresh_data()
 
     def action_attention(self) -> None:
         """Open the #attention list and ack the line the reader picks.
@@ -481,6 +560,13 @@ class QuorumTUI(App):
                 status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
                 if t.get("perpetual"):
                     status += " ∞"  # never finishes by design; only the user ends it
+                if t.get("held"):
+                    status += " ⏸"  # parked by the user; the runner refuses it
+                priority = t.get("priority") or 0
+                if priority:
+                    # an ordering hint for the manager; the table itself is
+                    # never reordered by it
+                    status += f" {'↑' if priority > 0 else '↓'}{abs(priority)}"
                 # The forge's word about the PR, materialized by the manager
                 # tick so this table stays a pure file read.
                 status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
@@ -497,9 +583,12 @@ class QuorumTUI(App):
                     Text(status, style=style),
                     t["harness"],
                     # "" whenever the harness reported no usage; a task over
-                    # its configured budget is marked, never blocked.
+                    # its configured budget is marked, never blocked. GATED
+                    # is the sharper case the mark alone hides: the *last*
+                    # run went over, so `s` will refuse the next one until
+                    # --force — say so here rather than at the refusal.
                     Text(
-                        t.get("usage_text", "") + (" $!" if t.get("budget_overages") else ""),
+                        _usage_cell(t),
                         style="yellow" if t.get("budget_overages") else "",
                     ),
                     (t["last_report"] or t["prompt"])[:60],

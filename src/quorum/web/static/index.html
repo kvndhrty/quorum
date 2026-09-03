@@ -206,9 +206,17 @@ async function refresh() {
       ? ` <span class="status-error" title="a dependency ended ${esc((t.dep_failed || []).join(","))}">DEP-FAILED</span>` : "";
     const depMissing = (t.dep_missing || []).length
       ? ` <span class="status-error" title="no task record for ${esc((t.dep_missing || []).join(","))}">DEP-MISSING</span>` : "";
+    // "⏸": held — parked with `quorum task hold`; the runner refuses it until
+    // `task release`. "↑N"/"↓N": priority, an ordering hint the manager reads
+    // — the list itself is never reordered by it.
+    const held = t.held
+      ? ' <span class="muted" title="held: parked with `quorum task hold`; the runner refuses it until `quorum task release`">⏸</span>' : "";
+    const priority = t.priority
+      ? ` <span class="muted" title="priority ${esc(String(t.priority))}: an ordering hint the manager reads">${t.priority > 0 ? "↑" : "↓"}${esc(String(Math.abs(t.priority)))}</span>` : "";
     // "∞": perpetual — never finishes by design, only the user ends it.
     const status = esc(t.status) + (t.attached ? " ⚭" : (t.running ? " ▶" : ""))
       + (t.perpetual ? ' <span title="perpetual: runs in cycles until you cancel it">∞</span>' : "")
+      + held + priority
       // "✔"/"⊘": what the forge last said about the PR, observed by the
       // manager tick and read back off task.json — no badge means nothing
       // was ever observed, not "not merged".
@@ -217,10 +225,14 @@ async function refresh() {
       + waiting + depFailed + depMissing;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over
-    // the configured budget — a mark, never a block.
+    // the configured budget — a mark, never a block. "GATED" is the sharper
+    // case: the *last* run went over, so `quorum task run` refuses the next
+    // one until --force. Rendered wherever "$!" is, so nobody learns of the
+    // gate from the refusal.
     const over = (t.budget_overages || []);
-    const spent = t.usage_text
-      ? `<br><span title="${esc(over.join("; ") || "reported by the harness")}">${esc(t.usage_text)}${over.length ? " $!" : ""}</span>`
+    const marks = t.budget_gated ? " $! GATED" : (over.length ? " $!" : "");
+    const spent = t.usage_text || marks
+      ? `<br><span title="${esc(over.join("; ") || "reported by the harness")}">${esc(((t.usage_text || "") + marks).trim())}</span>`
       : "";
     const sel = t.id === selectedTask ? " selected" : "";
     return `<tr class="task-row${sel}" data-id="${esc(t.id)}">

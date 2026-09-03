@@ -517,6 +517,10 @@ def doctor(
 STATUS_LEGEND = """glyphs:
   tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ⏸ held: parked by you (`task hold`); the runner refuses to start it
+             until `task release` — not a status, and nothing else lifts it
+          ↑N / ↓N  priority, when it is not 0 (`task set-priority`): an
+             ordering hint the manager reads, never an order quorum enforces
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
              means nothing was ever observed (no PR yet, or no `gh` here)
@@ -761,6 +765,11 @@ def _task_cells(t: dict) -> dict[str, str]:
     elif t.get("budget_overages"):
         usage_text = f"{usage_text} $!".strip()
     status = t["status"] + (" ∞" if t.get("perpetual") else "")
+    if t.get("held"):
+        status += " ⏸"
+    priority = t.get("priority") or 0
+    if priority:
+        status += f" {'↑' if priority > 0 else '↓'}{abs(priority)}"
     # The forge's word next to the harness's: "done ✔" is delivered, "done ⊘"
     # is a PR someone closed without merging. Absent = never observed.
     status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
@@ -849,6 +858,14 @@ def _stdin_prompt() -> str:
         raise _fail("stdin is not valid UTF-8") from None
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is a terminal — False for anything that cannot say."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
 def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
     """The task prompt from exactly one of: the positional argument, stdin
     (`-`), or --prompt-file.
@@ -877,6 +894,9 @@ def _task_prompt(prompt: str, prompt_file: Path | None) -> str:
             "or --prompt-file <path>"
         )
     if from_stdin:
+        # Nothing is piped in: say so, or the blocking read looks like a hang.
+        if _stdin_is_tty():
+            typer.echo("reading the prompt from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
         text = _stdin_prompt()
         source = "stdin"
     elif prompt_file is not None:
@@ -904,6 +924,7 @@ def task_add(
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
     perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
+    priority: int = typer.Option(0, "--priority", help="Ordering hint the manager reads: higher goes first (negative pushes it back). Quorum sorts nothing."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
@@ -928,7 +949,6 @@ def task_add(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, resolve_dependencies, short_handle
 
-    text = _task_prompt(prompt, prompt_file)
     target = get_home(home)
     config = _load_config(target)
     if ProjectRegistry(target).get(project) is None:
@@ -945,6 +965,10 @@ def task_add(
         depends_on = resolve_dependencies(store, after or [])
     except ValueError as e:
         raise _fail(str(e)) from None
+    # The prompt is read *last*, after everything that can be checked without
+    # consuming it: a piped issue is gone the moment stdin is drained, so a
+    # typo in the slug must not eat it.
+    text = _task_prompt(prompt, prompt_file)
     _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
     task = store.add(
         project=project,
@@ -953,6 +977,7 @@ def task_add(
         use_worktree=config.tasks.worktree and not no_worktree,
         depends_on=depends_on,
         perpetual=perpetual,
+        priority=priority,
     )
     kind = "perpetual task" if perpetual else "task"
     typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
@@ -962,6 +987,11 @@ def task_add(
     if perpetual:
         typer.echo(
             f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
+        )
+    if priority:
+        typer.echo(
+            f"priority {priority} — the manager prefers higher priority among the tasks "
+            "it could launch; quorum itself orders nothing"
         )
     typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
 
@@ -1229,11 +1259,15 @@ def task_show(
         state += " (runner alive)"
     if task.perpetual:
         state += " [perpetual — only you end it]"
+    if task.held:
+        state += f" [held — `quorum task release {task.short_id}` to unpark it]"
     typer.echo(f"task {task.short_id}  ({task.id})")
     typer.echo(f"  project:  {task.project}")
     typer.echo(f"  status:   {state}")
     typer.echo(f"  harness:  {task.harness}")
     typer.echo(f"  prompt:   {task.prompt}")
+    if task.priority:
+        typer.echo(f"  priority: {task.priority}  (a hint the manager reads; quorum orders nothing)")
     typer.echo(f"  workdir:  {task.workdir or '(worktree created on first run)'}")
     if task.session:
         typer.echo(f"  session:  {task.session}")
@@ -1292,7 +1326,7 @@ def task_run(
     detach: bool = typer.Option(False, "--detach", help="Start the run in the background and return."),
     force: bool = typer.Option(
         False, "--force",
-        help="Run even while the task's dependencies are unfinished, or after a run over budget.",
+        help="Run even while the task is held, its dependencies are unfinished, or its last run went over budget.",
     ),
     fresh_session: bool = typer.Option(
         False,
@@ -1313,6 +1347,7 @@ def task_run(
         RunnerError,
         budget_blockers,
         budget_refusal,
+        held_refusal,
         launch_detached,
         run_task,
         unmet_dependencies,
@@ -1331,6 +1366,8 @@ def task_run(
     if not force:
         from .tasks import TaskStore
 
+        if task.held:
+            raise _fail(held_refusal(task))
         blockers = unmet_dependencies(TaskStore(target), task)
         if blockers:
             raise _fail(
@@ -1520,6 +1557,89 @@ def task_stop(
     if result["run_recorded"]:
         typer.echo("the interrupted run was recorded as stopped")
     typer.echo(f"resume it with `quorum task run {task.short_id} --detach`")
+
+
+@task_app.command("hold")
+def task_hold(task_id: str, home: Path | None = _HOME_OPT) -> None:
+    """Park a queued task: nothing launches it until you release it.
+
+    A parking brake, not an ending — unlike `task cancel` the status is
+    untouched (it stays whatever the harness last reported), the worktree and
+    queue position survive, and `quorum task release` puts it back. The
+    runner refuses a held task (`--force` overrides), and the manager is told
+    never to launch or release one.
+
+    It gates the next launch only: a run already in flight keeps going (stop
+    it with `task stop`), and an adopted session is not affected at all.
+    """
+    from .runner import hold_note
+    from .tasks import TaskStore
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    if task.held:
+        typer.echo(f"task {task.short_id} is already held")
+        return
+    _actor_guard(target, "task.hold", target=task.short_id, target_status=task.status)
+    TaskStore(target).update(task.id, held=True)
+    typer.secho(
+        f"task {task.short_id} held — status is still {task.status!r}; "
+        f"`quorum task release {task.short_id}` to unpark it",
+        fg="green",
+    )
+    # A brake on the next launch stops nothing already moving: say which,
+    # rather than let "held" read as if the live run had been parked too.
+    note = hold_note(target, task)
+    if note:
+        typer.secho(note, fg="yellow")
+
+
+@task_app.command("release")
+def task_release(task_id: str, home: Path | None = _HOME_OPT) -> None:
+    """Release a held task so it can be launched again."""
+    from .tasks import TaskStore
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    if not task.held:
+        typer.echo(f"task {task.short_id} is not held")
+        return
+    _actor_guard(target, "task.release", target=task.short_id, target_status=task.status)
+    TaskStore(target).update(task.id, held=False)
+    typer.secho(f"task {task.short_id} released — launchable again", fg="green")
+
+
+@task_app.command(
+    "set-priority",
+    # so that a negative priority (`set-priority a3f2k9 -2`) reads as the
+    # argument it is instead of an unknown short option
+    context_settings={"ignore_unknown_options": True},
+)
+def task_set_priority(
+    task_id: str,
+    priority: int = typer.Argument(help="Higher goes first; 0 is the default; negative pushes it back."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Set a task's priority — the ordering hint the manager reads.
+
+    Quorum sorts nothing by it: the number is rendered on the manager's
+    digest and badged in the views, and `prompts/manager.md` is what turns it
+    into a launch order.
+    """
+    from .tasks import TaskStore
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    _actor_guard(
+        target, "task.set-priority", target=task.short_id, target_status=task.status,
+        args=str(priority),
+    )
+    TaskStore(target).update(task.id, priority=priority)
+    typer.secho(
+        f"task {task.short_id} priority {task.priority} → {priority} "
+        "(a hint the manager reads; quorum orders nothing)",
+        fg="green",
+    )
 
 
 @task_app.command("cancel")
