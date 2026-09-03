@@ -2043,6 +2043,27 @@ def project_list(
     _print_table(_project_table(rows))
 
 
+def _notes_text(source: Path) -> str:
+    """`--notes-file`, read the way `_task_prompt` reads a prompt: as bytes
+    decoded here, not through `read_text`/`sys.stdin.read`.
+
+    Notes are prompt text now — they are quoted verbatim into the preamble's
+    {project} block — so what lands in the registry has to be byte-for-byte
+    what was written, instead of whatever the locale encoding and universal
+    newlines make of it."""
+    if str(source) == "-":
+        # Nothing is piped in: say so, or the blocking read looks like a hang.
+        if _stdin_is_tty():
+            typer.echo("reading the notes from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
+        return _stdin_prompt()
+    try:
+        return source.read_bytes().decode("utf-8")
+    except OSError as e:
+        raise _fail(f"cannot read {source}: {e}") from None
+    except UnicodeDecodeError:
+        raise _fail(f"cannot read {source}: it is not valid UTF-8") from None
+
+
 @project_app.command("set")
 def project_set(
     slug: str,
@@ -2065,20 +2086,18 @@ def project_set(
     """
     from .projects import ProjectRegistry
 
-    if notes_file is not None:
-        if notes is not None:
-            raise _fail("pass --notes or --notes-file, not both")
-        try:
-            notes = (
-                sys.stdin.read()
-                if str(notes_file) == "-"
-                else notes_file.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError) as e:
-            raise _fail(f"cannot read {notes_file}: {e}") from None
+    if notes_file is not None and notes is not None:
+        raise _fail("pass --notes or --notes-file, not both")
     target = get_home(home)
-    _actor_guard(target, "project.set", target=slug)
     registry = ProjectRegistry(target)
+    if notes_file is not None:
+        # Read last, after everything that can be checked without it: piped
+        # notes are gone the moment stdin is drained, so a typo in the slug
+        # must not eat them (`task add` reads its prompt the same way round).
+        if registry.get(slug) is None:
+            raise _fail(f"no project {slug!r}")
+        notes = _notes_text(notes_file)
+    _actor_guard(target, "project.set", target=slug)
     try:
         project = registry.update(
             slug,

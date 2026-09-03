@@ -180,8 +180,10 @@ task-facing only (the manager digest does not change). `prompts.project_block`
 assembles it from two sources, in that order:
 
 1. the project's registry `notes` — `projects/<slug>.json`, already merged
-   with the `.quorum.toml` marker, editable with `quorum project set <slug>
-   --notes --notes-file`;
+   with the `.quorum.toml` marker, editable with `quorum project set <slug>`
+   and either `--notes` or `--notes-file` (`-` for stdin, read as bytes and
+   decoded as UTF-8 like a task prompt, and read only after the slug checks
+   out so a typo cannot eat piped text);
 2. `.quorum/<name>.local.md` *inside the project directory*
    (`.quorum/task-preamble.local.md` in practice) — user-owned, versioned
    with the repo if the user wants, and **read only**, like every other

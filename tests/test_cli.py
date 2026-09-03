@@ -983,6 +983,68 @@ def test_project_set_reads_notes_from_a_file(home: Path, tmp_path: Path):
     assert ProjectRegistry(home).get(slug).notes.startswith("Base every branch")
 
 
+def test_project_set_reads_the_notes_the_way_a_prompt_is_read(home: Path, tmp_path: Path):
+    """Notes are prompt text now — quoted verbatim into the preamble's
+    {project} block — so --notes-file reads bytes and decodes them here,
+    exactly as `task add` reads a prompt. `read_text` and `sys.stdin.read`
+    both rewrite CRLF (and stdin's decoding follows the locale, not UTF-8)."""
+    from quorum.projects import ProjectRegistry
+
+    slug = setup_task_env(home, tmp_path)
+    crlf = tmp_path / "conventions.md"
+    crlf.write_bytes(b"Base on develop.\r\nRun `just check`.\r\n")
+
+    r = runner.invoke(
+        app, ["project", "set", slug, "--notes-file", str(crlf), "--home", str(home)]
+    )
+    assert r.exit_code == 0, r.output
+    assert ProjectRegistry(home).get(slug).notes == "Base on develop.\r\nRun `just check`.\r\n"
+
+    r = runner.invoke(
+        app,
+        ["project", "set", slug, "--notes-file", "-", "--home", str(home)],
+        input="Base on develop.\r\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert ProjectRegistry(home).get(slug).notes == "Base on develop.\r\n"
+
+    bad = tmp_path / "bad.md"
+    bad.write_bytes(b"base on \xff\xfe develop\n")
+    r = runner.invoke(
+        app, ["project", "set", slug, "--notes-file", str(bad), "--home", str(home)]
+    )
+    assert r.exit_code == 1 and "not valid UTF-8" in _plain(r.output)
+    assert "Traceback" not in r.output
+
+
+def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path: Path, monkeypatch):
+    """Piped notes are gone the moment stdin is drained, so a typo in the
+    slug must not eat them — the rule `task add` already follows."""
+    from quorum import cli
+    from quorum.projects import ProjectRegistry
+
+    slug = setup_task_env(home, tmp_path)
+    read: list[str] = []
+    monkeypatch.setattr(cli, "_stdin_prompt", lambda: read.append("drained") or "base on main\n")
+
+    r = runner.invoke(
+        app,
+        ["project", "set", "ghots", "--notes-file", "-", "--home", str(home)],
+        input="base on main\n",
+    )
+    assert r.exit_code == 1 and "no project" in _plain(r.output)
+    assert read == []
+
+    r = runner.invoke(
+        app,
+        ["project", "set", slug, "--notes-file", "-", "--home", str(home)],
+        input="base on main\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert read == ["drained"]
+    assert ProjectRegistry(home).get(slug).notes == "base on main\n"
+
+
 def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
     """The third prompt layer has to be findable: `prompt list` already
     answers "what will a run actually be told", and per-project text is part
