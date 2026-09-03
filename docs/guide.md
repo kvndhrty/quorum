@@ -797,8 +797,9 @@ constitution (`manager.md`), the task preamble (`task-preamble.md`), the
 perpetual block (`task-perpetual.md`), and one per prompt-driven agent.
 `quorum init` seeds them, and deleting one restores the packaged default.
 Re-run `quorum init` after upgrading quorum: a prompt you never edited is
-refreshed to the new packaged default (quorum recognizes a pristine seed by
-hash), and one you did edit is left alone.
+refreshed to the new packaged default (init keeps a record of what it
+seeded in `prompts/.seeded.json`, so an untouched copy is recognized even
+after the default moves on), and one you did edit is left alone.
 
 There are four layers, and they resolve in this order — each one optional,
 each one added on top of the last:
