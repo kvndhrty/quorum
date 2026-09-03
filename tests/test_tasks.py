@@ -1216,6 +1216,103 @@ def test_a_perpetual_run_survives_an_edited_preamble_without_the_placeholder(
     assert "Never report `done` or `cancelled`" in cycling
 
 
+# -- issue intake (#62) ------------------------------------------------------
+
+ISSUE_URL = "https://github.com/kvndhrty/quorum/issues/62"
+
+
+def test_a_run_from_an_issue_is_told_which_issue(home: Path, project: str):
+    """The url is already inside the prompt; the preamble adds the
+    convention — reference it, and never write to the forge."""
+    harness_config(home)
+    config = load_config(home)
+    store = TaskStore(home)
+    from_issue = store.add(project, f"Fix it\n\nbody\n\n({ISSUE_URL})", "fake", issue_url=ISSUE_URL)
+    ordinary = store.add(project, "fix the docs", "fake")
+
+    assert run_task(home, config, from_issue.id) == 0
+    assert run_task(home, config, ordinary.id) == 0
+
+    text = transcript_text(home, from_issue.id)
+    assert f"This task came from {ISSUE_URL} (#62)" in text
+    assert "Do not edit, comment on or close the issue itself" in text
+    assert "PROMPT| {issue}" not in text  # always substituted
+
+    once = transcript_text(home, ordinary.id)
+    assert "This task came from" not in once and "PROMPT| {issue}" not in once
+
+
+def test_an_issue_run_survives_an_edited_preamble_without_the_placeholder(
+    home: Path, project: str
+):
+    """Same upgrade hazard as {perpetual}: a home that customized the
+    preamble before {issue} existed would never tell the harness where the
+    task came from, so the line is appended instead."""
+    from quorum import prompts
+
+    harness_config(home)
+    edited = prompts.load(home, "task-preamble").replace("\n{issue}\n", "\n")
+    assert "\n{issue}\n" not in edited and "{{issue}}" in edited
+    (home / "prompts" / "task-preamble.md").write_text(edited)
+
+    store = TaskStore(home)
+    task = store.add(project, "fix it", "fake", issue_url=ISSUE_URL)
+    assert run_task(home, load_config(home), task.id) == 0
+    assert f"This task came from {ISSUE_URL} (#62)" in transcript_text(home, task.id)
+
+
+def test_issue_url_survives_a_round_trip_and_defaults_to_none(home: Path):
+    store = TaskStore(home)
+    assert store.add("proj", "ordinary", "fake").issue_url is None
+    from_issue = store.add("proj", "from an issue", "fake", issue_url=ISSUE_URL)
+    assert store.get(from_issue.id).issue_url == ISSUE_URL
+    # the record is where the work came from, never what happened to it:
+    # nothing in quorum ever writes it again
+    assert store.update(from_issue.id, status="done").issue_url == ISSUE_URL
+
+
+def test_a_task_json_written_before_issue_url_existed_still_loads(home: Path):
+    import json as _json
+
+    store = TaskStore(home)
+    task = store.add("p", "old record", "fake")
+    path = task_json_path(home, task.id)
+    data = _json.loads(path.read_text())
+    del data["issue_url"]
+    path.write_text(_json.dumps(data))
+
+    assert store.get(task.id).issue_url is None
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        (ISSUE_URL, "#62"),
+        (ISSUE_URL + "/", "#62"),
+        ("https://gitlab.com/g/p/-/issues/7", "#7"),
+        (None, ""),
+        ("", ""),
+        # not a shape we can abbreviate: shown whole rather than guessed at
+        ("https://example.test/tickets/abc", "https://example.test/tickets/abc"),
+    ],
+)
+def test_issue_ref_is_the_one_short_form_every_surface_uses(url, expected):
+    assert tasks.issue_ref(url) == expected
+
+
+def test_views_carry_both_the_url_and_the_short_form(home: Path):
+    from quorum import views
+
+    store = TaskStore(home)
+    task = store.add("p", "from an issue", "fake", issue_url=ISSUE_URL)
+    plain = store.add("p", "from a prompt", "fake")
+
+    rows = {r["id"]: r for r in views.task_rows(home)}
+    assert rows[task.id]["issue_url"] == ISSUE_URL
+    assert rows[task.id]["issue_ref"] == "#62"
+    assert rows[plain.id]["issue_url"] is None and rows[plain.id]["issue_ref"] == ""
+
+
 # -- prompt overlay (#37) ----------------------------------------------------
 
 

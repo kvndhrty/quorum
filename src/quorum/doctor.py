@@ -355,13 +355,13 @@ def check_gh(home: Path, config: Config) -> Check:
     it looks configured and produces nothing — every `ci:` line disappears
     from the digest with no trace anywhere.
 
-    The gh call itself goes through `ci.auth_status` — `ci.py` is the only
-    module that shells out to gh, and asking it means doctor asks with the
-    probe's own `[ci]` settings rather than a second opinion. Its `None`
-    ("no answer": gh timed out, or the probe declined) is a `–`, not a `✗`:
-    a laptop on a plane is not a misconfigured home.
+    The gh call itself goes through `forge.auth_status` — `forge.py` is the
+    only module that shells out to a forge CLI, and asking it means doctor
+    asks with the probe's own `[ci]` settings rather than a second opinion.
+    Its `None` ("no answer": gh timed out, or the probe declined) is a `–`,
+    not a `✗`: a laptop on a plane is not a misconfigured home.
     """
-    from .ci import auth_status
+    from .forge import auth_status
 
     if not config.ci.enabled:
         return na("ci.gh", "[ci].enabled = false — the manager sees no PR/check state")

@@ -1,5 +1,7 @@
 <!-- Prepended to every task run's prompt. Placeholders: {{task_id}} the task's
      short id; {{project_path}} the directory the harness runs in;
+     {{issue}} the line naming the forge issue a task queued with
+     `task add --issue` came from (empty otherwise);
      {{perpetual}} the extra instructions for a task queued with
      `task add --perpetual` (empty for an ordinary task — see
      prompts/task-perpetual.md); {{local}} the conventions of this home,
@@ -48,6 +50,7 @@ assume gh, glab, or any other forge CLI is installed):
   Otherwise the pushed branch IS the deliverable — name it in your report.
 - When the work is complete (committed, pushed, PR opened if possible):
     quorum task report {task_id} --status done "<summary incl. branch name>"
+{issue}
 
 {local}
 

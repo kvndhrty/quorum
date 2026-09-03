@@ -155,6 +155,24 @@ def test_task_rows_expose_the_observed_pr_state(client: TestClient, home: Path):
 
     page = (Path(web_app.__file__).parent / "static" / "index.html").read_text()
     assert 't.pr_state === "merged"' in page and 't.pr_state === "closed"' in page
+def test_task_rows_expose_the_issue_a_task_came_from(client: TestClient, home: Path):
+    """The browser links back to the issue; quorum only ever read it."""
+    from quorum.web import app as web_app
+
+    store = TaskStore(home)
+    url = "https://github.com/kvndhrty/quorum/issues/62"
+    from_issue = store.add("web-proj", "issue work", "fake", issue_url=url)
+    plain = store.add("web-proj", "prompt work", "fake")
+
+    rows = {r["id"]: r for r in client.get("/api/tasks").json()}
+    assert rows[from_issue.id]["issue_url"] == url
+    assert rows[from_issue.id]["issue_ref"] == "#62"
+    assert rows[plain.id]["issue_url"] is None and rows[plain.id]["issue_ref"] == ""
+
+    page = (Path(web_app.__file__).parent / "static" / "index.html").read_text()
+    assert "t.issue_url" in page and "t.issue_ref" in page
+
+
 def test_ack_drops_an_escalation_from_the_banner(client: TestClient, home: Path):
     """The web Ack button: the same bus call the CLI and the TUI make, so the
     banner drops the message and messages/archive/ keeps it."""

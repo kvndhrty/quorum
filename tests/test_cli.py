@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import install_gh
 from quorum import fsio
 from quorum.cli import app
 
@@ -292,6 +293,109 @@ def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
         ["task", "add", slug, "--prompt-file", str(missing), "--harness", "fake", "--home", str(home)],
     )
     assert r.exit_code == 1 and "cannot read" in r.output
+
+
+# -- issue intake (--issue) --------------------------------------------------
+
+ISSUE = {
+    "number": 62,
+    "title": "Issue intake: task add --issue",
+    "body": "## Problem\n\nquorum does not know about issues.",
+    "url": "https://github.com/kvndhrty/quorum/issues/62",
+}
+
+
+def test_task_add_from_an_issue_composes_the_prompt_and_records_the_url(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The whole point: one flag, and the task carries both the work and a
+    link back to where it came from."""
+    slug = setup_task_env(home, tmp_path)
+    install_gh(path_without_gh, monkeypatch, issue=ISSUE)
+
+    r = runner.invoke(
+        app, ["task", "add", slug, "--issue", "62", "--harness", "fake", "--home", str(home)]
+    )
+    assert r.exit_code == 0, r.output
+    assert ISSUE["url"] in r.output
+
+    from quorum.tasks import TaskStore
+
+    task = TaskStore(home).list()[0]
+    assert task.prompt == f"{ISSUE['title']}\n\n{ISSUE['body']}\n\n({ISSUE['url']})"
+    assert task.issue_url == ISSUE["url"]
+
+    # the listing abbreviates, `task show` has the page you open
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "#62" in r.output
+    r = runner.invoke(app, ["task", "show", task.short_id, "--home", str(home)])
+    assert ISSUE["url"] in r.output
+
+
+def test_a_prompt_given_with_an_issue_is_appended(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    slug = setup_task_env(home, tmp_path)
+    install_gh(path_without_gh, monkeypatch, issue=ISSUE)
+
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "keep the diff small", "--issue", ISSUE["url"],
+         "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert stored_prompt(home) == (
+        f"{ISSUE['title']}\n\n{ISSUE['body']}\n\n({ISSUE['url']})\n\nkeep the diff small"
+    )
+
+
+def test_issue_intake_fails_loudly_and_queues_nothing(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The opposite of the manager's probe: `--issue` is interactive, so a
+    forge that cannot answer is an error naming the fix — never a task
+    queued with an empty prompt."""
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+
+    # no gh at all (path_without_gh installed none)
+    r = runner.invoke(
+        app, ["task", "add", slug, "--issue", "62", "--harness", "fake", "--home", str(home)]
+    )
+    assert r.exit_code == 1 and "no `gh` on PATH" in r.output
+    assert TaskStore(home).list() == []
+
+    # a gh that cannot find the issue
+    install_gh(path_without_gh, monkeypatch, mode="noissue")
+    r = runner.invoke(
+        app, ["task", "add", slug, "--issue", "999999", "--harness", "fake", "--home", str(home)]
+    )
+    assert r.exit_code == 1 and "Could not resolve to an Issue" in r.output
+    assert TaskStore(home).list() == []
+
+    # a reference that is not an issue at all: refused before any subprocess
+    r = runner.invoke(
+        app, ["task", "add", slug, "--issue", "the auth one", "--harness", "fake", "--home", str(home)]
+    )
+    assert r.exit_code == 1 and "is not an issue" in r.output
+    assert TaskStore(home).list() == []
+
+
+def test_issue_intake_still_refuses_two_prompt_sources(
+    home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """--issue makes the prompt optional, not the rule negotiable."""
+    slug = setup_task_env(home, tmp_path)
+    install_gh(path_without_gh, monkeypatch, issue=ISSUE)
+    body = tmp_path / "extra.md"
+    body.write_text("and this")
+    r = runner.invoke(
+        app,
+        ["task", "add", slug, "do it", "--prompt-file", str(body), "--issue", "62",
+         "--harness", "fake", "--home", str(home)],
+    )
+    assert r.exit_code == 1 and "exactly one way" in r.output
 
 
 def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):

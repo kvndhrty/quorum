@@ -1,4 +1,4 @@
-"""Optional CI/PR observation: the only module that shells out to `gh`.
+"""Optional CI/PR observation: the digest's read of a task's pull request.
 
 Quorum's ground-truth instinct used to stop at "pushed": `workdir_git_state`
 sees a dirty or unpushed worktree, and nothing looked at what happened
@@ -12,25 +12,28 @@ It is observation enrichment, nothing more. Deciding what to do about red CI
 stays in prompts (`prompts/manager.md`, or a babysitter prompt agent) —
 there is no Python here that nudges, relaunches, or blocks anything.
 
-Like `herdr.py` and unlike `sandbox.py`, this module **fails soft**: no `gh`
-on PATH, no authentication, no remote, no GitHub, no PR for the branch, a
-slow network, or an unexpected JSON shape all degrade to `None`. A digest
-must never fail to build because a probe could not reach a forge.
+The subprocess lives in `forge.py`, the one module that invokes a forge CLI;
+this file is the digest-facing half over it. Like `herdr.py` and unlike
+`sandbox.py`, that half **fails soft**: no `gh` on PATH, no authentication,
+no remote, no GitHub, no PR for the branch, a slow network, or an unexpected
+JSON shape all degrade to `None`. A digest must never fail to build because
+a probe could not reach a forge.
 
-Cost note: each probe is one `gh` subprocess making a network call, run once
-per digested task per manager tick. `[ci].enabled = false` turns the whole
-thing off; `[ci].timeout_seconds` bounds one call.
+Cost note: each probe is one forge-CLI subprocess making a network call, run
+once per digested task per manager tick. `[ci].enabled = false` turns the
+whole thing off; `[ci].timeout_seconds` bounds one call.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
-import subprocess
 from pathlib import Path
 
-DEFAULT_TIMEOUT_SECONDS = 10.0
+# The forge CLI itself is `forge.py`'s business: `available` answers "is a
+# probe worth a subprocess" for the digest's budget, `run_json` is the
+# fail-soft call. Re-exported rather than wrapped so there is one
+# implementation and callers (the manager tick) keep one import.
+from .forge import available, run_json
+
 # The digest line names failing checks; a PR with fifty red checks must not
 # turn one line into a wall.
 MAX_FAILING_NAMES = 5
@@ -62,114 +65,6 @@ FAILING_CONCLUSIONS = frozenset(
 )
 FAILING_STATES = frozenset({"FAILURE", "ERROR"})
 PENDING_STATES = frozenset({"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"})
-
-# gh is interactive by default in ways an unattended probe must refuse: it
-# pages output, colorizes it, and can block on an auth prompt forever.
-GH_ENV = {
-    "GH_PAGER": "cat",
-    "PAGER": "cat",
-    "GH_PROMPT_DISABLED": "1",
-    "GH_NO_UPDATE_NOTIFIER": "1",
-    "NO_COLOR": "1",
-    "CLICOLOR": "0",
-}
-
-
-def _config(home: Path):
-    """The [ci] table, or None when there is no readable config; never raises.
-
-    None means *disabled*, not "defaults". A config.toml quorum cannot parse
-    may well be the one carrying `[ci].enabled = false`, and this probe is
-    the kind that spends a subprocess and a network call: when in doubt it
-    must degrade toward doing less, never toward doing more behind the
-    user's back (`config.try_load_config` documents the policy).
-    """
-    from .config import try_load_config
-
-    config = try_load_config(Path(home))
-    return config.ci if config is not None else None
-
-
-def available(home: Path) -> bool:
-    """True when a probe could plausibly work: enabled, and `gh` on PATH."""
-    cfg = _config(home)
-    if cfg is None or not cfg.enabled:
-        return False
-    try:
-        return shutil.which("gh") is not None
-    except OSError:
-        return False
-
-
-def _timeout(home: Path) -> float:
-    cfg = _config(home)
-    return cfg.timeout_seconds if cfg is not None else DEFAULT_TIMEOUT_SECONDS
-
-
-def _gh(home: Path, workdir: Path, *args: str) -> object | None:
-    """One `gh ... --json` call inside `workdir`; any failure → None.
-
-    Nonzero exit is the common, uninteresting case (no PR for this branch,
-    no remote, not logged in) — silence, not an error.
-    """
-    try:
-        proc = subprocess.run(
-            ["gh", *args],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-            timeout=_timeout(home),
-            env={**os.environ, **GH_ENV},
-            stdin=subprocess.DEVNULL,
-        )
-    except Exception:
-        # Fail-soft like herdr.py's bare except: timeouts and exec errors are
-        # the usual suspects, but text=True can also raise UnicodeDecodeError
-        # on non-UTF-8 output, and none of them may break a digest.
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        return json.loads(proc.stdout)
-    except (ValueError, TypeError):
-        return None
-
-
-def auth_status(home: Path) -> bool | None:
-    """Is `gh` authenticated? True / False / **None for "no answer"**.
-
-    The module's second and only other entry point, for `quorum doctor`:
-    nothing outside this file may shell out to gh, so the question "would a
-    probe actually get anywhere?" has to be asked here too.
-
-    None is not a failure — it is the probe declining to answer: `[ci]` off
-    (or an unreadable config, which means the same thing here), no gh on
-    PATH, or gh that did not reply within `[ci].timeout_seconds`. An
-    offline machine must not be reported as a broken one, so only an
-    explicit non-zero exit from a gh that *did* answer is False.
-    """
-    cfg = _config(home)
-    if cfg is None or not cfg.enabled:
-        return None
-    try:
-        if shutil.which("gh") is None:
-            return None
-    except OSError:
-        return None
-    try:
-        proc = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True,
-            text=True,
-            timeout=cfg.timeout_seconds,
-            env={**os.environ, **GH_ENV},
-            stdin=subprocess.DEVNULL,
-        )
-    except Exception:
-        # Same fail-soft bare except as `_gh`: a timeout, an exec error and a
-        # UnicodeDecodeError on non-UTF-8 output all mean "no answer".
-        return None
-    return proc.returncode == 0
 
 
 def normalize_state(raw: object) -> str:
@@ -278,7 +173,7 @@ def pr_state(home: Path, task) -> dict | None:
         return None
     if not available(home):
         return None
-    return _summarize(_gh(home, directory, "pr", "view", "--json", PR_FIELDS))
+    return _summarize(run_json(home, directory, "pr", "view", "--json", PR_FIELDS))
 
 
 def describe(state: dict) -> str:

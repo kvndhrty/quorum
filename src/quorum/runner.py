@@ -61,6 +61,7 @@ from .tasks import (
     TaskStore,
     dependency_state,
     inbox_name,
+    issue_ref,
     runner_alive,
     runner_lock_path,
     runner_log_path,
@@ -453,6 +454,24 @@ def dependency_note(home: Path, task: Task) -> str | None:
 
 
 _PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
+_ISSUE_SLOT = re.compile(r"(?<!\{)\{issue\}(?!\})")
+
+
+def issue_note(task: Task) -> str:
+    """The preamble's line about the issue this task came from, or "".
+
+    The url is already inside the composed prompt (`forge.issue_prompt`
+    puts it there), but the *instruction* belongs with the other delivery
+    conventions: reference the issue in the PR, and do not touch the issue
+    itself — quorum never writes to a forge, and neither should a task.
+    """
+    if not task.issue_url:
+        return ""
+    return (
+        f"- This task came from {task.issue_url} ({issue_ref(task.issue_url)}). Reference "
+        "it in your commit messages and PR description so the work is traceable to it. "
+        "Do not edit, comment on or close the issue itself — that stays with the human."
+    )
 
 
 def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -> str:
@@ -465,12 +484,14 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
         if task.perpetual
         else ""
     )
+    issue = issue_note(task)
     preamble = prompts.render(
         home,
         "task-preamble",
         task_id=task.short_id,
         project_path=str(workdir),
         perpetual=perpetual,
+        issue=issue,
     )
     # An edited preamble from before the placeholder existed never
     # substitutes it (format_map preserves unknown keys but cannot invent
@@ -478,8 +499,14 @@ def compose_prompt(home: Path, task: Task, workdir: Path, guidance: list[str]) -
     # done" instructions ends on its first cycle. Append the block instead.
     # (The header documents the key as an escaped `{{perpetual}}`, so look
     # for an *unescaped* placeholder, not the substring.)
-    if perpetual and not _PERPETUAL_SLOT.search(prompts.load(home, "task-preamble")):
+    template = prompts.load(home, "task-preamble")
+    if perpetual and not _PERPETUAL_SLOT.search(template):
         preamble = f"{preamble.rstrip()}\n\n{perpetual}"
+    # Same story for the issue line, one placeholder younger: a preamble
+    # edited before `{issue}` existed would otherwise never tell the harness
+    # where the task came from.
+    if issue and not _ISSUE_SLOT.search(template):
+        preamble = f"{preamble.rstrip()}\n\n{issue}"
     parts = [
         re.sub(r"\n{3,}", "\n\n", preamble).strip(),
         f"# Task\n\n{task.prompt}",

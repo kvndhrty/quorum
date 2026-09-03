@@ -218,7 +218,9 @@ class QuorumTUI(App):
 
     def on_mount(self) -> None:
         tasks = self.query_one("#tasks", DataTable)
-        tasks.add_columns("task", "project", "status", "harness", "spent", "last report", "pr")
+        tasks.add_columns(
+            "task", "project", "status", "harness", "spent", "last report", "issue", "pr"
+        )
         tasks.cursor_type = "row"
         agents = self.query_one("#agents", DataTable)
         agents.add_columns("agent", "status", "schedule", "spent", "last run", "next run")
@@ -592,6 +594,9 @@ class QuorumTUI(App):
                         style="yellow" if t.get("budget_overages") else "",
                     ),
                     (t["last_report"] or t["prompt"])[:60],
+                    # Where it came from, where it went: `#62` and the PR
+                    # url, both rendered by views.task_rows.
+                    t.get("issue_ref") or "—",
                     t["pr_url"] or "—",
                     key=t["id"],
                 )

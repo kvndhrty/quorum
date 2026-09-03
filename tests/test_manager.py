@@ -714,6 +714,31 @@ def test_the_action_budget_is_in_every_digest_even_an_empty_home(home: Path, clo
     assert "Your last" not in digest
 
 
+# -- issue intake (#62) ------------------------------------------------------
+
+
+def test_the_digest_names_the_issue_a_task_came_from(home: Path, clock, project: str):
+    """So the manager can tell a human "the task for #62 is done" — the
+    short form on the line, the url one `task show` away."""
+    url = "https://github.com/kvndhrty/quorum/issues/62"
+    store = TaskStore(home)
+    live = store.add(project, "issue work", "tasktool", issue_url=url)
+    store.update(live.id, status="executing")
+    finished = store.add(project, "earlier issue work", "tasktool", issue_url=url)
+    store.update(finished.id, status="done")
+    plain = store.add(project, "prompt work", "tasktool")
+    store.update(plain.id, status="executing")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+
+    live_line = next(ln for ln in digest.splitlines() if f"[executing] {live.short_id}" in ln)
+    assert "issue=#62" in live_line
+    done_line = next(ln for ln in digest.splitlines() if f"[done] {finished.short_id}" in ln)
+    assert "issue=#62" in done_line
+    plain_line = next(ln for ln in digest.splitlines() if f"[executing] {plain.short_id}" in ln)
+    assert "issue=" not in plain_line  # an ordinary task's line is unchanged
+
+
 # -- perpetual tasks (#12) ---------------------------------------------------
 
 
