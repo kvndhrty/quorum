@@ -176,9 +176,14 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # the overlaps= revision, replaced by the #42 hung-session policy (stop,
         # --fresh-session, STALLED)
         "54221d7f36b8228bbaa71a44aff59f589f41034c346d95be288a59c63aaa09b3",
-        # the hung-session revision, replaced by the #81 note that a merged
-        # task is observed once and then read off `pr_state=merged`
+        # the hung-session revision, replaced by the priority/hold rule (#61)
         "0a20ea04b9e1b0ccc7675b88fa193023b0f6e630c760574dd8d1a974a5a1ee5e",
+        # that rule's first cut, replaced by scoping "never launch a held
+        # task" to the relaunch rules too (#61)
+        "97deff6263bf3a2a927ee0bde9f3f9d15f430ddce67d84c20c7d9be3a32bb973",
+        # the #61 revision on main, replaced by the #81 note that a merged
+        # task is observed once and then read off `pr_state=merged`
+        "fe1789d8c0f1b0c1c20bea6e481e7f3935297344f6e82e7d49bf560dec63edea",
     },
 }
 

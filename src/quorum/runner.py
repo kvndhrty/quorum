@@ -61,6 +61,7 @@ from .tasks import (
     TaskStore,
     dependency_state,
     inbox_name,
+    runner_alive,
     runner_lock_path,
     runner_log_path,
     short_handle,
@@ -684,8 +685,8 @@ def run_task(
 ) -> int:
     """Execute one run of a task in the foreground. Returns the harness exit code.
 
-    `force` waives the dependency and budget refusals below; nothing else
-    about a run changes.
+    `force` waives the hold, dependency and budget refusals below; nothing
+    else about a run changes.
 
     `fresh_session` drops the session id captured from earlier runs before
     composing the argv, so the harness starts a *new* session in the same
@@ -712,6 +713,13 @@ def run_task(
             f"task {task.short_id} is attached to a live interactive session — "
             "guide it with `quorum task nudge`, or `quorum task detach` it first"
         )
+    if task.held and not force:
+        # A substrate rail of the same narrow class: the user parked this
+        # task by hand (`quorum task hold`), so a launch is work they
+        # explicitly said they did not want yet. Hold is not a status — the
+        # task keeps whatever the harness last reported — and quorum never
+        # releases it; only a human does.
+        raise RunnerError(held_refusal(task))
     blockers = unmet_dependencies(store, task) if not force else []
     if blockers:
         # The second substrate rail, same class as the attached refusal: a
@@ -1031,6 +1039,37 @@ def budget_blockers(budget: TasksConfig, task: Task) -> list[str]:
     return usage.last_run_overages(
         task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
     )
+
+
+def held_refusal(task: Task) -> str:
+    """The one message the hold rail speaks with, wherever it is checked
+    (`run_task`, mirrored in `quorum task run` so `--detach` fails in the
+    parent too, and shown as a notice by the TUI's `s` binding)."""
+    return (
+        f"task {task.short_id} is held — `quorum task release {task.short_id}` "
+        "to unpark it, or `--force` to run it anyway"
+    )
+
+
+def hold_note(home: Path, task: Task) -> str | None:
+    """What a hold does *not* stop, or None when there is nothing to say.
+
+    `task hold` gates the next *launch*: it never signals a run already in
+    flight, and it means nothing at all to an adopted session (the runner
+    refuses those outright). Both are invisible from the brake's own
+    message, so the one line that says so lives here and every surface that
+    holds a task (`quorum task hold`, the TUI's `h`) prints it."""
+    if task.attached:
+        return (
+            "its live interactive session keeps going — a hold gates launches; "
+            f"`quorum task detach {task.short_id}` is what ends an adoption"
+        )
+    if runner_alive(home, task.id):
+        return (
+            f"its live runner keeps going — `quorum task stop {task.short_id}` "
+            "ends the current run"
+        )
+    return None
 
 
 def budget_refusal(task: Task, over: list[str]) -> str:

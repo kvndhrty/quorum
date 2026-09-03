@@ -221,3 +221,17 @@ def test_the_page_ships_the_attention_panel_and_its_ack_button(client: TestClien
     assert 'id="attention-panel"' in page
     assert "/api/board/attention/ack/" in page
     assert "data-ack" in page
+
+
+def test_task_rows_expose_priority_and_hold(client: TestClient, home: Path):
+    """The browser reads the same fields off the same read model, and the
+    list is never reordered by priority — quorum sorts nothing (#61)."""
+    store = TaskStore(home)
+    first = store.add("web-proj", "whenever", "fake")
+    second = store.add("web-proj", "first", "fake", priority=4, held=True)
+
+    rows = client.get("/api/tasks").json()
+    assert [r["id"] for r in rows] == [first.id, second.id]
+    by_id = {r["id"]: r for r in rows}
+    assert (by_id[first.id]["priority"], by_id[first.id]["held"]) == (0, False)
+    assert (by_id[second.id]["priority"], by_id[second.id]["held"]) == (4, True)

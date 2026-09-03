@@ -534,3 +534,84 @@ def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
         assert MessageBus(home).read_topic("attention") == []
 
     drive(home, script)
+
+
+def test_h_holds_and_releases_the_highlighted_task(home: Path):
+    """`h` is a thin `TaskStore.update` on the highlighted row, and it toggles
+    — hold is not destructive, so unlike `c` it does not confirm (#61)."""
+    ids = populate(home)
+
+    async def script(app, pilot):
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is True
+        # a status the harness owns is untouched by the parking brake
+        assert TaskStore(home).get(ids[0]).status == "queued"
+        table = app.query_one("#tasks", DataTable)
+        assert "⏸" in str(table.get_row_at(0)[2])
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is False
+
+    drive(home, script)
+
+
+def test_run_refuses_a_held_task(home: Path, monkeypatch):
+    ids = populate(home)
+    TaskStore(home).update(ids[0], held=True)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        "quorum.runner.launch_detached", lambda h, task_id: launched.append(task_id) or 1
+    )
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == []
+        # `h` is the release, and the run goes through afterwards
+        await pilot.press("h")
+        await pilot.press("s")
+        await pilot.pause()
+        assert launched == [ids[0]]
+
+    drive(home, script)
+
+
+def test_plus_and_minus_nudge_priority_without_reordering_the_table(home: Path):
+    ids = populate(home)
+
+    async def script(app, pilot):
+        await pilot.press("plus", "plus")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).priority == 2
+        table = app.query_one("#tasks", DataTable)
+        assert "↑2" in str(table.get_row_at(0)[2])
+        # the row the reader is pointing at must not move under the cursor
+        assert [table.get_row_at(r)[0] for r in range(table.row_count)] == [
+            t[-6:].lower() for t in ids
+        ]
+        await pilot.press("minus", "minus", "minus")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).priority == -1
+        assert "↓1" in str(app.query_one("#tasks", DataTable).get_row_at(0)[2])
+
+    drive(home, script)
+
+
+def test_h_says_a_live_run_keeps_going(home: Path):
+    """`h` speaks the same line `quorum task hold` does: the brake gates the
+    next launch, and the run already in flight is not stopped by it (#61)."""
+    from quorum import fsio
+
+    ids = populate(home)
+    fsio.atomic_write_json(runner_lock_path(home, ids[0]), {"pid": 1})
+
+    async def script(app, pilot):
+        await pilot.press("h")
+        await pilot.pause()
+        assert TaskStore(home).get(ids[0]).held is True
+        message = str(list(app._notifications)[-1].message)
+        assert "live runner keeps going" in message and "task stop" in message
+
+    drive(home, script)

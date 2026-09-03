@@ -76,7 +76,8 @@ projects/<slug>.json              canonical project records (machine-owned JSON)
 tasks/<id>/task.json              task spec + reported status + session + runs
                                   (each run: times, exit code, auto-commit
                                    note, reported token/cost usage) + the
-                                  attached / perpetual flags + depends_on:
+                                  attached / perpetual / held flags +
+                                  priority + depends_on:
                                   full ids this task waits on + pr_state /
                                   pr_state_at: what the forge last said about
                                   the PR, the one materialized probe result
@@ -312,8 +313,9 @@ transcript. So capture is one more look at each parsed event
   evidence of spend), clears the gate on its own — a rate limit on
   relaunching a task that just blew its budget, not a sentence for one that
   once did. It is the fourth substrate refusal, beside `runner.lock`, the
-  attached-task refusal and the dependency refusal (*Task dependencies*
-  below), and the second rail of the **rate-limit family** the per-run
+  attached-task refusal, the dependency refusal (*Task dependencies*
+  below) and the hold refusal (*Priority and hold*, below), and the
+  second rail of the **rate-limit family** the per-run
   action cap belongs to: it bounds a bad task's blast radius and never
   vetoes a particular choice. What to do instead of relaunching — a sharper
   nudge, a decomposition, an escalation — lives in `prompts/manager.md`,
@@ -566,7 +568,8 @@ Cross-project chains work by construction, since ids are global.
   `--detach` fails in the parent too) refuses a task with unfinished
   dependencies unless `--force`. This is the third rail of that class, next
   to `runner.lock` and the attached-task refusal (the budget gate under
-  *Token/cost usage* is the fourth) — a deliberate bend of "the action cap
+  *Token/cost usage* is the fourth, and the hold refusal under *Priority and
+  hold* the fifth) — a deliberate bend of "the action cap
   is the only rail", justified the same way: a dependent launched
   early is pure waste (it reviews a PR that does not exist yet), and the
   manager is the only caller that would ever do it by accident. It refuses
@@ -584,6 +587,62 @@ Cross-project chains work by construction, since ids are global.
   `quorum task show <id>` for the full record, reports and branch. That is
   deliberately the whole mechanism: no `{depends.*}` template substitution,
   no result-passing channel.
+
+### Priority and hold
+
+(User-facing how-to: [guide.md](guide.md#priority-and-holding-a-task).)
+
+Two fields on `task.json`, and the same stance as `depends_on`: neither is a
+scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
+<id> N`) is the user's ordering signal; `held: bool = False` (`task hold` /
+`task release`) is their parking brake.
+
+- **Priority is data the manager reads, and Python orders nothing by it.**
+  No sort anywhere: `TaskStore.list` stays chronological, `views.task_rows`
+  hands the browser and the TUI the rows in that order, and the digest lists
+  active tasks in it. The number reaches a decision only through
+  `prompts/manager.md`, which is told to prefer the higher priority among
+  the tasks it *could* launch this tick. That is the whole mechanism —
+  changing the policy is editing a prompt, not the queue. Negative values
+  are legal and mean "push this to the back".
+- **The digest renders `priority=N` only when it is not 0**, so an ordinary
+  task's line is unchanged and the mark reads as the exception it is (the
+  same rule `perpetual=true` follows). Views badge `↑N` / `↓N` for the same
+  reason.
+- **Hold is not a status.** `task hold` never touches `status` — that stays
+  the harness's word — and never touches the worktree, the branch, the
+  session or the queue position. It is the parking brake `task cancel` is
+  not: `task release` puts the task back exactly as it was. The digest
+  renders `held=true` *always* (a held task otherwise reads as launchable —
+  `runner=dead`, `status queued` — and nothing else on its line would say
+  differently) plus one line telling the manager not to launch or release it.
+  It gates the next *launch* and nothing else: a run already in flight keeps
+  going (`task stop` ends it) and an adopted session is untouched (the
+  runner refuses those outright), both of them invisible from the word
+  "held". `runner.hold_note` is the one line that says which, printed by
+  `quorum task hold` and by the TUI's `h`.
+- **The hold refusal is the fifth substrate rail**, next to `runner.lock`,
+  the attached-task refusal, the dependency refusal ([above](#task-dependencies))
+  and the budget gate. `run_task` raises `held_refusal(task)` before taking
+  the lock or spending anything; `quorum task run` mirrors it so `--detach`
+  fails in the parent too, and the TUI's `s` key shows it as a notice.
+  `--force` waives it for one run and **does not release the hold** — the
+  same shape as the other four, justified the same way: a launch the human
+  explicitly parked is pure waste, and the manager is the only caller that
+  would ever do it by accident.
+- **Only a human releases a hold.** Nothing in Python lifts it — not a
+  finished dependency, not a `--force` run, not the janitor — and
+  `prompts/manager.md` says outright never to run `quorum task release`,
+  escalating with `board post attention` instead. The prompt is the fence
+  here, not a check: `task release` is an ordinary CLI verb and a harness
+  that ignores its instructions can call it, which is exactly the
+  convention-not-boundary line `notes.may_write` draws.
+- **Every verb is an ordinary `TaskStore.update` behind `_actor_guard`**, so
+  `task.hold` / `task.release` / `task.set-priority` are journaled and count
+  against an agent's per-run action cap like anything else. The TUI's `h`
+  (toggle) and `+` / `-` (±1) are the same thin store calls through
+  `_write`; `h` does not confirm, because unlike `c` nothing is lost by
+  pressing it twice.
 
 ### Attached tasks: adopting a live session
 
@@ -1303,16 +1362,22 @@ write logic that lives in a view:
 - **TUI** (`tui/app.py`): nudge a task (`n`), send the manager a directive
   (`m` — the `manager` inbox, exactly `quorum manager tell`, and the reason
   the TUI needs no task-add form: the manager runs `task add` itself,
-  journaled and capped), start a detached run (`s`), cancel a task (`c`).
-  `s` refuses an attached task and a task whose runner is alive, mirroring
-  the runner's own substrate rails; `c` is the one destructive binding, so
+  journaled and capped), start a detached run (`s`), cancel a task (`c`),
+  hold/release a task (`h`) and nudge its priority (`+` / `-`).
+  `s` refuses an attached task, a held task and a task whose runner is
+  alive, mirroring the runner's own substrate rails; `c` is the one
+  destructive binding, so
   it goes through a yes/no `ConfirmScreen` and, like `quorum task cancel`
   without `--kill`, marks the status without signalling a live runner.
-  All four resolve their target the same way (`_target_task`): the
+  `h` and `+`/`-` do not confirm — hold is not a status and both are
+  reversible by pressing the key again — and the table is never reordered
+  by priority, since a row that jumped under the cursor would make the next
+  keystroke act on something else.
+  They all resolve their target the same way (`_target_task`): the
   *highlighted* row while the task table has focus, falling back to the open
   task when the reader is down in its detail. `enter` opens a transcript for
   reading and nothing more — a selection made once must not silently become
-  the target of every later keystroke. And all four run through `_write`,
+  the target of every later keystroke. And every one runs through `_write`,
   which turns an `OSError` into an error notification: an unwritable
   QUORUM_HOME is exactly when a reader needs the dashboard most, so no
   keystroke may take it down.

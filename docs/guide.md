@@ -452,6 +452,58 @@ reviewing nothing — and if the implementation ends up `blocked`, the digest
 says `DEP-FAILED` instead of silently launching a review of a PR that will
 never come.
 
+### Priority and holding a task
+
+Two ways to steer the queue without editing `task.json` — and neither is a
+scheduler: quorum still launches nothing on its own.
+
+```bash
+quorum task add my-api "the release blocker" --priority 3
+quorum task set-priority a3f2k9 5      # bump it
+quorum task set-priority b7c1x4 -1     # push it to the back
+```
+
+**Priority is an ordering hint the manager reads.** Higher goes first, `0`
+is the default, negative pushes work behind everything else. Nothing in
+quorum sorts by it: `task list`, the TUI and the dashboard stay in the order
+tasks were created, and the number only reaches a decision through
+`prompts/manager.md`, which is told to prefer the higher priority among the
+tasks it could launch this tick. It shows up as `priority=5` on the
+manager's digest (only when it is not 0) and as `↑5` / `↓1` in the views.
+So it is a preference, not a promise — the manager still judges what is
+actually worth launching, and you can change how it weighs priority by
+editing the prompt.
+
+```bash
+quorum task hold a3f2k9          # park it: nothing launches it
+quorum task release a3f2k9       # put it back
+```
+
+**Hold is a parking brake, not an ending.** Unlike `task cancel` it leaves
+the status exactly as the harness last reported it, keeps the worktree,
+branch, session and queue position, and `task release` undoes it completely.
+While a task is held:
+
+- `quorum task run` refuses it (`--force` runs it anyway for one run — and
+  does *not* release the hold), the same refusal `--after` gives a task
+  whose dependencies have not finished;
+- the manager's digest marks it `held=true`, and its prompt says never to
+  launch a held task and **never to release one** — releasing is yours
+  alone. If a hold is blocking work the manager thinks matters, it posts to
+  `#attention` instead;
+- the views badge it `⏸`.
+
+A hold is a brake on the *next* launch. Holding a task whose run is already
+going does not stop that run — `quorum task stop` does — and holding an
+adopted session (`task adopt`) changes nothing at all, since the runner
+already refuses those. Both `quorum task hold` and the TUI say which when
+you hold such a task.
+
+In the TUI, `h` toggles hold on the highlighted task and `+` / `-` nudge its
+priority by one. Neither asks for confirmation — nothing is lost by pressing
+the key again — and the table is not reordered, so the row you are pointing
+at stays where it is.
+
 **Watching.**
 
 ```bash
