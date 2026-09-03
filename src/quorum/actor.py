@@ -18,6 +18,10 @@ ACTOR_RUN_ENV = "QUORUM_ACTOR_RUN"
 ACTOR_CAP_ENV = "QUORUM_ACTOR_CAP"
 
 DEFAULT_MAX_ACTIONS_PER_RUN = 20
+# Seconds one agent harness run may take before `run_agent_harness` kills
+# it (agents/harness_run.py). Kept next to the action cap because the two
+# are the per-run [agents.<name>.settings] dials `dials.py` lists.
+DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
 
 def journal_path(home: Path, name: str = "manager") -> Path:

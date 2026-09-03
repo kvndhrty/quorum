@@ -27,6 +27,18 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
 
+These three do not move with model capability, and neither do the smaller
+stances recorded per layer below: no decisions in Python, observations are
+never rails, a dropped signal is a bug. The settings that *do* move are
+dials that record how far the human trusts the model today: how many tasks
+run at once, the per-run action cap, the budget, the manager's cadence, who
+launches, who decomposes, who merges. They are listed with their loosening
+conditions in [guide.md](guide.md#loosening-the-rails-as-trust-is-earned),
+facing the list of what does not move, and `dials.py` is the registry
+behind that table (`quorum doctor` reads the current values from it). A
+change to either list is argued there and recorded here and in `CLAUDE.md`
+in the same commit.
+
 ## Process model
 
 ```
@@ -1625,7 +1637,11 @@ Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
 `forge.auth_status` (the module that owns every forge-CLI subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
-seeds by), sandbox support through `sandbox.availability()`. The
+seeds by), sandbox support through `sandbox.availability()`, the trust dials
+through `dials.current` (the registry the guide's table is tested
+against, rendered as `dial.*` lines that are `–` by construction: a
+cautious default and a deliberately loosened value are both facts, not
+faults). The
 `[notify]` line is static (argv[0] on PATH, `{text}` in the template);
 actually running the template is `quorum notify test`, which is loud
 where the supervisor's delivery is deliberately not.
