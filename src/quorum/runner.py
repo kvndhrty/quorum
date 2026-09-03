@@ -49,8 +49,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import fsio, prompts, usage
-from .actor import strip_actor_env
+from . import fsio, notes, prompts, usage
+from .actor import strip_actor_env, task_actor_env
 from .config import Config, HarnessConfig, TasksConfig
 from .messages import Message, MessageBus
 from .projects import ProjectRegistry
@@ -536,6 +536,13 @@ def compose_prompt(
     upstream = dependency_note(home, task)
     if upstream:
         parts.append(upstream)
+    # The task's own notebook — every run, resumed or fresh, because a fresh
+    # session is exactly the run that needs it. Its own budget, its own
+    # drop count (`notes.TASK_NOTES_MAX_BYTES`), nothing when empty: the
+    # preamble already teaches `task remember`.
+    kept = notes.task_section(home, task.id)
+    if kept:
+        parts.append("\n".join(kept))
     if guidance:
         parts.append("# Guidance received since your last run\n\n" + "\n".join(f"- {g}" for g in guidance))
     return "\n\n".join(parts)
@@ -834,8 +841,13 @@ def run_task(
             )
         argv = build_harness_argv(harness, prompt, task.session)
 
-        # The task harness acts as itself, not as whoever launched it.
+        # The task harness acts as itself, not as whoever launched it: the
+        # launcher's tag (manager, a prompt agent) goes, and the task's own
+        # identity — `task-<id>`, no run id, no cap — takes its place. That
+        # is what lets `quorum task remember` tell this task's notebook
+        # from another's; nothing journals or rate-limits a task by it.
         env = strip_actor_env({**os.environ, **harness.env, "QUORUM_HOME": str(home)})
+        env.update(task_actor_env(task.id))
         started = fsio.utc_now()
         proc = subprocess.Popen(
             argv,

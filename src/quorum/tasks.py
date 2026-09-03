@@ -48,6 +48,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from . import fsio
+from .actor import task_actor
 from .messages import MessageBus
 
 BOARD_TOPIC = "tasks"
@@ -229,8 +230,10 @@ def attached_state(home: Path, task_id: str) -> dict[str, Any] | None:
 
 
 def inbox_name(task_id: str) -> str:
-    """The bus inbox a task's guidance goes to."""
-    return f"task-{task_id}"
+    """The bus inbox a task's guidance goes to — the same string as the
+    task's actor identity (`actor.task_actor`), on purpose: one name for a
+    task wherever quorum addresses it."""
+    return task_actor(task_id)
 
 
 class TaskStore:

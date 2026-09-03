@@ -614,9 +614,10 @@ runnable again.
 
 `--fresh-session` is for when resuming is what keeps failing — a session the
 provider now errors on every turn. It forgets the stored session id and
-starts a new one **in the same worktree**, so the work on disk survives, but
-the new session remembers nothing about it: send a `quorum task nudge`
-first, summarizing where the task had got to.
+starts a new one **in the same worktree**, so the work on disk survives, and
+so does the task's notebook ([below](#what-a-task-remembers)) — but the new
+session remembers nothing else: send a `quorum task nudge` first,
+summarizing whatever the notebook does not already say.
 
 You rarely do this by hand, because the manager does it for you. Its digest
 marks a live-but-silent runner `STALLED`, and its prompt walks the same
@@ -638,6 +639,41 @@ into an ordinary dead runner the manager relaunches. It counts *silence,
 not progress*, so set it well above the longest quiet stretch your harness
 has (a full test suite, a cold build, a long provider turn) — it cannot tell
 thinking from hanging. It is off by default for exactly that reason.
+
+### What a task remembers
+
+A task's session is not durable: models compact their own context, a
+resumed session can be days old, and a fresh session starts with nothing
+but the worktree. Every task has a notebook for what a restart would need —
+`~/.quorum/tasks/<id>/notes.jsonl`, the same notebook the manager has
+([The notebook](#the-notebook)), and every run of the task reads it back at
+the top of its prompt, resumed or fresh:
+
+```bash
+quorum task remember a3f2k9 "parser done and committed; tests not started"
+quorum task remember a3f2k9 "the flaky test is quarantined" --ttl 2   # expires
+quorum task show a3f2k9                     # the notebook, as a run sees it
+quorum task forget a3f2k9 k7f2ab            # retire one (id from `remember`)
+```
+
+The preamble teaches the task the same verbs and what they are for: state,
+not a log — what is done, what is left, what was tried and failed. The
+notebook has a byte budget in the prompt; when it overflows the prompt
+keeps the newest notes and says how many older ones it dropped, and the
+preamble tells the task to rewrite one note that supersedes several and
+forget the rest. Nothing in quorum summarizes it.
+
+Three writers are allowed: the task's own harness (each run is tagged
+`task-<id>`, and that tag is also what its `task nudge` and `board post`
+now carry as sender), the manager (a standing instruction for a task's
+next run, where a nudge is read once and gone) and you. Another task or a
+prompt agent is refused and pointed at `task nudge`. As with the manager's
+notebook, that refusal is a convention rather than a security boundary —
+it reads an environment variable a determined harness could set; the
+sandbox is what actually confines a run. The manager never sees a task's
+notebook in its digest: it reads the task's reports, and the notebook is
+the task's own. `quorum task prune` archives it with the rest of the task
+directory.
 
 ## The manager
 
@@ -810,7 +846,9 @@ The same file exists for every agent (`quorum manager remember --agent
 <name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
 own notebook — and the same self-observation lines above it — wherever its
 template writes `{notes}`. Both dashboards show an
-agent's notebook when you select it.
+agent's notebook when you select it. Every task has one too, read by the
+task itself rather than the manager — [What a task
+remembers](#what-a-task-remembers).
 
 ## Prompt customization
 
@@ -1566,6 +1604,7 @@ def test_milestone(tmp_path):
                                     dependencies (`--after`)
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
+  tasks/<id>/notes.jsonl            its notebook (what it keeps between runs)
   tasks/<id>/runner.lock            pid of a live run
   tasks/.archive/<id>/              pruned tasks (moved here whole, never deleted)
   worktrees/<id>/                   the task's git worktree

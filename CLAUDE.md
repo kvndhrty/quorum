@@ -279,7 +279,11 @@ so the record stays true.
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`
   for journaling and message attribution, and the runner `strip_actor_env`s
-  spawned children so they act as themselves. Also owns `journal_path`/
+  spawned children so they act as themselves — then tags a task's harness
+  `QUORUM_ACTOR=task-<id>` (`task_actor`, the same string as its inbox
+  name), identity only: `_actor_guard` treats a task actor like a human
+  (no journal under `state/agents/`, no cap), so the tag exists for the
+  task notebook's owner fence and for sender attribution. Also owns `journal_path`/
   `notes_path`/`transcript_path` (manager at `state/manager/`, others at
   `state/agents/<name>/`).
 - `notes.py` — the notebook: an agent's *standing* memory, deliberately a
@@ -299,6 +303,17 @@ so the record stays true.
   the cap and says how many it dropped — plus how many bytes fell outside
   `NOTES_SCAN_BYTES`, so a truncated memory is visible. No Python
   summarization: consolidation is prompt policy.
+  Both notebooks are one `Notebook` value (path, owner, extra writers,
+  header, budget, the command names its rendering teaches):
+  `agent_notebook` is the manager's/an agent's, `task_notebook` is a
+  task's at `tasks/<id>/notes.jsonl` — owner `task-<id>`, the manager
+  admitted as an extra writer, rendered by `runner.compose_prompt` into
+  every run's prompt (resume and fresh alike, after the task body, before
+  guidance) under `TASK_NOTES_MAX_ENTRIES`/`TASK_NOTES_MAX_BYTES`, nothing
+  when empty, printed by `task show`, **never in the digest**. The
+  module-level functions are the manager-shaped face over `agent_notebook`
+  and their behaviour is unchanged; `quorum task remember|forget` are the
+  task verbs, through `_actor_guard` like the manager's.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small

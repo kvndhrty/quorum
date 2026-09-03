@@ -29,6 +29,11 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
     manager_remember  echo + write one standing note into the manager's
                     notebook (FAKE_HARNESS_NOTE), which the *next* tick's
                     digest must render back
+    task_remember   echo + write one standing note (FAKE_HARNESS_NOTE) into
+                    the task's *own* notebook through the CLI, under the
+                    actor tag the runner set — which the task's *next* run
+                    must find in its prompt; then try the manager's, which
+                    must be refused
     inject          speak the real stream-json protocol, like claude does:
                     the prompt arrives as the *first user turn on stdin*
                     (never via argv — the real CLI ignores an argv prompt in
@@ -228,6 +233,22 @@ def main() -> int:
         print(f"ACT| remember -> exit {r.returncode}")
         if r.returncode != 0 and r.stderr.strip():
             print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+
+    elif mode == "task_remember":
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        note = os.environ.get("FAKE_HARNESS_NOTE", "the parser is written; the tests are not")
+        r = quorum("task", "remember", task_id, note)
+        print(f"ACT| task remember -> exit {r.returncode}")
+        if r.returncode != 0 and r.stderr.strip():
+            print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+        r = quorum("manager", "remember", "a task trying the manager's notebook")
+        print(f"ACT| manager remember -> exit {r.returncode}")
+        if r.returncode != 0 and r.stderr.strip():
+            print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+        print(f"ACTOR| {os.environ.get('QUORUM_ACTOR', '')}")
 
     elif mode == "manager_restart":
         # Only the active-task section: the journal below it uses the same
