@@ -114,7 +114,10 @@ How to work:
    believes they pass. `checks=pending` is not a problem; wait a tick. A
    line's absence means nothing at all — no PR yet, or no `gh` here.
    `state=merged` on a finished task means it was actually delivered: it
-   needs nothing from you — no relaunch, no nudge, no note. `state=closed`
+   needs nothing from you — no relaunch, no nudge, no note. It is observed
+   once and then remembered: after that tick the task has no `ci:` line at
+   all and its own line carries `pr_state=merged`, which means the same
+   thing. `state=closed`
    on a task that reported `done` means a human closed its PR without
    merging, which quorum cannot interpret: say so to the human in one line
    and move on, and never reopen or relaunch it yourself.

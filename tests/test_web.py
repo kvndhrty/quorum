@@ -192,6 +192,28 @@ def test_the_attention_summary_carries_the_id_an_ack_needs(client: TestClient, h
     assert attn["recent"][0]["short_id"] == msg.short_id
 
 
+def test_every_escalation_the_banner_counts_is_ackable_in_the_panel(
+    client: TestClient, home: Path
+):
+    """The panel renders `attention.recent` and puts an Ack button on each
+    line, so a banner count the list never reaches is an escalation nobody
+    can dismiss from the browser."""
+    bus = MessageBus(home)
+    posted = [bus.post("manager", "attention", text=f"stuck {i}") for i in range(12)]
+
+    attn = client.get("/api/overview").json()["attention"]
+    assert attn["count"] == len(posted)
+    assert len(attn["recent"]) == len(posted)
+    assert {m["id"] for m in attn["recent"]} == {m.id for m in posted}
+
+
+def test_the_page_marks_a_budget_gated_task(client: TestClient):
+    """`quorum task run` refuses a gated task, so the dashboard says GATED
+    where it says "$!" — the mark alone reads as an observation."""
+    page = client.get("/").text
+    assert "budget_gated" in page and "GATED" in page
+
+
 def test_the_page_ships_the_attention_panel_and_its_ack_button(client: TestClient):
     """The dashboard is one static file with no build step, so the only thing
     that keeps its markup and the route it posts to in step is a test."""

@@ -217,10 +217,14 @@ async function refresh() {
       + waiting + depFailed + depMissing;
     const pr = t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank">PR</a>` : "";
     // Cost/tokens only when the harness reported them; "$!" flags a run over
-    // the configured budget — a mark, never a block.
+    // the configured budget — a mark, never a block. "GATED" is the sharper
+    // case: the *last* run went over, so `quorum task run` refuses the next
+    // one until --force. Rendered wherever "$!" is, so nobody learns of the
+    // gate from the refusal.
     const over = (t.budget_overages || []);
-    const spent = t.usage_text
-      ? `<br><span title="${esc(over.join("; ") || "reported by the harness")}">${esc(t.usage_text)}${over.length ? " $!" : ""}</span>`
+    const marks = t.budget_gated ? " $! GATED" : (over.length ? " $!" : "");
+    const spent = t.usage_text || marks
+      ? `<br><span title="${esc(over.join("; ") || "reported by the harness")}">${esc(((t.usage_text || "") + marks).trim())}</span>`
       : "";
     const sel = t.id === selectedTask ? " selected" : "";
     return `<tr class="task-row${sel}" data-id="${esc(t.id)}">

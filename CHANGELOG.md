@@ -201,6 +201,18 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Fixed
+- Six review leftovers from the package (#81): the PR-state observation is
+  written only for finished tasks (a live task's `task.json` is being
+  written by its own runner) and a task already recorded `merged` is never
+  probed again; `$! GATED` now renders in the TUI and the web dashboard,
+  not only in `task list`; `quorum task add <slug> -` validates the project,
+  harness and `--after` ids *before* draining stdin, so a typo no longer eats
+  a piped issue (and says so when `-` is typed at a terminal); `task prune`
+  no longer refuses a `--no-worktree` task over unrelated dirt in the user's
+  own checkout; the web Attention panel lists every escalation the banner
+  counts, so each one has an Ack button; and `quorum down` asks an in-flight
+  notification drain to stop after the message it is delivering instead of
+  waiting for the whole batch.
 - The guidance pump could close a stream-json harness's stdin with a nudge
   in flight: a message was claimed (renamed out of `new/`) before it was
   counted as delivered, so a `result` event landing in that gap saw an

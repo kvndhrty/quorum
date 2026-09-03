@@ -57,8 +57,24 @@ TASK_STATUS_STYLE = {
 FAILED = object()
 
 #: how many escalations the `a` list shows — deeper than the banner's own
-#: summary, because every line in it is one the reader may want to ack
-ATTENTION_LIST_LIMIT = 50
+#: summary, because every line in it is one the reader may want to ack.
+#: Shared with the web dashboard's Attention panel, which acks the same way.
+ATTENTION_LIST_LIMIT = views.ATTENTION_LIST_LIMIT
+
+
+def _usage_cell(t: dict) -> str:
+    """The usage column: spend, plus the budget marks `task list` renders.
+
+    GATED is the one that matters here, because `s` is the binding it
+    refuses (runner.budget_blockers): without it the reader learns of the
+    gate only when the launch is turned down.
+    """
+    text = t.get("usage_text", "") or ""
+    if t.get("budget_gated"):
+        return f"{text} $! GATED".strip()
+    if t.get("budget_overages"):
+        return f"{text} $!".strip()
+    return text
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -497,9 +513,12 @@ class QuorumTUI(App):
                     Text(status, style=style),
                     t["harness"],
                     # "" whenever the harness reported no usage; a task over
-                    # its configured budget is marked, never blocked.
+                    # its configured budget is marked, never blocked. GATED
+                    # is the sharper case the mark alone hides: the *last*
+                    # run went over, so `s` will refuse the next one until
+                    # --force — say so here rather than at the refusal.
                     Text(
-                        t.get("usage_text", "") + (" $!" if t.get("budget_overages") else ""),
+                        _usage_cell(t),
                         style="yellow" if t.get("budget_overages") else "",
                     ),
                     (t["last_report"] or t["prompt"])[:60],

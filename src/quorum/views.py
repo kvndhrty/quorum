@@ -289,6 +289,11 @@ def recent_actions(home: Path, limit: int = 20) -> list[dict[str, Any]]:
 # `MessageBus.ack_board_message`. Each entry therefore carries its id, because
 # that is the handle every ack affordance needs.
 ATTENTION_WINDOW_DAYS = 7
+#: how many of those the *lists* carry — the TUI's `a` picker and the web
+#: panel, both of which ack a line and so need one entry per escalation the
+#: banner counts. `attention_summary`'s own default stays small for the
+#: banner-shaped callers that only ever show a couple.
+ATTENTION_LIST_LIMIT = 50
 
 
 def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int = 5) -> dict[str, Any]:
@@ -320,6 +325,10 @@ def overview(home: Path) -> dict[str, Any]:
         "tasks": task_rows(home, config),
         "projects": project_rows(home),
         "board": board_tail(home),
-        "attention": attention_summary(home),
+        # The full list, not the banner's handful: `overview` is what the
+        # web dashboard reads, and its Attention panel offers an Ack button
+        # per line — an escalation the panel never renders cannot be acked
+        # there at all.
+        "attention": attention_summary(home, limit=ATTENTION_LIST_LIMIT),
         "actions": recent_actions(home),
     }
