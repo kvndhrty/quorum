@@ -1250,3 +1250,67 @@ def test_the_preamble_tells_a_task_to_rebase_before_pushing(home: Path):
     assert "git push --force-with-lease origin HEAD" in text
     assert "never a bare `--force`" in text
     assert "overlaps=" in prompts.load(home, "manager")
+
+
+# -- priority and hold (#61) ----------------------------------------------
+
+
+def test_digest_renders_priority_only_when_non_zero(home: Path, clock, project: str):
+    """`priority=N` is an exception mark: an ordinary task's line is unchanged
+    so the mark reads as one (#61)."""
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    plain = store.add(project, "whenever", "tasktool")
+    urgent = store.add(project, "first", "tasktool", priority=3)
+    backlog = store.add(project, "later", "tasktool", priority=-2)
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    lines = {t.short_id: next(
+        line for line in digest.splitlines() if f"[queued] {t.short_id}" in line
+    ) for t in (plain, urgent, backlog)}
+    assert "priority=" not in lines[plain.short_id]
+    assert "priority=3" in lines[urgent.short_id]
+    assert "priority=-2" in lines[backlog.short_id]
+
+
+def test_digest_marks_a_held_task_and_says_not_to_launch_it(home: Path, clock, project: str):
+    write_config(home, "manager_act")
+    store = TaskStore(home)
+    task = store.add(project, "parked work", "tasktool", held=True)
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    line = next(line for line in digest.splitlines() if f"[queued] {task.short_id}" in line)
+    assert "held=true" in line
+    assert "do not release it; only the user does" in digest
+
+    # hold is not a status: the task line still shows what the harness said
+    assert "[queued]" in line
+    store.update(task.id, held=False)
+    assert "held=true" not in build_digest(home, store.list(), clock(), directives=[])
+
+
+def test_the_manager_prompt_carries_the_priority_and_hold_rules(home: Path):
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "priority=N" in text and "held=true" in text
+    assert "Never launch a held task" in text
+    assert "never `quorum task release` one" in text
+
+
+def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
+    """"Never launch a held task" sits under the *queued* step, but a held
+    task also reads as an ordinary relaunch (rule 4) and a perpetual one is
+    told to relaunch forever (rule 12). A refused run is not journaled, so a
+    manager that only read those two rules would retry every tick with no
+    memory of having tried (#61)."""
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "not as a relaunch under" in text
+    # rule 4: the stopped-without-finishing relaunch
+    stopped = text.split("without finishing")[1].split("\n5.")[0]
+    assert "held=true" in stopped
+    # rule 12: the perpetual loop
+    perpetual = text.split("relaunch it with `task run --detach` whenever its runner is dead")[1]
+    assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]
