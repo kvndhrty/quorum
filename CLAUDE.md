@@ -165,6 +165,25 @@ so the record stays true.
   and `task inbox --clear`. `board ack --all <topic>` and `board clear
   <topic>` share one CLI helper (`_clear_topic`) so the alias cannot drift
   from what it aliases.
+- `export.py` — `quorum task export <id>`: one `.tar.gz` of a task for
+  sharing or a bug report, a **pure reader** in the #88 mold (no new
+  state; the only write is the archive, refused inside the home and over
+  an existing file; an ambiguous id refused by `_resolve_task` as
+  everywhere). `task_entries` walks `tasks/<id>/` whole (tmp files and
+  `runner.lock` — a pid, not a record — skipped), `inbox_entries` takes
+  `new/` + `cur/`, `delivered_guidance` reads acked guidance back out of
+  `messages/archive/` (months from the task's creation onward only),
+  `worktree_diff` (`--with-worktree-diff`) diffs the worktree against
+  `tasks._worktree_base` plus `--no-index` per untracked file — read-only
+  git, and **refused loud** for an attached/`--no-worktree` task because
+  nothing from a project directory is exported. `redact_transcript`
+  (`--redact`) is pure and structural like `loop_signal`'s extraction:
+  result-kind dicts lose their output fields and keep their ids, call
+  items keep name/arguments, `tool_use_result` goes whole, too-deep nodes
+  are dropped (failure direction: dropped), plain-text `line` entries are
+  kept and counted so the CLI can say so. `write_archive` builds beside
+  the target and renames, strips uid/gid. No `_actor_guard` — it mutates
+  nothing.
 - `runner.py` — one harness run: `runner.lock` pid-lock → git worktree under
   `worktrees/<id>` (branch `quorum/<short-id>`) → claim task inbox → compose prompt
   (preamble + task + guidance) → substitute `{prompt}`/`{session}` into the

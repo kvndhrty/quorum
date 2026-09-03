@@ -993,6 +993,51 @@ quorum task inbox a3f2k9 --clear         # archive what's waiting, undelivered
 Both take `--dry-run`, and `--clear` only touches unclaimed mail — a message
 some run is already holding is left alone.
 
+## Sharing a run
+
+A task's life is spread over its directory, its inbox and the message
+archive. To hand one run to someone — a colleague, a bug report, an issue
+comment — pack it into one archive:
+
+```bash
+quorum task export a3f2k9                        # ./quorum-task-a3f2k9.tar.gz
+quorum task export a3f2k9 --out ~/Desktop/run.tgz
+quorum task export a3f2k9 --with-worktree-diff   # + a patch of the worktree
+quorum task export a3f2k9 --redact               # drop what the tools returned
+```
+
+The archive unpacks to `quorum-task-<short-id>/` holding the task record,
+its reports, the transcript, the runner log, and the guidance it received:
+what is still waiting (`inbox/new/`), what a run is holding (`inbox/cur/`)
+and what was already delivered (`inbox/delivered.jsonl`, read back out of
+the message archive). An `export.json` at the top says which task, when,
+and which options were on. Anything a task keeps next to its record —
+a notebook or artifacts directory, once those exist — rides along.
+
+**What it never contains.** Nothing from your project directory. The only
+code in an export is `worktree.diff`, and only with
+`--with-worktree-diff`: the task's own worktree against the branch it
+forked from, uncommitted and untracked files included. A task that ran in
+your checkout (`--no-worktree`, or one you adopted) is refused the diff
+outright, with a message, rather than exporting your checkout.
+
+**What it never does.** It is read-only apart from the archive itself,
+which goes to the current directory by default and is refused inside
+`~/.quorum` (an export sitting under `tasks/<id>/` would be swept into the
+next export of that task) and over a file that already exists. Nothing in
+the home changes, and `runner.lock` stays out of the archive — it is a pid
+on this machine, not part of the record.
+
+**`--redact`.** Transcripts carry what the tools *returned* — file
+contents, command output, whatever a `cat` of the wrong file showed the
+model. `--redact` replaces every tool result with a marker and keeps the
+rest: the assistant's text, its thinking, and each tool call with its
+arguments, so a reader can still follow what the run did. The transcript on
+disk is untouched. It understands the structured transcripts claude and
+codex emit; a harness that prints prose has nothing to redact, and the
+command tells you how many plain-text lines it kept verbatim, so read
+those before you share them.
+
 ## Adopting a live session
 
 Sometimes the work is already underway — you're deep in a problem inside an
