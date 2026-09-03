@@ -703,6 +703,10 @@ def build_digest(
                 # probe: a merged task is not re-probed, so this is where
                 # "delivered" stays visible for the rest of the window.
                 + (f" pr_state={t.pr_state}" if t.pr_state else "")
+                # Whether it left a handoff for its dependents — existence
+                # only. The body goes into the dependents' prompts and
+                # `task show`; the digest has no reason to carry it.
+                + (" handoff=true" if tasks.has_handoff(home, t.id) else "")
             )
             git = tasks.workdir_git_state(t)
             if git and (git["dirty"] or git["unpushed"]):

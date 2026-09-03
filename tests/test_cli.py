@@ -1777,3 +1777,100 @@ def test_hold_says_what_it_does_not_stop(home: Path, tmp_path: Path):
     idle = r.output.split("queued task ")[1].split(" ")[0]
     r = runner.invoke(app, ["task", "hold", idle, "--home", str(home)])
     assert "keeps going" not in r.output
+
+
+# -- handoffs (#92) ---------------------------------------------------------
+
+
+def _queue(home: Path, slug: str, prompt: str, *extra: str) -> str:
+    r = runner.invoke(
+        app, ["task", "add", slug, prompt, "--harness", "fake", *extra, "--home", str(home)]
+    )
+    assert r.exit_code == 0, r.output
+    return r.output.split("queued task ")[1].split(" ")[0]
+
+
+def test_task_report_handoff_from_a_file_and_task_show_prints_it_in_full(
+    home: Path, tmp_path: Path
+):
+    from quorum import tasks
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    upstream = _queue(home, slug, "build it")
+    dependent = _queue(home, slug, "review it", "--after", upstream)
+    body = "Changed: the thing.\n\nNot done: docs.\nCheck first: tests/test_thing.py\n"
+    handoff = tmp_path / "handoff.md"
+    handoff.write_text(body, encoding="utf-8")
+
+    r = runner.invoke(
+        app,
+        ["task", "report", upstream, "shipped", "--status", "done", "--handoff", str(handoff),
+         "--home", str(home)],
+    )
+    assert r.exit_code == 0, r.output
+    assert f"task {upstream}: done — handoff stored ({len(body.encode())} bytes)" in r.output
+    full_id = TaskStore(home).resolve(upstream).id
+    assert tasks.read_handoff(home, full_id) == body
+
+    r = runner.invoke(app, ["task", "show", upstream, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    # the reverse read: who waits on this task, and how to hand off to them
+    assert f"dependents: {dependent}" in r.output
+    assert f"task report {upstream} --status done --handoff <file|->" in r.output
+    # the handoff, in full — every line, not a clip
+    assert "handoff (what this task left for the tasks that depend on it):" in r.output
+    for line in body.strip().splitlines():
+        assert f"  {line}" in r.output or line == ""
+
+    # a task with no dependents and no handoff shows neither line
+    r = runner.invoke(app, ["task", "show", dependent, "--home", str(home)])
+    assert "dependents:" not in r.output and "handoff (" not in r.output
+
+
+def test_task_report_handoff_from_stdin(home: Path, tmp_path: Path):
+    from quorum import tasks
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    short = _queue(home, slug, "build it")
+    r = runner.invoke(
+        app,
+        ["task", "report", short, "--status", "done", "--handoff", "-", "--home", str(home)],
+        input="from stdin\n  verbatim, indentation kept\n",
+    )
+    assert r.exit_code == 0, r.output
+    full_id = TaskStore(home).resolve(short).id
+    assert tasks.read_handoff(home, full_id) == "from stdin\n  verbatim, indentation kept\n"
+
+
+def test_task_report_refuses_an_empty_or_unreadable_handoff(home: Path, tmp_path: Path):
+    """Refused before anything is journaled or written: the status must not
+    change on a report whose handoff never landed."""
+    from quorum import tasks
+    from quorum.tasks import TaskStore
+
+    slug = setup_task_env(home, tmp_path)
+    short = _queue(home, slug, "build it")
+    full_id = TaskStore(home).resolve(short).id
+    blank = tmp_path / "blank.md"
+    blank.write_text("  \n\n")
+
+    r = runner.invoke(
+        app,
+        ["task", "report", short, "--status", "done", "--handoff", str(blank), "--home", str(home)],
+    )
+    assert r.exit_code == 1
+    assert "the handoff is empty" in r.output
+    assert TaskStore(home).get(full_id).status == "queued"
+    assert not tasks.has_handoff(home, full_id)
+    assert tasks.read_reports(home, full_id) == []
+
+    r = runner.invoke(
+        app,
+        ["task", "report", short, "--status", "done", "--handoff", str(tmp_path / "nope.md"),
+         "--home", str(home)],
+    )
+    assert r.exit_code == 1
+    assert "cannot read" in r.output
+    assert TaskStore(home).get(full_id).status == "queued"

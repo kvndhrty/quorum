@@ -87,6 +87,9 @@ tasks/<id>/task.json              task spec + reported status + session + runs
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
+tasks/<id>/handoff.md             the body of `task report --handoff`: what the
+                                  task left for its dependents (one per task,
+                                  last write wins; see "The handoff")
 tasks/<id>/runner.lock            pid of the active run
 tasks/<id>/runner.log             detached-run bootstrap output
 tasks/.archive/<id>/              pruned tasks, moved here whole; dot-prefixed
@@ -667,10 +670,50 @@ Cross-project chains work by construction, since ids are global.
 - **Reading the upstream outcome**: the dependent task's composed prompt
   gains a *Tasks this one depends on* block listing each dependency's short
   id, status and `pr_url` (`runner.dependency_note` — fields already in
-  `task.json`, one read each, no new state), and points at
-  `quorum task show <id>` for the full record, reports and branch. That is
-  deliberately the whole mechanism: no `{depends.*}` template substitution,
-  no result-passing channel.
+  `task.json`, one read each), plus the upstream's handoff when it wrote
+  one ([below](#the-handoff)), and points at `quorum task show <id>` for
+  the full record, reports and branch. That is deliberately the whole
+  mechanism: no `{depends.*}` template substitution, no result-passing
+  channel beyond the handoff file.
+
+#### The handoff
+
+Status and `pr_url` answer "may I start"; they do not answer "what do I
+build on" — what changed, what was left undone, what to look at first.
+The handoff is the upstream's answer, and it is the one piece of new
+durable state in this section (#92):
+
+- **One file, written by the final report.** `quorum task report <id>
+  --status done --handoff <file|->` stores the body whole at
+  `tasks/<id>/handoff.md` (`tasks.write_handoff`, an `atomic_write_text`,
+  so a dependent composing its prompt never reads a partial file). It is
+  written *before* the status changes, so a dependent that sees `done`
+  sees the handoff that came with it. One per task, not a log: a later
+  `--handoff` replaces it, because it describes the finished state and
+  the finished state has no history worth keeping. Any status may carry
+  one — a `blocked` task can leave notes for whoever picks it up — and the
+  report entry records `handoff: true` so the reports log says when one
+  was (re)written. An empty body is refused before anything is journaled
+  or written.
+- **Capped when rendered, whole when asked for.** `dependency_note`
+  appends a `## Handoff from <id>` section per dependency that has one,
+  cut to `runner.HANDOFF_MAX_BYTES` (8 KiB) of UTF-8 on a character
+  boundary with a line saying how many bytes were dropped and that
+  `task show` has the rest. The cap is *per dependency*, following the
+  notebook's rule that each read into a prompt has a budget nothing else
+  spends: a long-winded upstream cannot crowd out a terse one, and the
+  number of dependencies is the user's choice. `quorum task show <id>`
+  prints the file in full. The digest says only `handoff=true` on the
+  finished task's line — existence is all the manager needs, the body is
+  for the dependent. Reading fails soft (`tasks.read_handoff` returns
+  `None` for a missing or undecodable file): both readers are on the
+  prompt-composition and digest paths.
+- **Asked for, never generated.** The preamble tells a task to leave one
+  when `quorum task show <its id>` lists `dependents:` — the reverse read
+  of `depends_on`, computed from the listing `task show` already loads —
+  and what to put in it. Nothing in Python writes a handoff for a task
+  that did not, and nothing summarizes one: what to keep is the model's
+  decision, the file is where it keeps it (the stance of theme #87).
 
 ### Priority and hold
 

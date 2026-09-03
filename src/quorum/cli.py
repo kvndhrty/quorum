@@ -1326,7 +1326,14 @@ def task_show(
 ) -> None:
     """Show one task: what it is, where it stands, and its recent reports."""
     from .config import load_config_or_default
-    from .tasks import TaskStore, dependency_state, read_reports, runner_alive, short_handle
+    from .tasks import (
+        TaskStore,
+        dependency_state,
+        read_handoff,
+        read_reports,
+        runner_alive,
+        short_handle,
+    )
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
@@ -1363,8 +1370,9 @@ def task_show(
         # Observed by the manager tick, so it can be older than "now" — say
         # when, rather than implying it was just checked.
         typer.echo(f"  pr state: {task.pr_state} (observed {task.pr_state_at})")
+    all_tasks = TaskStore(target).list()
     if task.depends_on:
-        deps = dependency_state(task, {t.id: t for t in TaskStore(target).list()})
+        deps = dependency_state(task, {t.id: t for t in all_tasks})
         line = ", ".join(short_handle(d) for d in task.depends_on)
         if deps["waiting_on"]:
             line += f"  (waiting on {', '.join(deps['waiting_on'])})"
@@ -1375,6 +1383,15 @@ def task_show(
         if deps["cycle"]:
             line += "  DEP-CYCLE"
         typer.echo(f"  after:    {line}")
+    # The other direction: who is waiting on this task. This is how a
+    # running task learns it should leave a handoff — the preamble tells it
+    # to look here.
+    dependents = [t.short_id for t in all_tasks if task.id in t.depends_on]
+    if dependents:
+        typer.echo(
+            f"  dependents: {', '.join(dependents)}  (leave them a handoff: "
+            f"`task report {task.short_id} --status done --handoff <file|->`)"
+        )
     if task.runs:
         last = task.runs[-1]
         typer.echo(
@@ -1403,6 +1420,13 @@ def task_show(
         typer.echo("recent reports:")
         for r in reports:
             typer.echo(f"  [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
+    handoff = read_handoff(target, task.id)
+    if handoff is not None:
+        # In full: dependents see it capped in their prompt, and this is
+        # where the clip points them.
+        typer.echo("handoff (what this task left for the tasks that depend on it):")
+        for line in handoff.rstrip("\n").splitlines():
+            typer.echo(f"  {line}")
     typer.echo(f"more: `quorum task tail {task.short_id}` for the transcript, `--json` for the raw record")
 
 
@@ -1524,6 +1548,15 @@ def task_report(
     text: str = typer.Argument("", help="Short human-readable progress note."),
     status: str = typer.Option(..., "--status", help="One-word status (planning, executing, pr, done, blocked, ...)."),
     pr_url: str | None = typer.Option(None, "--pr-url", help="Pull request URL, when one was opened."),
+    handoff: Path | None = typer.Option(
+        None,
+        "--handoff",
+        help=(
+            "A file (or - for stdin) with the handoff for the tasks that depend on this "
+            "one: what changed, what is not done, what to check first. Stored whole as "
+            "tasks/<id>/handoff.md; a later --handoff replaces it."
+        ),
+    ),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Record task progress (harnesses call this; humans can too)."""
@@ -1531,10 +1564,19 @@ def task_report(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
+    # Read (and refuse) the handoff before anything is journaled or written:
+    # an empty or unreadable body must not half-apply a report.
+    body = _verbatim_text(handoff, "handoff") if handoff is not None else None
+    if body is not None and not body.strip():
+        raise _fail("the handoff is empty — give it a body, or leave --handoff off")
     _actor_guard(target, "task.report", target=task.short_id, target_status=task.status,
-                   args=status)
-    tasks_mod.report(target, task.id, status=status, text=text, pr_url=pr_url)
-    typer.echo(f"task {task.short_id}: {status}" + (f" ({pr_url})" if pr_url else ""))
+                   args=status + (" +handoff" if body is not None else ""))
+    tasks_mod.report(target, task.id, status=status, text=text, pr_url=pr_url, handoff=body)
+    typer.echo(
+        f"task {task.short_id}: {status}"
+        + (f" ({pr_url})" if pr_url else "")
+        + (f" — handoff stored ({len(body.encode('utf-8'))} bytes)" if body is not None else "")
+    )
 
 
 @task_app.command("inbox")
@@ -2086,18 +2128,21 @@ def project_list(
     _print_table(_project_table(rows))
 
 
-def _notes_text(source: Path) -> str:
-    """`--notes-file`, read the way `_task_prompt` reads a prompt: as bytes
-    decoded here, not through `read_text`/`sys.stdin.read`.
+def _verbatim_text(source: Path, what: str) -> str:
+    """A `<file|->` option read the way `_task_prompt` reads a prompt: as
+    bytes decoded here, not through `read_text`/`sys.stdin.read`.
 
-    Notes are prompt text now — they are quoted verbatim into the preamble's
-    {project} block — so what lands in the registry has to be byte-for-byte
-    what was written, instead of whatever the locale encoding and universal
-    newlines make of it."""
+    `--notes-file` and `--handoff` both feed prompt text — quoted verbatim
+    into the preamble's {project} block, or into a dependent's prompt — so
+    what lands on disk has to be byte-for-byte what was written, instead of
+    whatever the locale encoding and universal newlines make of it. `what`
+    names the text in the stdin hint."""
     if str(source) == "-":
         # Nothing is piped in: say so, or the blocking read looks like a hang.
         if _stdin_is_tty():
-            typer.echo("reading the notes from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
+            typer.echo(
+                f"reading the {what} from stdin — end with ctrl-D (ctrl-C to abort)", err=True
+            )
         return _stdin_prompt()
     try:
         return source.read_bytes().decode("utf-8")
@@ -2139,7 +2184,7 @@ def project_set(
         # must not eat them (`task add` reads its prompt the same way round).
         if registry.get(slug) is None:
             raise _fail(f"no project {slug!r}")
-        notes = _notes_text(notes_file)
+        notes = _verbatim_text(notes_file, "notes")
     _actor_guard(target, "project.set", target=slug)
     try:
         project = registry.update(

@@ -1339,3 +1339,23 @@ def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
     # rule 12: the perpetual loop
     perpetual = text.split("relaunch it with `task run --detach` whenever its runner is dead")[1]
     assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]
+
+
+def test_digest_says_only_that_a_handoff_exists(home: Path, clock):
+    """The body is for the dependent's prompt and `task show`; the manager
+    needs to know it is there, nothing more (#92)."""
+    store = TaskStore(home)
+    with_body = store.add(project="p", prompt="left notes", harness="t")
+    tasks.report(
+        home, with_body.id, "done", "shipped",
+        handoff="SECRET-BODY: changed x, not done y, check z first",
+    )
+    without = store.add(project="p", prompt="left nothing", harness="t")
+    tasks.report(home, without.id, "done", "shipped")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    marked = [line for line in digest.splitlines() if f"[done] {with_body.short_id}" in line]
+    plain = [line for line in digest.splitlines() if f"[done] {without.short_id}" in line]
+    assert marked and "handoff=true" in marked[0]
+    assert plain and "handoff=true" not in plain[0]
+    assert "SECRET-BODY" not in digest
