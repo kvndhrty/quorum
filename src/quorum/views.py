@@ -209,6 +209,12 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 # --perpetual): views badge it, so "still running after 40
                 # runs" reads as working, not stuck.
                 "perpetual": t.perpetual,
+                # The user's ordering hint and parking brake. Rendered here
+                # and nowhere sorted: `task_rows` stays in the store's
+                # chronological order whatever the priorities say, because
+                # deciding what runs next is the manager's job, not a view's.
+                "priority": t.priority,
+                "held": t.held,
                 "attached_state": attached_state(home, t.id) if t.attached else None,
                 "runs": len(t.runs),
                 # Absent (None) whenever no run reported usage — the common

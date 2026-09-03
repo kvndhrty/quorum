@@ -1316,3 +1316,120 @@ def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
 
     r = runner.invoke(app, ["project", "list", "--home", str(home)])
     assert r.exit_code == 0 and r.output.split("\n")[1].startswith(slug)
+
+
+def test_hold_parks_a_task_without_ending_it(home: Path, tmp_path: Path):
+    """`task hold` refuses the run the way `--after` does, leaves the status
+    alone, and `task release` puts it back (#61)."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+
+    r = runner.invoke(app, ["task", "hold", short, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "held" in r.output and "still 'queued'" in r.output
+
+    from quorum.tasks import TaskStore
+
+    store = TaskStore(home)
+    task = store.resolve(short)
+    assert task.held is True and task.status == "queued"  # hold is not a status
+
+    # refused in the parent too, so --detach cannot journal a phantom success
+    for extra in ([], ["--detach"]):
+        r = runner.invoke(app, ["task", "run", short, *extra, "--home", str(home)])
+        assert r.exit_code == 1, r.output
+        assert "is held" in r.output and "--force" in r.output
+        assert store.resolve(short).runs == []
+
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "⏸" in r.output
+    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    assert "[held" in r.output
+
+    r = runner.invoke(app, ["task", "release", short, "--home", str(home)])
+    assert r.exit_code == 0 and "released" in r.output
+    assert store.resolve(short).held is False
+    r = runner.invoke(app, ["task", "run", short, "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert len(store.resolve(short).runs) == 1
+
+
+def test_task_run_force_overrides_the_hold_refusal(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    assert runner.invoke(app, ["task", "hold", short, "--home", str(home)]).exit_code == 0
+
+    r = runner.invoke(app, ["task", "run", short, "--force", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    from quorum.tasks import TaskStore
+
+    task = TaskStore(home).resolve(short)
+    assert len(task.runs) == 1 and task.held is True  # forcing never releases
+
+
+def test_hold_and_release_are_idempotent(home: Path, tmp_path: Path):
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "release", short, "--home", str(home)])
+    assert r.exit_code == 0 and "is not held" in r.output
+    assert runner.invoke(app, ["task", "hold", short, "--home", str(home)]).exit_code == 0
+    r = runner.invoke(app, ["task", "hold", short, "--home", str(home)])
+    assert r.exit_code == 0 and "already held" in r.output
+
+
+def test_priority_is_set_at_add_and_changed_afterwards(home: Path, tmp_path: Path):
+    """`--priority` / `set-priority` round-trip, and the views badge a
+    non-zero priority without reordering anything (#61)."""
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "urgent", "--harness", "fake",
+                            "--priority", "3", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    assert "priority 3" in r.output
+    first = r.output.split("queued task ")[1].split(" ")[0]
+    r = runner.invoke(app, ["task", "add", slug, "whenever", "--harness", "fake", "--home", str(home)])
+    second = r.output.split("queued task ")[1].split(" ")[0]
+    assert "priority" not in r.output  # the default says nothing
+
+    from quorum.tasks import TaskStore
+
+    store = TaskStore(home)
+    assert store.resolve(first).priority == 3 and store.resolve(second).priority == 0
+
+    r = runner.invoke(app, ["task", "show", first, "--home", str(home)])
+    assert "priority: 3" in r.output
+    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    assert "priority:" not in r.output
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "↑3" in r.output
+    # the listing is chronological, never sorted by priority
+    rows = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    assert [row["id_short"] for row in rows] == [first, second]
+
+    r = runner.invoke(app, ["task", "set-priority", second, "-1", "--home", str(home)])
+    assert r.exit_code == 0 and "0 → -1" in r.output
+    assert store.resolve(second).priority == -1
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert "↓1" in r.output
+
+
+def test_hold_release_and_set_priority_are_journaled(home: Path, tmp_path: Path, monkeypatch):
+    """Every new verb is a mutating action, so it goes through _actor_guard
+    like the rest (#61)."""
+    from quorum import fsio
+    from quorum.agents.manager import journal_path
+
+    slug = setup_task_env(home, tmp_path)
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    short = r.output.split("queued task ")[1].split(" ")[0]
+
+    monkeypatch.setenv("QUORUM_ACTOR", "manager")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TESTRUN")
+    for argv in (["task", "hold", short], ["task", "release", short],
+                 ["task", "set-priority", short, "2"]):
+        assert runner.invoke(app, [*argv, "--home", str(home)]).exit_code == 0
+
+    actions = [e["action"] for e in fsio.read_jsonl(journal_path(home))]
+    assert actions == ["task.hold", "task.release", "task.set-priority"]

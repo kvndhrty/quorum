@@ -161,6 +161,22 @@ minute it is posted.
   issue-driven loop a one-liner without putting `gh` inside quorum:
   `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
   (#60)
+- **Task priority and hold/release** (#61): two ways to steer the queue
+  without editing `task.json` or cancelling anything. `task add --priority N`
+  and `task set-priority <id> N` record an ordering hint the manager reads
+  (higher first, negative to the back) — quorum sorts nothing by it, the
+  digest renders `priority=N` only when it is not 0, the views badge `↑N` /
+  `↓N`, and `prompts/manager.md` is what turns the number into a launch
+  order. `task hold <id>` parks a task and `task release <id>` puts it back:
+  a parking brake, not an ending, so unlike `task cancel` the status stays
+  the harness's word and the worktree, branch and queue position survive.
+  A held task is refused by the runner (`--force` runs it once and does not
+  release the hold) — the fifth substrate rail, beside `runner.lock`, the
+  attached-task, dependency and budget refusals — shows `held=true` on the
+  digest with a line telling the manager never to launch or release one, and
+  badges `⏸` everywhere. In the TUI, `h` toggles hold and `+` / `-` nudge
+  priority; every verb is journaled and capped like any other mutating
+  action.
 
 ### Changed
 - `quorum status`, `task list`, `agent list` and `project list` render

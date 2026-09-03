@@ -544,6 +544,13 @@ def build_digest(
             # Only when true: an ordinary task's line stays as it was, and
             # the marker reads as the exception it is.
             + (" perpetual=true" if t.perpetual else "")
+            # The user's two hands on the queue. `priority=` only when it is
+            # not 0, so an ordinary task's line is unchanged and the mark
+            # reads as the exception it is; `held=true` always, because a
+            # held task looks launchable (runner=dead, status queued) and
+            # nothing else on the line says otherwise.
+            + (f" priority={t.priority}" if t.priority else "")
+            + (" held=true" if t.held else "")
             + _restart_marks(t)
             + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
@@ -551,6 +558,11 @@ def build_digest(
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
         lines.append(f"  prompt: {first[:120]}")
+        if t.held:
+            lines.append(
+                "  held: the user parked this task with `task hold` — do not launch it "
+                "(the runner refuses it anyway) and do not release it; only the user does"
+            )
         if stalled is not None:
             lines.append(
                 f"  STALLED: runner=alive but the harness has printed nothing for "
