@@ -40,6 +40,9 @@ def test_task_detail_and_nudge(client: TestClient, home: Path):
     detail = client.get(f"/api/tasks/{task.id}").json()
     assert detail["status"] == "executing"
     assert detail["transcript"][0]["line"] == "hello"
+    # the raw record stays in the payload; the browser renders the narrative
+    # the CLI and the TUI print, server-side, off the one shared renderer
+    assert detail["narrative"] == ["[--:--:--] ? hello"]
     assert detail["reports"][0]["text"] == "working"
     assert client.get("/api/tasks/ghost").status_code == 404
 

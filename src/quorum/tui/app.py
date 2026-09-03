@@ -16,7 +16,6 @@ dashboard down when QUORUM_HOME turns unwritable."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from rich.text import Text
@@ -27,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
-from .. import views
+from .. import transcript, views
 from ..messages import MessageBus
 from ..tasks import (
     Task,
@@ -677,13 +676,9 @@ class QuorumTUI(App):
                 log.write(line)
 
     def _task_log_lines(self, task_id: str) -> list[str]:
-        lines: list[str] = []
-        for entry in read_transcript_tail(self.home, task_id, limit=25):
-            at = str(entry.get("at", "")).replace("T", " ").rstrip("Z")
-            if "line" in entry:
-                lines.append(f"[{at}] {entry['line']}")
-            else:
-                lines.append(f"[{at}] {json.dumps(entry.get('event'), ensure_ascii=False)[:200]}")
+        # the same renderer `quorum task tail` and the web dashboard use, so
+        # the three surfaces cannot drift into three readings of one file
+        lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
         reports = read_reports(self.home, task_id, limit=8)
         if reports:
             lines.append("— reports —")

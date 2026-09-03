@@ -271,3 +271,19 @@ def test_a_template_that_asks_for_notes_also_sees_its_own_recent_runs(home: Path
     assert "Your own runs have cost: last $0.25 · 11.0k tok" in text
     assert "Your last run: ok " in text
     assert "Actions this run: 0 of 3 (cap)" in text
+
+
+def test_a_prompt_agents_run_keeps_the_prompt_it_was_given(home: Path, clock):
+    """A prompt agent has no digest, so what it saw *is* its rendered prompt —
+    the same one file, read back by `quorum agent log`."""
+    from quorum import transcript
+    from quorum.actor import run_snapshot_path
+
+    write_config(home)
+    seed_agent(home, prompt="post a short standup note\n")
+    make_agent(home, clock).tick()
+
+    run_id = transcript.run_ids(home, "standup")[-1]
+    assert "post a short standup note" in run_snapshot_path(home, "standup", run_id).read_text()
+    out = "\n".join(transcript.render_run(home, "standup", run_id))
+    assert "post a short standup note" in out and "how it ended" in out
