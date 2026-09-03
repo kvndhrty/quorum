@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, notes, runner, tasks
-from quorum.actor import notes_path, usage_path
+from quorum.actor import notes_path, run_snapshot_path, runs_dir, usage_path
 from quorum.agent import AgentContext
 from quorum.agents import manager
 from quorum.agents.manager import (
@@ -1339,3 +1339,30 @@ def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
     # rule 12: the perpetual loop
     perpetual = text.split("relaunch it with `task run --detach` whenever its runner is dead")[1]
     assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]
+
+
+def test_a_tick_keeps_the_digest_it_reasoned_over(home: Path, clock, project: str):
+    """The one file #82 adds: without it, "why did it launch that" is
+    unanswerable an hour later — the digest was rendered and dropped."""
+    from quorum import transcript
+
+    write_config(home, "manager_act")
+    task = TaskStore(home).add(project, "tidy up the docs", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    run_id = {e["run"] for e in fsio.read_jsonl(journal_path(home))}.pop()
+    snapshot = run_snapshot_path(home, "manager", run_id).read_text()
+    assert snapshot.startswith("# Situation digest")
+    assert f"- [queued] {task.short_id}" in snapshot
+    # the digest, not the whole prompt: the constitution above it is static
+    assert "You are the manager" not in snapshot
+    assert [p.name for p in runs_dir(home, "manager").glob("*.md")] == [f"{run_id}.md"]
+
+    # and the four files read back as one tick
+    out = "\n".join(transcript.render_run(home, "manager", run_id))
+    assert f"=== manager run {run_id}" in out
+    assert f"- [queued] {task.short_id}" in out              # what it saw
+    assert f"ACT| task run {task.short_id}" in out           # what it said
+    assert f"task.run -> {task.short_id}" in out             # what it did
+    assert "ok · " in out                                     # how it ended

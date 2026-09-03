@@ -331,8 +331,9 @@ async function renderTaskDetail() {
   catch { return; }
   $("task-detail-head").textContent =
     `task ${t.id.slice(-6).toLowerCase()} · ${t.status}${t.running ? " · running" : ""} · ${t.workdir || ""}`;
-  const lines = (t.transcript || []).map(e =>
-    e.line !== undefined ? e.line : JSON.stringify(e.event).slice(0, 200));
+  // rendered server-side by quorum.transcript, the same narrative the CLI
+  // and the TUI print; `transcript` stays in the payload as the raw record
+  const lines = t.narrative || [];
   const reports = (t.reports || []).map(r => `» [${r.status}] ${r.text}`);
   const text = [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
   if ($("task-tail").textContent !== text) $("task-tail").textContent = text;
