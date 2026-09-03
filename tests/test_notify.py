@@ -420,6 +420,51 @@ def test_a_second_drain_mid_batch_delivers_nothing_twice(home: Path, delivered, 
     assert delivered() == [["-m", "only once"]]
 
 
+def test_a_shutdown_stops_the_drain_after_the_message_in_flight(
+    home: Path, delivered, monkeypatch
+):
+    """`quorum down` waits for the running job. A full batch is up to
+    MAX_PER_TICK hooks, each up to timeout_seconds, so the drain stops
+    between messages instead — nothing is lost, because the cursor only
+    advanced past what actually went out."""
+    config = configure(home)
+    sup = Supervisor(home, config)
+    sup._notify()  # arms the cursor
+    bus = MessageBus(home)
+    for i in range(3):
+        bus.post("manager", "attention", text=f"m{i}")
+
+    real_deliver = notify.deliver
+
+    def deliver_then_shut_down(*args, **kwargs):
+        notify.request_stop()  # the supervisor, on another thread
+        return real_deliver(*args, **kwargs)
+
+    monkeypatch.setattr(notify, "deliver", deliver_then_shut_down)
+    sup._notify()
+    assert delivered() == [["-m", "m0"]]  # the one in flight finished, the rest did not go
+
+    # ... and the request belonged to that drain: the next one delivers the
+    # backlog it left, from the cursor it did not advance.
+    monkeypatch.setattr(notify, "deliver", real_deliver)
+    sup._notify()
+    assert delivered() == [["-m", "m0"], ["-m", "m1"], ["-m", "m2"]]
+
+
+def test_shutdown_asks_the_drain_to_stop_before_waiting_for_it(home: Path, monkeypatch):
+    """The order is the whole fix: `shutdown(wait=True)` blocks on the job,
+    so the request has to be in before the wait starts."""
+    order: list[str] = []
+    sup = Supervisor(home, configure(home))
+    monkeypatch.setattr(notify, "request_stop", lambda: order.append("stop"))
+    monkeypatch.setattr(
+        sup.scheduler, "shutdown", lambda **kw: order.append(f"shutdown(wait={kw.get('wait')})")
+    )
+
+    sup._shutdown_scheduler()
+    assert order == ["stop", "shutdown(wait=True)"]
+
+
 def test_the_cursor_is_persisted_before_the_hook_runs(home: Path, delivered, monkeypatch):
     """At-most-once by design: if the cursor write is what fails, the hook
     must not have run — a notification that repeats every 15 seconds forever

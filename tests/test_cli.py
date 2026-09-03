@@ -239,6 +239,50 @@ def test_task_add_refuses_empty_input(home: Path, tmp_path: Path, source: str):
     assert TaskStore(home).list() == []
 
 
+def test_task_add_checks_everything_it_can_before_consuming_stdin(
+    home: Path, tmp_path: Path, monkeypatch
+):
+    """A piped issue is gone the moment stdin is drained, so nothing that can
+    be checked without it — the slug, the harness, `--after` — may be checked
+    after it."""
+    from quorum import cli
+
+    slug = setup_task_env(home, tmp_path)
+    read: list[str] = []
+    monkeypatch.setattr(cli, "_stdin_prompt", lambda: read.append("drained") or ISSUE_PROMPT)
+
+    for args, expected in (
+        (["ghots", "-", "--harness", "fake"], "no project"),
+        ([slug, "-", "--harness", "nope"], "no [harness.nope]"),
+        ([slug, "-", "--harness", "fake", "--after", "ZZZZZZ"], "ZZZZZZ"),
+    ):
+        r = runner.invoke(app, ["task", "add", *args, "--home", str(home)], input=ISSUE_PROMPT)
+        assert r.exit_code == 1 and expected in r.output
+        assert read == []
+
+    r = runner.invoke(
+        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        input=ISSUE_PROMPT,
+    )
+    assert r.exit_code == 0, r.output
+    assert read == ["drained"] and stored_prompt(home) == ISSUE_PROMPT
+
+
+def test_task_add_says_it_is_waiting_on_a_typed_prompt(home: Path, tmp_path: Path, monkeypatch):
+    """`-` with nothing piped in blocks on a read that otherwise looks like a
+    hang; a piped one says nothing extra."""
+    from quorum import cli
+
+    slug = setup_task_env(home, tmp_path)
+    args = ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)]
+    assert "ctrl-D" not in runner.invoke(app, args, input=ISSUE_PROMPT).output
+
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    r = runner.invoke(app, args, input=ISSUE_PROMPT)
+    assert r.exit_code == 0, r.output
+    assert "reading the prompt from stdin" in r.output and "ctrl-D" in r.output
+
+
 def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     missing = tmp_path / "nope.md"

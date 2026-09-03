@@ -181,6 +181,9 @@ SUPERSEDED_PROMPT_HASHES: dict[str, set[str]] = {
         # that rule's first cut, replaced by scoping "never launch a held
         # task" to the relaunch rules too (#61)
         "97deff6263bf3a2a927ee0bde9f3f9d15f430ddce67d84c20c7d9be3a32bb973",
+        # the #61 revision on main, replaced by the #81 note that a merged
+        # task is observed once and then read off `pr_state=merged`
+        "fe1789d8c0f1b0c1c20bea6e481e7f3935297344f6e82e7d49bf560dec63edea",
     },
 }
 

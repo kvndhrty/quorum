@@ -116,8 +116,9 @@ read it as relative spend, never as an invoice.
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
 The budget also gates the **next** run: while a task's *last* run is over
-budget, `quorum task run` refuses it (`$! GATED` in `task list`, a `gated:`
-line in `task show`, and the TUI's `s` key says so) until you run it with
+budget, `quorum task run` refuses it (`$! GATED` in `task list`, the TUI and
+the dashboard, a `gated:` line in `task show`, and the TUI's `s` key says so
+if you try anyway) until you run it with
 `--force` or a run comes in under budget — a run that reports no usage
 counts as under, since silence is not spend. Quorum never kills a run in
 progress: a run past its budget finishes, and only the relaunch is held.
@@ -886,7 +887,9 @@ holds its lock, when it's attached to a live session, when another task
 still lists it under `--after`, and — the one that catches people — when its
 worktree holds uncommitted or unpushed work. That last one is the same
 stranded-work probe `quorum status` shows, and archiving the record would be
-the only thing that hid it. Commit and push, or pass `--force`.
+the only thing that hid it. Commit and push, or pass `--force`. A task queued
+with `--no-worktree` is exempt from it: it ran in your own checkout, and what
+is uncommitted there is yours, not the task's.
 
 **Worktrees and branches.** `--worktrees` runs `git worktree remove` and then
 deletes the task branch *only if git agrees it is merged*. An unmerged branch
