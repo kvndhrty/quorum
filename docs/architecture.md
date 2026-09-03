@@ -1013,13 +1013,18 @@ as of now. The narrow exception is fenced by five properties, and a second
 materialized probe result would have to earn all of them again:
 
 - **one writer**, `record_pr_state`, called from **one place**, the
-  digest's probe closure — and only for a task whose status is terminal. A
-  live task's `task.json` is being written by its own detached runner (the
-  one file race quorum has no lock for), and `open`, the only state a live
-  PR can be in, is rendered by no surface. A task already recorded `merged`
-  is not probed again at all: merge is final, so the remaining ticks of its
-  24h window would spend a subprocess to re-learn it. Its line in the digest
-  carries `pr_state=merged` instead of a `ci:` line.
+  digest's probe closure — and `open` only for a task whose status is
+  terminal. A live task's `task.json` is being written by its own detached
+  runner (the one file race quorum has no lock for), and `open`, the state
+  a PR sits in for the whole of a task's working life, is rendered by no
+  surface, so taking that race for it buys nothing. A merge or a close is
+  written wherever it is seen, live task included: it is durable, every
+  surface badges it, a PR can land while its task is still running, and a
+  perpetual task never reaches a terminal status at all. A task already
+  recorded `merged` is not probed again at all: merge is final, so the
+  remaining ticks of its 24h window would spend a subprocess to re-learn
+  it. Its line in the digest carries `pr_state=merged` instead of a `ci:`
+  line.
 - **closed vocabulary**: only the three known states are written. `unknown`
   writes nothing, so a forge shape quorum does not understand can never
   badge a task as delivered — and nothing re-probes a task once its worktree

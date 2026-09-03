@@ -516,9 +516,10 @@ def test_a_view_never_probes_and_reads_the_recorded_state_back(
 def test_a_live_task_is_probed_but_never_written(
     home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
-    """The materialization is narrowed to finished work: a live task's
-    task.json is being written by its own detached runner, and `open` — the
-    only state a live PR can be in — is rendered by no surface anyway."""
+    """`open` is not materialized onto a live task: its task.json is being
+    written by its own detached runner, and `open` — the state a PR sits in
+    for the whole of a task's working life — is rendered by no surface, so
+    taking that race for it buys nothing."""
     install_gh(path_without_gh, monkeypatch)  # an open PR
     store = TaskStore(home)
     task = make_task(home, make_repo(tmp_path), status="executing")
@@ -527,6 +528,31 @@ def test_a_live_task_is_probed_but_never_written(
     assert "ci: pr=#42 state=open" in digest  # still observed, and still shown
     after = store.get(task.id)
     assert after.pr_state is None and after.pr_state_at is None
+
+
+def test_a_live_task_still_records_a_merge_it_sees(
+    home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
+):
+    """The narrowing is about `open`, not about live tasks. A PR can land
+    while its task is still working, and a perpetual task never reaches a
+    terminal status at all — so a merge dropped here would be one the views
+    could badge only if the task happened to finish."""
+    from quorum import views
+
+    install_gh(path_without_gh, monkeypatch, pr=merged_pr())
+    store = TaskStore(home)
+    task = make_task(home, make_repo(tmp_path), status="executing")
+
+    build_digest(home, store.list(), clock(), directives=[])
+    assert store.get(task.id).pr_state == "merged"
+    row = next(r for r in views.task_rows(home) if r["id"] == task.id)
+    assert row["pr_state"] == "merged"  # ✔ without waiting for the task to end
+
+    # ... and it is not re-probed, so its own line has to carry the fact for
+    # the same reason a finished task's does.
+    second = build_digest(home, store.list(), clock(), directives=[])
+    assert f"{task.short_id} project=p" in second and "pr_state=merged" in second
+    assert "ci: " not in second
 
 
 def test_a_merged_task_is_not_probed_again(

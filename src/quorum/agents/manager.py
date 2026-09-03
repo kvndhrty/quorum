@@ -506,17 +506,24 @@ def build_digest(
             return None
         ci_budget -= 1
         state = ci.pr_state(home, task)
-        if state is not None and task.status in tasks.TERMINAL_STATUSES:
+        if state is not None and (
+            task.status in tasks.TERMINAL_STATUSES or state["state"] != "open"
+        ):
             # The one place a probe result is written to disk: what the forge
             # says about the PR outlives the probe, so views that never make
             # a network call can still badge a merged task. An observation,
             # never a status change — see tasks.record_pr_state and
             # docs/architecture.md ("The merged observation").
             #
-            # Only a *finished* task is written. A live task's task.json is
-            # being written concurrently by its own detached runner, which is
-            # the one file race quorum has no lock for, and `open` — the only
-            # state a live task's PR can be in — is rendered by nothing.
+            # `open` is written only for a *finished* task. A live task's
+            # task.json is being written concurrently by its own detached
+            # runner — the one file race quorum has no lock for — and `open`,
+            # the state a PR sits in for the whole of a task's working life,
+            # is rendered by no surface, so taking that race for it buys
+            # nothing. A merge (or a close) is the opposite: durable, badged
+            # everywhere, and a PR can land while its task is still running —
+            # and a perpetual task never reaches a terminal status at all, so
+            # waiting for one would mean never recording its merge.
             tasks.record_pr_state(home, task, state["state"], now=now)
         return state
 
@@ -553,6 +560,11 @@ def build_digest(
         lines.append(
             f"- [{t.status}] {t.short_id} project={t.project} harness={t.harness} "
             f"runner={'alive' if alive else 'dead'} runs={len(t.runs)} quiet={quiet}"
+            # What the forge last said, off task.json rather than off a
+            # probe — the same field the finished section renders. A live
+            # task whose PR has landed is not probed again, so without this
+            # the merge would be visible for exactly one tick.
+            + (f" pr_state={t.pr_state}" if t.pr_state else "")
             # Only when true: an ordinary task's line stays as it was, and
             # the marker reads as the exception it is.
             + (" perpetual=true" if t.perpetual else "")

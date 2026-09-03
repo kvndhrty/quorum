@@ -201,11 +201,13 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Fixed
-- Six review leftovers from the package (#81): the PR-state observation is
-  written only for finished tasks (a live task's `task.json` is being
-  written by its own runner) and a task already recorded `merged` is never
-  probed again; `$! GATED` now renders in the TUI and the web dashboard,
-  not only in `task list`; `quorum task add <slug> -` validates the project,
+- Six review leftovers from the package (#81): a PR still `open` is no
+  longer recorded onto a live task's `task.json` — the one file its own
+  runner is concurrently writing, and a state no surface renders — while a
+  merge, which every surface badges, is recorded wherever it is seen; a task
+  already recorded `merged` is never probed again; `$! GATED` now renders in
+  the TUI and the web dashboard, not only in `task list`; `quorum task add
+  <slug> -` validates the project,
   harness and `--after` ids *before* draining stdin, so a typo no longer eats
   a piped issue (and says so when `-` is typed at a terminal); `task prune`
   no longer refuses a `--no-worktree` task over unrelated dirt in the user's
