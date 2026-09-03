@@ -80,7 +80,10 @@ tasks/<id>/task.json              task spec + reported status + session + runs
                                   priority + depends_on:
                                   full ids this task waits on + pr_state /
                                   pr_state_at: what the forge last said about
-                                  the PR, the one materialized probe result
+                                  the PR, the one materialized probe result +
+                                  issue_url: the forge issue this task was
+                                  queued from (`task add --issue`), written
+                                  once and never re-read from the forge
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
