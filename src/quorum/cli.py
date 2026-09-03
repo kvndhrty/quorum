@@ -25,6 +25,7 @@ from .actor import (
     ACTOR_RUN_ENV,
     DEFAULT_MAX_ACTIONS_PER_RUN,
     current_actor,
+    is_task_actor,
     journal_path,
 )
 from .messages import MessageBus
@@ -132,12 +133,17 @@ def _actor_guard(
 
     User actions journal only when `always_journal` is set; they land in the
     manager's journal so notes left for the manager surface in its digest.
+    A task run is tagged `task-<id>` (see actor.py) for *identity* — what
+    lets its notebook refuse another task — and is treated like a human
+    here: nothing journals or caps a task's actions (reports.jsonl and the
+    transcript are its record; the runner is its rail).
     """
     actor = current_actor()
-    if actor == "user" and not always_journal:
+    agent = actor != "user" and not is_task_actor(actor)
+    if not agent and not always_journal:
         return
-    journal = journal_path(home, actor if actor != "user" else "manager")
-    run = os.environ.get(ACTOR_RUN_ENV, "") if actor != "user" else ""
+    journal = journal_path(home, actor if agent else "manager")
+    run = os.environ.get(ACTOR_RUN_ENV, "") if agent else ""
     if run:
         try:
             cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
@@ -1324,7 +1330,9 @@ def task_show(
     json_out: bool = typer.Option(False, "--json", help="Dump the full task record as JSON."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Show one task: what it is, where it stands, and its recent reports."""
+    """Show one task: what it is, where it stands, its recent reports and
+    its notebook."""
+    from . import notes as notes_mod
     from .config import load_config_or_default
     from .tasks import TaskStore, dependency_state, read_reports, runner_alive, short_handle
 
@@ -1403,6 +1411,19 @@ def task_show(
         typer.echo("recent reports:")
         for r in reports:
             typer.echo(f"  [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
+    # The notebook, exactly as the runner renders it into the task's prompt
+    # (header line included, so what you read here is what the harness
+    # reads). The digest never carries it: the manager reads reports.
+    kept = notes_mod.task_section(target, task.id)
+    if kept:
+        typer.echo("notebook:")
+        for line in kept[1:]:
+            typer.echo(f"  {line}")
+    else:
+        typer.echo(
+            f'  notebook: (empty — `quorum task remember {task.short_id} "…"` keeps state '
+            "between its runs)"
+        )
     typer.echo(f"more: `quorum task tail {task.short_id}` for the transcript, `--json` for the raw record")
 
 
@@ -1607,6 +1628,83 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
                    args=text[:80])
     nudge(target, task, text, sender=current_actor())
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
+
+
+@task_app.command("remember")
+def task_remember(
+    task_id: str,
+    text: str,
+    ttl: int = typer.Option(0, "--ttl", help="Days until the note expires (0: never)."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Write a standing note into a task's notebook; every future run of the
+    task reads it — resumed or fresh.
+
+    The notebook (`tasks/<id>/notes.jsonl`) is the task's memory between
+    runs: what is done, what is left, what was tried and failed. The task's
+    own harness writes it (tagged `task-<id>` by the runner), and so may the
+    manager or you; another task or a prompt agent is refused — guide a task
+    with `quorum task nudge` instead. A nudge is read once; a note stays
+    until it expires or is forgotten.
+    """
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    book = notes_mod.task_notebook(target, task.id)
+    actor = current_actor()
+    if not book.may_write(actor):
+        # journal the refusal too (for a tagged agent): reaching for a task's
+        # memory is exactly the kind of thing its next digest should show
+        _actor_guard(
+            target, "task.remember.refused", target=task.short_id, target_status=task.status,
+            args=text[:80],
+        )
+        raise _fail(
+            f"action refused: {actor} may not write to task {task.short_id}'s notebook — "
+            f"guide it with `quorum task nudge {task.short_id}` instead"
+        )
+    _actor_guard(
+        target, "task.remember", target=task.short_id, target_status=task.status, args=text[:80]
+    )
+    try:
+        entry = book.remember(
+            text, sender=actor, run_id=os.environ.get(ACTOR_RUN_ENV, ""), ttl_days=ttl or None
+        )
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.secho(
+        f"remembered ({notes_mod.short_id(entry['id'])}) — every future run of task "
+        f"{task.short_id} reads it" + (f", for {ttl}d" if ttl else ""),
+        fg="green",
+    )
+
+
+@task_app.command("forget")
+def task_forget(task_id: str, note_id: str, home: Path | None = _HOME_OPT) -> None:
+    """Retire a note in a task's notebook (append-only: the file keeps it,
+    readers hide it). The note id is the handle `task remember` printed and
+    `task show` lists."""
+    from . import notes as notes_mod
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    book = notes_mod.task_notebook(target, task.id)
+    actor = current_actor()
+    if not book.may_write(actor):
+        _actor_guard(
+            target, "task.forget.refused", target=task.short_id, target_status=task.status,
+            args=note_id,
+        )
+        raise _fail(f"action refused: {actor} may not write to task {task.short_id}'s notebook")
+    _actor_guard(
+        target, "task.forget", target=task.short_id, target_status=task.status, args=note_id
+    )
+    try:
+        note = book.forget(note_id, sender=actor, run_id=os.environ.get(ACTOR_RUN_ENV, ""))
+    except notes_mod.NotebookError as e:
+        raise _fail(str(e)) from None
+    typer.echo(f"forgot ({notes_mod.short_id(note['id'])}) {note.get('text', '')[:60]}")
 
 
 @task_app.command("stop")

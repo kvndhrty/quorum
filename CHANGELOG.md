@@ -201,6 +201,20 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- Per-task notebook: `tasks/<id>/notes.jsonl` is the manager's notebook
+  generalized to a task — same schema, tombstones, `--ttl` expiry, torn
+  lines skipped — written with `quorum task remember <id> "…"` and
+  `quorum task forget <id> <note>` by the task's own harness, the manager
+  or you (another task or a prompt agent is refused and pointed at `task
+  nudge`; a convention read off `QUORUM_ACTOR`, not a boundary), and
+  rendered by the runner into every run's prompt, resumed or fresh, under
+  its own byte budget with a drop count. `task show` prints it; the
+  digest does not. The runner now tags a task's harness
+  `QUORUM_ACTOR=task-<id>` (identity only: nothing journals or caps a
+  task), so a task's `task nudge` and `board post` carry `task-<id>` as
+  sender where they used to read as `user`. The default preamble gains a
+  memory protocol paragraph and the manager prompt learns `task
+  remember`; re-run `quorum init` to pick up never-edited copies. (#90)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the

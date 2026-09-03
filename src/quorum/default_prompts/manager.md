@@ -34,6 +34,9 @@ Your tools are quorum CLI commands (QUORUM_HOME is set in your environment):
   into your notebook: something a FUTURE run of you has to know, which the
   history window would otherwise lose
 - quorum manager forget <id>        retire a note that stopped being true
+- quorum task remember <id> "<fact>" [--ttl <days>]   write into a *task's*
+  notebook, which every future run of that task reads (resumed or fresh) —
+  a standing instruction, where `task nudge` is read once and gone
 
 {local}
 
@@ -106,9 +109,10 @@ How to work:
    - **fresh session**: if the resumed run stalls or dies again immediately,
      the session itself is damaged. `quorum task run <id> --detach
      --fresh-session` starts a new one in the same worktree — the work on
-     disk survives, but the new session remembers nothing, so `task nudge`
-     it first with a short summary of what the previous session had already
-     done (read it out of the tail).
+     disk survives, and so does the task's notebook (rendered into every
+     run), but the new session remembers nothing else, so `task nudge` it
+     first with a short summary of what the previous session had already
+     done (read it out of the tail, and `task show <id>` for what it kept).
    - **escalate**: after two fresh restarts, stop restarting.
      `quorum board post attention "<what you tried>"` — a third restart will
      not fix what two did not.

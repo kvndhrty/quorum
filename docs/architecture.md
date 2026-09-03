@@ -87,6 +87,9 @@ tasks/<id>/task.json              task spec + reported status + session + runs
 tasks/<id>/attached.json          adopted-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
+tasks/<id>/notes.jsonl            the task's notebook: standing notes every
+                                  run of it reads, plus tombstones (same
+                                  schema as state/manager/notes.jsonl)
 tasks/<id>/runner.lock            pid of the active run
 tasks/<id>/runner.log             detached-run bootstrap output
 tasks/.archive/<id>/              pruned tasks, moved here whole; dot-prefixed
@@ -237,14 +240,18 @@ record (`tasks/<id>/task.json`) plus a sequence of runs, and
    sandboxed run needs write on the project's `.git`),
 3. claim everything in the task's inbox (`messages/inbox/task-<id>/`) — the
    manager's pokes and the user's nudges — and inject it into the prompt,
-4. compose the prompt: preamble template (teaches the report/inbox protocol)
-   + task prompt + guidance section; pick the harness argv template
+4. compose the prompt: preamble template (teaches the report/inbox/memory
+   protocol) + task prompt + dependency note + the task's notebook
+   (`tasks/<id>/notes.jsonl`, rendered under its own budget — *The task
+   notebook* below) + guidance section; pick the harness argv template
    (`resume` when a session id is known, else `start`) and substitute
    `{prompt}`/`{session}` — except for an inject harness, whose prompt
    travels over stdin instead (below) and whose `{prompt}` elements are
    dropped from the argv,
-5. spawn the harness with `cwd=<workdir>` and `QUORUM_HOME` in its
-   environment; stream stdout line-by-line into `transcript.jsonl`,
+5. spawn the harness with `cwd=<workdir>`, `QUORUM_HOME` and its own actor
+   tag (`QUORUM_ACTOR=task-<id>` — identity only, no run id, no cap; the
+   launcher's tag is stripped first) in its environment; stream stdout
+   line-by-line into `transcript.jsonl`,
    capturing a `session_id` (or codex-style `thread_id`) from any JSON
    event that carries one, and whatever token/cost usage its result events
    report (below),
@@ -728,6 +735,65 @@ scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
   `_write`; `h` does not confirm, because unlike `c` nothing is lost by
   pressing it twice.
 
+### The task notebook
+
+A task's only memory between runs used to be its harness session, and the
+session is exactly what compaction, a `--fresh-session` restart or a crash
+throws away; the guide's answer was "nudge it a summary", a human or the
+manager reconstructing what the task itself had known. The task notebook is
+the manager's notebook (*The manager* below, `notes.py`) generalized to a
+task, on the same substrate and under the same rules:
+
+- **Layout.** `tasks/<id>/notes.jsonl`, append-only, one entry per line
+  with the same schema as `state/manager/notes.jsonl`: `{id, ts, run_id,
+  sender, text, ttl_days?}` for a note, `{id, ts, run_id, sender, retired:
+  true}` for the tombstone `quorum task forget <id> <note>` appends. It
+  lives in the task directory rather than under `state/`, so `quorum task
+  prune` moves it with the task and nothing else has to know it exists.
+- **Owner.** The task's actor identity is `task-<full id>` — the same
+  string as its inbox name (`tasks.inbox_name` is defined as
+  `actor.task_actor`), so one name addresses a task on the bus and in the
+  CLI. The runner sets `QUORUM_ACTOR=task-<id>` on the harness it spawns
+  (after stripping the launcher's tag) for *identity only*: `_actor_guard`
+  treats a task actor like a human — no run id, no journal under
+  `state/agents/`, no action cap — because reports.jsonl and the transcript
+  are a task's record and the runner is its rail. A side effect worth
+  naming: a task's `task nudge` and `board post` now carry `task-<id>` as
+  sender where they used to read as `user`.
+- **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
+  standing instruction for a task's next run is the natural complement to a
+  one-shot nudge) and an untagged human; any other task and any prompt
+  agent is refused with a pointer to `task nudge`. The same honesty as the
+  manager's fence applies: it reads `QUORUM_ACTOR`, which any process that
+  can run the CLI can set, so it is a **convention against accidental
+  crowding, not a security boundary** — the sandbox is. The manager's
+  notebook keeps refusing a task-tagged call exactly as before.
+- **Reader.** `runner.compose_prompt` renders the notebook into every
+  composed prompt — a resumed session and a fresh one alike, because the
+  fresh one is the run that needs it — after the task body and the
+  dependency note and before the guidance section, under its own
+  `TASK_NOTES_MAX_ENTRIES` / `TASK_NOTES_MAX_BYTES`; over the cap the
+  newest notes are kept and a line says how many older ones were dropped
+  (naming `quorum task remember|forget <id>`, the task's verbs), and a
+  file grown past `NOTES_SCAN_BYTES` says how many bytes went unread. An
+  empty notebook renders nothing — the preamble's memory protocol already
+  teaches the command. `quorum task show` prints the same rendering. The
+  digest deliberately does not: the manager reads reports, and the
+  notebook is the task's own.
+- **Policy.** The preamble says what the notebook is for — state worth
+  having after a restart (what is done, what is left, what was tried and
+  failed), not a log — and to rewrite one superseding note rather than
+  append when the list grows. Nothing consolidates in Python; expiry
+  (`--ttl`) is the only automatic retirement.
+
+`notes.py` carries the two notebooks as one `Notebook` value (path, owner,
+extra writers, header, budget, the command names its rendering teaches)
+with `agent_notebook` and `task_notebook` as the two constructors; the
+module-level functions the digest, the views and `quorum manager
+remember|forget|notes` call are the manager-shaped face over
+`agent_notebook`, kept so the manager notebook's behaviour did not change
+when tasks got one.
+
 ### Attached tasks: adopting a live session
 
 (User-facing how-to: [guide.md](guide.md#adopting-a-live-session).)
@@ -972,7 +1038,10 @@ retirement (`ttl_days`), and consolidation — one superseding note, then
 `forget` the ones it replaced — is policy in `prompts/manager.md`. Readers
 are pure file readers (`quorum manager notes`, `views.agent_detail` →
 the TUI's agent pane and the web agent detail), and a prompt agent's
-template gets the same rendering wherever it writes `{notes}`.
+template gets the same rendering wherever it writes `{notes}`. A task has
+the same notebook at `tasks/<id>/notes.jsonl`, rendered into its own
+prompt rather than the digest — *The task notebook* under *Tasks and the
+runner*.
 
 **Loop observation (`possible-loop`).** The action journal remembers what the
 *manager* did; nothing else sees the other loop class — a task harness
