@@ -177,6 +177,7 @@ class QuorumTUI(App):
         ("plus", "raise_priority", "priority +1"),
         ("minus", "lower_priority", "priority -1"),
         ("a", "attention", "ack attention"),
+        ("t", "history", "history"),
         ("escape", "show_board", "board"),
     ]
     CSS = """
@@ -202,6 +203,11 @@ class QuorumTUI(App):
         # the task a "task" nudge is aimed at, pinned when the box was opened
         self._input_task: str | None = None
         self._log_lines: list[str] | None = None  # last rendered log content
+        # Which tab of an open task's detail the pane shows: its transcript
+        # tail (the default) or its history — the one chronological list of
+        # what happened to it (views.task_history). `t` switches; the choice
+        # sticks across tasks the way a tab does.
+        self._task_view = "transcript"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -246,6 +252,21 @@ class QuorumTUI(App):
             return
         self.selected_task = None
         self.selected_agent = None
+        self.refresh_data()
+
+    def action_history(self) -> None:
+        """Show the highlighted (or open) task's history in the detail pane;
+        pressed again on an open task, switch back to its transcript. A read,
+        like `enter` — it arms nothing."""
+        task_id = self._highlighted_task() or self.selected_task
+        if task_id is None:
+            self.notify("no task to show", severity="warning")
+            return
+        if self.selected_task == task_id and self._task_view == "history":
+            self._task_view = "transcript"
+        else:
+            self._task_view = "history"
+        self.selected_task, self.selected_agent = task_id, None
         self.refresh_data()
 
     def action_nudge(self) -> None:
@@ -650,19 +671,27 @@ class QuorumTUI(App):
         mode = self.query_one("#logmode", Static)
         if self.selected_task:
             short = self.selected_task[-6:].lower()
-            mode.update(
-                f"task {short} — transcript tail   "
-                "(esc: board · n: nudge · m: manager · s: run · c: cancel · a: ack)"
-            )
-            lines = self._task_log_lines(self.selected_task)
+            if self._task_view == "history":
+                mode.update(
+                    f"task {short} — history, oldest first   "
+                    "(t: transcript · esc: board · n: nudge · m: manager · s: run · c: cancel)"
+                )
+                lines = self._task_history_lines(self.selected_task)
+            else:
+                mode.update(
+                    f"task {short} — transcript tail   "
+                    "(t: history · esc: board · n: nudge · m: manager · s: run · c: cancel)"
+                )
+                lines = self._task_log_lines(self.selected_task)
         elif self.selected_agent:
             mode.update(f"agent {self.selected_agent} — notebook & journal   (esc: board)")
             lines = self._agent_log_lines(self.selected_agent)
         else:
             mode.update(
                 "board — recent messages   "
-                "(enter on a task or agent: its detail · n/s/c act on the highlighted row · "
-                "m: tell manager · a: ack #attention · ⚭ attached · ▶ running)"
+                "(enter on a task or agent: its detail · t: a task's history · "
+                "n/s/c act on the highlighted row · m: tell manager · a: ack #attention · "
+                "⚭ attached · ▶ running)"
             )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
@@ -675,6 +704,14 @@ class QuorumTUI(App):
             log.clear()
             for line in lines:
                 log.write(line)
+
+    def _task_history_lines(self, task_id: str) -> list[str]:
+        """The task's life as `quorum task history` prints it — the same
+        rows, the same line per row."""
+        task = TaskStore(self.home).get(task_id)
+        if task is None:
+            return ["that task is gone"]
+        return [views.history_line(row) for row in views.task_history(self.home, task)]
 
     def _task_log_lines(self, task_id: str) -> list[str]:
         lines: list[str] = []

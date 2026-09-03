@@ -1482,6 +1482,8 @@ write logic that lives in a view:
   the TUI needs no task-add form: the manager runs `task add` itself,
   journaled and capped), start a detached run (`s`), cancel a task (`c`),
   hold/release a task (`h`) and nudge its priority (`+` / `-`).
+  `t` is a read, not a write: the detail pane's second tab, the task's
+  history (below), sticky across tasks the way a tab is.
   `s` refuses an attached task, a held task and a task whose runner is
   alive, mirroring the runner's own substrate rails; `c` is the one
   destructive binding, so
@@ -1507,6 +1509,50 @@ invention; a dashboard that vanishes mid-keystroke leaves nothing behind but
 the message it already queued. This revises the earlier "the views are pure
 readers whose one write affordance is nudging a task" stance (issue #11) —
 the invariant that survived it is *thin, shared, no view-local write logic*.
+
+### Task history
+
+`views.task_history(home, task)` is the first of the post-hoc readers
+(#88): one list, oldest first, of everything that happened to a task,
+assembled from the files that already record it and nothing else. Every
+row is `{at, kind, text, ...}` — `at` an ISO-8601 UTC stamp, `kind` one of
+`queued`, `action`, `guidance`, `run.started`, `report`, `run.ended`,
+`pr_state`, `archived`, and `text` the one line every surface prints
+(`views.history_line`: `[at] text`), with the kind's raw fields beside it
+for `--json`. `quorum task history`, the TUI's `t` tab and the web task
+page (`history` on `/api/tasks/{id}`) all render the same rows, so they
+cannot disagree. The sources, and what each contributes:
+
+| file | rows |
+| --- | --- |
+| `task.json` | `queued` (`created_at`, with issue and `depends_on`); a `run.started` / `run.ended` pair per run — exit code, `usage` as the harness reported it, `stopped` (with the signal `task stop` sent), `stalled`, `fresh_session`, the `auto_commit` note; `pr_state` from `pr_state_at`, the one materialized probe |
+| `runner.lock` | a `run.started` marked `live` for the run in progress, which has no record yet (the runner writes one when it ends); only while the pid is alive |
+| `reports.jsonl` | one `report` per line: status, text, pr_url |
+| `messages/inbox/task-<id>/new` and `cur` | `guidance` still `waiting` (unclaimed) or `claimed` (a run is injecting it, or its consumer crashed and the janitor has not yet returned it) |
+| `messages/archive/*.jsonl.gz` | `guidance` that was consumed: what a run acks after injecting it (`MessageBus.archived_direct`, read from the task's own month on). `task inbox --clear` archives without delivering and leaves an identical record, so the row cannot tell the two apart; it says so in the guide |
+| `state/manager/journal.jsonl` and every `state/agents/<name>/journal.jsonl` | `action`: entries whose `target` is the task's short id, plus a `task.prune` whose args list it (a prune journals once per command). Read over `HISTORY_JOURNAL_BYTES` — a completeness bound well past the digest's tail, not a tail |
+| `tasks/.archive/<id>/` | `archived`, stamped from the directory's ctime — the one event with no record of its own; a rename updates ctime, and nothing else touches a pruned directory |
+
+The transcript contributes no row: everything the runner notes there (a
+stop, a stall, an auto-commit, a fresh session) is also on the run record,
+and the harness's own events are #82's renderer and #83's `event received`
+row, which does not exist yet and is deliberately not stubbed.
+
+What the reader does *not* do is as much the design as what it does. It
+records nothing: guidance is stamped when it was sent because delivery
+writes no time, and the honest fix for a missing fact is to record it
+where it happens (as `pr_state_at` was, #79), never to compute and cache
+it here. It is bounded and fail-soft in the read model's way — the
+journals over a byte budget, the archive from the task's own month on, a
+torn line or an undecodable archive file costs the rows it held and never
+the list — because the TUI re-reads it every two seconds while the tab is
+open. And it outlives pruning: `quorum task history` resolves a handle
+out of `tasks/.archive/` (`prune.resolve_archived`, the same
+full-id/prefix/suffix grammar as `TaskStore.resolve`) when the live
+listing has nothing, because archival is the last thing that happens to a
+task and the answer to "what happened to it" must not vanish with the
+move. That is the one reader that looks into the dot-prefixed directory on
+purpose; every listing, view and digest keeps skipping it.
 
 ## Projects
 

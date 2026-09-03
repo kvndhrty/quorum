@@ -201,6 +201,18 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- Task history: `quorum task history <id>` prints one list, oldest first,
+  of everything that happened to a task — queued (issue, dependencies),
+  each run's start and end (exit code, reported cost, stopped by `task
+  stop`, stalled, fresh session, auto-commit), every report, guidance sent
+  to it and by whom (`(waiting)` / `(claimed)` until a run consumes it),
+  the PR state the manager's probe recorded, every agent action journaled
+  against it, and its archival by `task prune` — with `--json` for the raw
+  rows. Built in `views.py` as a pure reader over the files that already
+  record each fact (`task.json`, `reports.jsonl`, the inbox and message
+  archive, the agents' journals, `tasks/.archive`); nothing new is written.
+  It still answers for a pruned task, resolved out of the archive. The same
+  list is the TUI's `t` tab on a task and a block on the web task page. (#95)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the
