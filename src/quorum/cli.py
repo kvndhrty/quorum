@@ -1868,6 +1868,61 @@ def task_prune(
     typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")
 
 
+@task_app.command("export")
+def task_export(
+    task_id: str,
+    out: Path | None = typer.Option(
+        None, "--out", help="Archive path (default: ./quorum-task-<short-id>.tar.gz; never inside the home)."
+    ),
+    with_worktree_diff: bool = typer.Option(
+        False, "--with-worktree-diff",
+        help="Add worktree.diff: the task's worktree against the branch it forked from.",
+    ),
+    redact: bool = typer.Option(
+        False, "--redact",
+        help="Replace every tool result in the transcript with a marker; keep the assistant's "
+             "text and its tool calls.",
+    ),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Pack one task into a tar.gz for sharing or a bug report.
+
+    The archive holds `tasks/<id>/` whole (record, reports, transcript,
+    runner log, any subdirectory), the task's inbox — waiting, claimed and
+    already-delivered guidance — and, with --with-worktree-diff, a patch of
+    the worktree against its base. Nothing from the project directory, and
+    nothing is written but the archive. A task that ran in your own checkout
+    (--no-worktree, adopted) is refused the diff.
+    """
+    from . import export as export_mod
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    destination = out if out is not None else export_mod.default_output(task)
+    refused = export_mod.output_refusal(destination, target)
+    if refused:
+        raise _fail(refused)
+    try:
+        entries, redaction = export_mod.plan(
+            target, task, with_worktree_diff=with_worktree_diff, redact=redact
+        )
+        names = export_mod.write_archive(destination, task, entries)
+    except export_mod.ExportError as e:
+        raise _fail(f"cannot export task {task.short_id}: {e}") from None
+    except OSError as e:
+        raise _fail(f"cannot write {destination}: {e}") from None
+    typer.secho(f"exported task {task.short_id} to {destination} ({len(names)} entries)", fg="green")
+    for name in names:
+        typer.echo(f"  {name}")
+    if redaction is not None:
+        note = f"redacted {redaction.results} tool result(s)"
+        if redaction.lines_kept:
+            note += (
+                f"; {redaction.lines_kept} plain-text line(s) kept verbatim — "
+                "no structure to redact"
+            )
+        typer.secho(note, fg="yellow")
+
 
 # -- board -----------------------------------------------------------------
 

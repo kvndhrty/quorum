@@ -855,6 +855,73 @@ that would stay unarchived because of it. A prune journals one entry through
 entries would burn an agent's action cap mid-sweep and leave the tidy
 half-finished.
 
+### Exporting a task: one archive for sharing a run
+
+Everything about a task is on disk, in three places: `tasks/<id>/` (the
+record, reports, transcript, runner log, and whatever a later feature puts
+next to them), `messages/inbox/task-<id>/` (guidance waiting or claimed)
+and — once a run has acked it — `messages/archive/YYYY-MM.jsonl.gz`, where
+delivered guidance sits mixed with every other message. Sharing a run, or
+attaching it to a bug report, used to mean knowing that layout. `quorum
+task export <id> [--out <path>] [--with-worktree-diff] [--redact]` writes
+one `.tar.gz` instead:
+
+```
+quorum-task-<short-id>/
+  export.json            task id, when, options, the member list
+  task.json, reports.jsonl, transcript.jsonl, runner.log, attached.json,
+  <subdir>/…             the task directory whole (tmp files skipped)
+  inbox/new/*.json       guidance waiting to be claimed
+  inbox/cur/*.json       guidance a run claimed and has not acked
+  inbox/delivered.jsonl  archived messages addressed to this task, oldest
+                         first — read back out of messages/archive/ (only
+                         the months from the task's creation onward are
+                         opened, since an ack can only land at or after it)
+  worktree.diff          --with-worktree-diff only
+```
+
+It is a reader of the same class as `prune.py`'s plan half, and the theme's
+stances (#88) hold: **no new state** — the archive is built from what is
+there, the manifest and `delivered.jsonl` are composed in memory, and the
+home's layout gains nothing; **read-only** apart from the output file,
+which defaults to `./quorum-task-<short-id>.tar.gz` and is *refused* inside
+the home (an archive under `tasks/<id>/` would be swept into the next export
+of that task, and nothing under the home should exist that the layout above
+does not document) and refused over an existing file; **nothing from the
+project directory**. That last one is why the diff is refused, loudly, for
+an attached or `--no-worktree` task: its workdir is the user's checkout, and
+the person asked for the diff, so silently omitting it would be the wrong
+kind of quiet. For a task with a quorum-made worktree, `worktree.diff` is
+`git diff` against the merge base with the same base `worktree_changed_paths`
+uses (`tasks._worktree_base`: the checkout's branch, else `origin/HEAD`, else
+the upstream), plus one `git diff --no-index` per untracked file so
+uncommitted new files are in the patch too — read-only plumbing, no fetch,
+no `add -N`. `runner.lock` is the one file in the task directory left out:
+it is a pid on this machine, not a fact about the task, and an unpacked
+archive must not look like it holds a live run. Member ownership is
+stripped (uid/gid 0, empty names) because the archive is meant to leave the
+machine. The archive is written beside its final name and renamed into
+place, so a failure mid-way leaves no half-file.
+
+`--redact` exists because tool results are where transcripts carry file
+contents, command output and secrets read off disk. It rewrites
+`transcript.jsonl` in the archive (never on disk) keeping the assistant's
+text, its thinking, and every tool *call* — name and arguments, which is
+how a reader follows what the run did — and replacing each tool *result*
+with a marker. The walk is structural and loose in the mold of
+`loop_signal`'s tool-call extraction: a dict tagged `tool_result` /
+`function_call_output` / `tool_call_output` has its output fields
+(`content`, `output`, `stdout`, …) replaced and its identity
+(`tool_use_id`, `is_error`, `call_id`) kept; a tool-call item that carries
+its own output (codex's `command_execution`) loses only the output fields;
+a `tool_use_result` field anywhere goes whole; past a depth bound a node is
+replaced rather than kept, because a redaction's failure direction has to
+be "dropped". A plain-text harness's `line` entries have no structure to
+redact and are kept verbatim — the command says how many, so nobody
+mistakes a `--redact` of an opencode transcript for a clean one. Counts of
+what was redacted come back with the archive path; there is no `--redact`
+of reports or guidance, which are what people wrote.
+
 ## The manager
 
 (User-facing how-to: [guide.md](guide.md#the-manager).)

@@ -201,6 +201,21 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- Task export: `quorum task export <id> [--out <path>]
+  [--with-worktree-diff] [--redact]` packs one task into a `.tar.gz` for
+  sharing or a bug report — `tasks/<id>/` whole (record, reports,
+  transcript, runner log, any subdirectory; never `runner.lock`), the
+  task's inbox (waiting, claimed, and already-delivered guidance read back
+  out of `messages/archive/`), an `export.json` manifest, and optionally
+  `worktree.diff`, the worktree against the branch it forked from with
+  untracked files included. Nothing from the project directory: the diff
+  is refused for a `--no-worktree` or adopted task. Read-only apart from
+  the archive, which defaults to the current directory and is refused
+  inside the home or over an existing file; an ambiguous id is refused
+  like everywhere else. `--redact` replaces every tool result in the
+  archived transcript with a marker (claude and codex shapes), keeping
+  assistant text and tool calls, and says how many plain-text lines it
+  could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the
