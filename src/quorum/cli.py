@@ -327,7 +327,7 @@ PREAMBLE = "task-preamble"
 
 
 def _print_project_blocks(target: Path) -> None:
-    """The third prompt layer: what each project puts in the preamble's
+    """The fourth prompt layer: what each project puts in the preamble's
     `{project}` slot (its registry notes, its own .quorum file, or both).
 
     Only projects that actually contribute a block are listed — the point is

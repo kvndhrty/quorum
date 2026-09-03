@@ -20,8 +20,9 @@ which is how a home silently falls behind. Rewriting `<name>.md` outright
 still wins, exactly as before.
 
 The overlay is home-wide, which is the wrong scope for a home holding
-several projects. `{project}` is the third layer: a second block, filled
-per project from the registry `notes` and from `.quorum/<name>.local.md`
+several projects. `{project}` is the fourth layer (after the packaged
+default, the home copy and the home overlay): a second block, filled per
+project from the registry `notes` and from `.quorum/<name>.local.md`
 *inside the project directory* (`project_block`) — read-only, like every
 other project-dir read. It follows the `{local}` rules exactly: same
 fail-soft read, and an empty block takes its slot's line with it. It has no
