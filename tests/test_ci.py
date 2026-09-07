@@ -15,11 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FAILING_PR, install_gh
+from conftest import FAILING_PR, install_gh, make_repo
 from quorum import ci, fsio
 from quorum.agents.manager import build_digest
 from quorum.tasks import TaskStore
-from test_tasks import make_repo
 
 
 def make_task(home: Path, workdir: Path, status: str = "executing"):

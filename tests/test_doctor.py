@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import install_gh, make_repo
 from quorum import doctor, fsio, installed_version, surfaces
 from quorum import home as home_mod
 from quorum.cli import app
@@ -52,18 +53,19 @@ def statuses(checks: list[doctor.Check]) -> dict[str, str]:
     return {c.name: c.status for c in checks}
 
 
+def assert_check(check: doctor.Check, status: str, summary: str = "", fix: str = "") -> None:
+    """One check's three visible parts. `summary` and `fix` are substrings; the
+    empty default matches anything, so a case that only cares about the status
+    passes nothing."""
+    assert check.status == status, f"{check.name}: {check.summary}"
+    assert summary in check.summary
+    assert fix in check.fix
+
+
 def find(checks: list[doctor.Check], name: str) -> doctor.Check:
     match = [c for c in checks if c.name == name]
     assert match, f"no check named {name!r} in {[c.name for c in checks]}"
     return match[0]
-
-
-def make_repo(path: Path) -> Path:
-    import subprocess
-
-    path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
-    return path
 
 
 def fake_harness_config(
@@ -80,27 +82,6 @@ def fake_harness_config(
         inject=inject,
     )
     return Config(harness={name: harness}, tasks=TasksConfig(default_harness=name))
-
-
-@pytest.fixture
-def bin_without_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A PATH holding only real git, so `gh` is provably absent until a test
-    installs the fake one (the dev machine's real gh would hit the network)."""
-    d = tmp_path / "doctorbin"
-    d.mkdir()
-    git = shutil.which("git")
-    assert git, "these tests need git"
-    (d / "git").symlink_to(git)
-    monkeypatch.setenv("PATH", str(d))
-    return d
-
-
-def install_gh(bindir: Path, monkeypatch: pytest.MonkeyPatch, mode: str = "pr") -> None:
-    body = FAKE_GH.read_text().split("\n", 1)[1]  # the shebang must be this interpreter
-    shim = bindir / "gh"
-    shim.write_text(f"#!{sys.executable}\n{body}")
-    shim.chmod(0o755)
-    monkeypatch.setenv("FAKE_GH_MODE", mode)
 
 
 # -- home and config ---------------------------------------------------------
@@ -138,51 +119,62 @@ def test_config_check_refuses_to_paper_over_a_broken_config(home: Path):
 # -- harnesses ---------------------------------------------------------------
 
 
-def test_harness_binary_check_resolves_argv0():
-    harness = HarnessConfig(start=[sys.executable, "-c", "pass"])
-    assert doctor.check_harness_binary("fake", harness).status == OK
+@pytest.mark.parametrize(
+    ("harness", "status", "summary"),
+    [
+        pytest.param(
+            HarnessConfig(start=[sys.executable, "-c", "pass"]), OK, "",
+            id="argv0-resolves",
+        ),
+        pytest.param(
+            HarnessConfig(start=["no-such-binary-xyz"]), PROBLEM, "not found on PATH",
+            id="argv0-missing",
+        ),
+    ],
+)
+def test_harness_binary_check_reads_argv0(harness: HarnessConfig, status: str, summary: str):
+    """argv[0] of a `[harness.*]` table either resolves on PATH or does not."""
+    assert_check(doctor.check_harness_binary("h", harness), status, summary)
 
 
-def test_harness_binary_check_flags_a_missing_binary():
-    check = doctor.check_harness_binary("ghost", HarnessConfig(start=["no-such-binary-xyz"]))
-    assert check.status == PROBLEM
-    assert "not found on PATH" in check.summary
-
-
-def test_harness_template_check_accepts_a_prompt_placeholder():
-    check = doctor.check_harness_template("c", HarnessConfig(start=["cli", "{prompt}"]))
-    assert check.status == OK
-    assert "{prompt} in argv" in check.summary
-
-
-def test_harness_template_check_accepts_an_inject_harness():
-    harness = HarnessConfig(
-        start=["cli", "--input-format", "stream-json", "{prompt}"], inject="stream-json"
-    )
-    assert doctor.check_harness_template("c", harness).status == OK
-
-
-def test_harness_template_check_catches_stream_json_without_inject():
-    """The 2026-08-30 outage, statically: a stream-json CLI ignores an argv
-    prompt entirely, so every run hangs until something times it out."""
-    harness = HarnessConfig(start=["claude", "-p", "{prompt}", "--input-format", "stream-json"])
-    check = doctor.check_harness_template("claude", harness)
-    assert check.status == PROBLEM
-    assert "inject" in check.summary
-    assert 'inject = "stream-json"' in check.fix
-
-
-def test_harness_template_check_catches_resume_without_session():
-    harness = HarnessConfig(start=["cli", "{prompt}"], resume=["cli", "--resume", "{prompt}"])
-    check = doctor.check_harness_template("cli", harness)
-    assert check.status == PROBLEM
-    assert "{session}" in check.summary
-
-
-def test_harness_template_check_is_neutral_about_an_appended_prompt():
-    check = doctor.check_harness_template("cli", HarnessConfig(start=["cli", "run"]))
-    assert check.status == NA
-    assert "appends the prompt" in check.summary
+@pytest.mark.parametrize(
+    ("harness", "status", "summary", "fix"),
+    [
+        pytest.param(
+            HarnessConfig(start=["cli", "{prompt}"]), OK, "{prompt} in argv", "",
+            id="prompt-placeholder",
+        ),
+        pytest.param(
+            HarnessConfig(
+                start=["cli", "--input-format", "stream-json", "{prompt}"], inject="stream-json"
+            ),
+            OK, "", "",
+            id="inject-harness",
+        ),
+        # The 2026-08-30 outage, statically: a stream-json CLI ignores an argv
+        # prompt entirely, so every run hangs until something times it out.
+        pytest.param(
+            HarnessConfig(start=["claude", "-p", "{prompt}", "--input-format", "stream-json"]),
+            PROBLEM, "inject", 'inject = "stream-json"',
+            id="stream-json-without-inject",
+        ),
+        pytest.param(
+            HarnessConfig(start=["cli", "{prompt}"], resume=["cli", "--resume", "{prompt}"]),
+            PROBLEM, "{session}", "",
+            id="resume-without-session",
+        ),
+        pytest.param(
+            HarnessConfig(start=["cli", "run"]), NA, "appends the prompt", "",
+            id="appended-prompt",
+        ),
+    ],
+)
+def test_harness_template_check_reads_the_argv_template(
+    harness: HarnessConfig, status: str, summary: str, fix: str
+):
+    """Every shape of `start`/`resume` the check has an opinion about, and the
+    one it deliberately stays neutral on."""
+    assert_check(doctor.check_harness_template("cli", harness), status, summary, fix)
 
 
 def test_harnesses_check_reads_a_fresh_home_as_undecided_not_broken():
@@ -236,13 +228,13 @@ def test_projects_check_is_quiet_about_an_empty_registry(home: Path):
 
 
 def test_projects_check_passes_a_registered_repo(home: Path, tmp_path: Path):
-    repo = make_repo(tmp_path / "proj")
+    repo = make_repo(tmp_path, "proj")
     ProjectRegistry(home).add(repo, name="proj")
     assert [c.status for c in doctor.check_projects(home)] == [OK]
 
 
 def test_projects_check_flags_a_vanished_directory(home: Path, tmp_path: Path):
-    repo = make_repo(tmp_path / "gone")
+    repo = make_repo(tmp_path, "gone")
     ProjectRegistry(home).add(repo, name="gone")
     shutil.rmtree(repo)
     check = doctor.check_projects(home)[0]
@@ -267,7 +259,7 @@ def test_gh_check_is_quiet_when_ci_is_off(home: Path):
     assert check.status == NA
 
 
-def test_gh_check_is_quiet_when_gh_is_absent(home: Path, bin_without_gh: Path):
+def test_gh_check_is_quiet_when_gh_is_absent(home: Path, path_without_gh: Path):
     """No gh is a choice, not a fault — the probe advertises that it silently
     does nothing."""
     check = doctor.check_gh(home, Config())
@@ -275,14 +267,14 @@ def test_gh_check_is_quiet_when_gh_is_absent(home: Path, bin_without_gh: Path):
     assert "not on PATH" in check.summary
 
 
-def test_gh_check_passes_when_authenticated(home: Path, bin_without_gh: Path, monkeypatch):
-    install_gh(bin_without_gh, monkeypatch)
+def test_gh_check_passes_when_authenticated(home: Path, path_without_gh: Path, monkeypatch):
+    install_gh(path_without_gh, monkeypatch, mode="pr")
     assert doctor.check_gh(home, Config()).status == OK
 
 
-def test_gh_check_flags_an_unauthenticated_gh(home: Path, bin_without_gh: Path, monkeypatch):
+def test_gh_check_flags_an_unauthenticated_gh(home: Path, path_without_gh: Path, monkeypatch):
     """The trap: gh looks configured, and every `ci:` line silently vanishes."""
-    install_gh(bin_without_gh, monkeypatch, mode="unauth")
+    install_gh(path_without_gh, monkeypatch, mode="unauth")
     check = doctor.check_gh(home, Config())
     assert check.status == PROBLEM
     assert "not authenticated" in check.summary
@@ -305,33 +297,42 @@ def test_gh_check_calls_gh_only_through_the_forge_module(home: Path, monkeypatch
 
 
 def test_gh_check_reads_an_offline_gh_as_unknown_not_broken(
-    home: Path, bin_without_gh: Path, monkeypatch
+    home: Path, path_without_gh: Path, monkeypatch
 ):
     """A laptop on a plane is not a misconfigured home: gh that never
     answered says nothing about auth, so it is a `–` and exits 0."""
     (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n", encoding="utf-8")
-    install_gh(bin_without_gh, monkeypatch, mode="hang")
+    install_gh(path_without_gh, monkeypatch, mode="hang")
     check = doctor.check_gh(home, Config(ci=CIConfig(timeout_seconds=0.5)))
     assert check.status == NA
     assert "unknown" in check.summary
 
 
-def test_herdr_check_is_quiet_without_the_table():
-    assert doctor.check_herdr(Config()).status == NA
+@pytest.mark.parametrize(
+    ("build", "status", "summary"),
+    [
+        pytest.param(lambda d: Config(), NA, "", id="no-table"),
+        pytest.param(
+            lambda d: Config(herdr=HerdrConfig(socket=str(_touch(d / "herdr.sock")))),
+            OK, "",
+            id="socket-present",
+        ),
+        pytest.param(
+            lambda d: Config(herdr=HerdrConfig(socket=str(d / "nope.sock"))),
+            PROBLEM, "does not exist",
+            id="socket-absent",
+        ),
+    ],
+)
+def test_herdr_check_reads_the_socket(tmp_path: Path, build, status: str, summary: str):
+    """herdr is optional, so absence is quiet and only an enabled-but-broken
+    socket is a fault."""
+    assert_check(doctor.check_herdr(build(tmp_path)), status, summary)
 
 
-def test_herdr_check_passes_with_a_socket(tmp_path: Path):
-    sock = tmp_path / "herdr.sock"
-    sock.write_text("")
-    config = Config(herdr=HerdrConfig(socket=str(sock)))
-    assert doctor.check_herdr(config).status == OK
-
-
-def test_herdr_check_flags_an_enabled_but_absent_socket(tmp_path: Path):
-    config = Config(herdr=HerdrConfig(socket=str(tmp_path / "nope.sock")))
-    check = doctor.check_herdr(config)
-    assert check.status == PROBLEM
-    assert "does not exist" in check.summary
+def _touch(path: Path) -> Path:
+    path.write_text("")
+    return path
 
 
 def _fake_nono(monkeypatch: pytest.MonkeyPatch, supported: bool):
@@ -341,59 +342,55 @@ def _fake_nono(monkeypatch: pytest.MonkeyPatch, supported: bool):
     monkeypatch.setitem(sys.modules, "nono_py", mod)
 
 
-def test_notify_check_is_quiet_without_the_table():
-    check = doctor.check_notify(Config())
-    assert check.status == NA
-    assert "reach no one" in check.summary
+@pytest.mark.parametrize(
+    ("build", "status", "summary", "fix"),
+    [
+        pytest.param(lambda d: Config(), NA, "reach no one", "", id="no-table"),
+        pytest.param(
+            lambda d: Config(notify=NotifyConfig(command=[sys.executable, "-c", "{text}"])),
+            OK, "attention", "",
+            id="runnable-template",
+        ),
+        pytest.param(
+            lambda d: Config(notify=NotifyConfig(command=[str(d / "nope"), "{text}"])),
+            PROBLEM, "not on PATH", "[notify].command",
+            id="binary-absent",
+        ),
+        pytest.param(
+            lambda d: Config(notify=NotifyConfig(command=[sys.executable, "-c", "pass"])),
+            NA, "appends the text", "{text}",
+            id="template-without-text",
+        ),
+    ],
+)
+def test_notify_check_reads_the_command_template(
+    tmp_path: Path, build, status: str, summary: str, fix: str
+):
+    """The static half of [notify]: argv[0] on PATH, and whether the template
+    places the text itself. Delivery is `quorum notify test`, not this."""
+    assert_check(doctor.check_notify(build(tmp_path)), status, summary, fix)
 
 
-def test_notify_check_passes_with_a_runnable_template():
-    config = Config(notify=NotifyConfig(command=[sys.executable, "-c", "{text}"]))
-    check = doctor.check_notify(config)
-    assert check.status == OK
-    assert "attention" in check.summary
-
-
-def test_notify_check_flags_a_binary_that_is_not_there(tmp_path: Path):
-    config = Config(notify=NotifyConfig(command=[str(tmp_path / "nope"), "{text}"]))
-    check = doctor.check_notify(config)
-    assert check.status == PROBLEM
-    assert "not on PATH" in check.summary
-    assert "[notify].command" in check.fix
-
-
-def test_notify_check_notes_a_template_without_text():
-    config = Config(notify=NotifyConfig(command=[sys.executable, "-c", "pass"]))
-    check = doctor.check_notify(config)
-    assert check.status == NA
-    assert "appends the text" in check.summary
-    assert "{text}" in check.fix
-
-
-def test_sandbox_check_is_quiet_when_unused():
-    assert doctor.check_sandbox(Config()).status == NA
-
-
-def test_sandbox_check_passes_with_a_supported_nono(monkeypatch: pytest.MonkeyPatch):
-    _fake_nono(monkeypatch, supported=True)
-    config = Config(sandbox=SandboxConfig(use_nono=True))
-    assert doctor.check_sandbox(config).status == OK
-
-
-def test_sandbox_check_flags_a_missing_nono(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setitem(sys.modules, "nono_py", None)  # import raises ImportError
-    config = Config(sandbox=SandboxConfig(use_nono=True))
-    check = doctor.check_sandbox(config)
-    assert check.status == PROBLEM
-    assert "nono-py is not installed" in check.summary
-
-
-def test_sandbox_check_flags_an_unsupported_platform(monkeypatch: pytest.MonkeyPatch):
-    _fake_nono(monkeypatch, supported=False)
-    config = Config(sandbox=SandboxConfig(use_nono=True))
-    check = doctor.check_sandbox(config)
-    assert check.status == PROBLEM
-    assert "no Landlock here" in check.summary
+@pytest.mark.parametrize(
+    ("nono", "use_nono", "status", "summary"),
+    [
+        pytest.param(None, False, NA, "", id="unused"),
+        pytest.param(True, True, OK, "", id="supported"),
+        pytest.param("missing", True, PROBLEM, "nono-py is not installed", id="not-installed"),
+        pytest.param(False, True, PROBLEM, "no Landlock here", id="unsupported-platform"),
+    ],
+)
+def test_sandbox_check_reads_nono(
+    monkeypatch: pytest.MonkeyPatch, nono, use_nono: bool, status: str, summary: str
+):
+    """sandbox.py fails closed, so the check has to separate the three ways
+    nono can be unavailable from the one way it works."""
+    if nono == "missing":
+        monkeypatch.setitem(sys.modules, "nono_py", None)  # import raises ImportError
+    elif nono is not None:
+        _fake_nono(monkeypatch, supported=nono)
+    config = Config(sandbox=SandboxConfig(use_nono=use_nono))
+    assert_check(doctor.check_sandbox(config), status, summary)
 
 
 # -- prompts -----------------------------------------------------------------

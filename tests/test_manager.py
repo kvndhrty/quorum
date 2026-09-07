@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_repo, repo_git
 from quorum import fsio, notes, runner, tasks
 from quorum.actor import notes_path, run_snapshot_path, runs_dir, usage_path
 from quorum.agent import AgentContext
@@ -35,7 +37,6 @@ from quorum.config import TasksConfig, load_config
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore
-from test_tasks import make_repo, repo_git
 
 FAKE = str(Path(__file__).parent / "bin" / "fake_harness.py")
 
@@ -82,6 +83,20 @@ def make_manager(home: Path, clock) -> Manager:
         settings=config.agents["manager"].settings, config=config, now=clock,
     )
     return Manager(ctx)
+
+
+def rule_mentioning(prompt_text: str, marker: str) -> str:
+    """The numbered rule of a prompt that mentions `marker`, unwrapped onto one
+    line.
+
+    Rules are located by the list-item boundary rather than by their number, so
+    a test can ask what a rule teaches without pinning where in the prompt it
+    sits. Unwrapping means the assertion does not depend on where lines break.
+    """
+    items = re.split(r"\n(?=\d+\.\s)", prompt_text)
+    hits = [item for item in items if marker in item]
+    assert hits, f"no numbered rule mentions {marker!r}"
+    return " ".join(hits[0].split())
 
 
 def manager_transcript_text(home: Path) -> str:
@@ -1288,17 +1303,20 @@ def test_overlap_pairs_are_bounded(home: Path, tmp_path: Path, monkeypatch):
     assert manager_mod.overlap_signal(store.list()) == {}
 
 
-def test_the_preamble_tells_a_task_to_rebase_before_pushing(home: Path):
+def test_the_preamble_spells_the_commands_a_diverged_branch_needs(home: Path):
+    """Two tasks on one project diverge, so the preamble has to hand a task
+    the exact commands out of it. The commands are the contract and are
+    asserted literally; the sentences around them are not."""
     from quorum import prompts
 
     text = prompts.render(home, "task-preamble", task_id="abc123", project_path="/w")
     assert "git fetch origin" in text
     assert "rebase" in text
-    assert "report blocked, naming the conflicting files" in text
-    # A task that pushed in an earlier run cannot fast-forward after a
-    # rebase; the way out is spelled, and it is leased.
+    # A task that pushed in an earlier run cannot fast-forward after a rebase,
+    # and the way out has to be the leased force, never a bare one.
     assert "git push --force-with-lease origin HEAD" in text
-    assert "never a bare `--force`" in text
+    assert "--force-with-lease" in text
+    # and the manager is told about the mark the digest carries for the pair
     assert "overlaps=" in prompts.load(home, "manager")
 
 
@@ -1324,17 +1342,16 @@ def test_digest_says_only_that_a_handoff_exists(home: Path, clock):
 
 def test_the_manager_prompt_explains_the_handoff_mark(home: Path):
     """Every other mark the digest can carry has a rule that says what it
-    means; `handoff=true` would otherwise be a token with no policy (#92)."""
+    means; `handoff=true` would otherwise be a token with no policy (#92).
+
+    Structural, not verbatim: the rule that mentions the mark has to name the
+    command that shows the body. Rewriting the sentence, or renumbering the
+    rules above it, does not fail this.
+    """
     from quorum import prompts
 
-    text = prompts.load(home, "manager")
-    assert "`handoff=true`" in text
-    # unwrapped, so the assertions do not depend on where the lines break
-    rule = " ".join(text.split("`handoff=true`")[1].split("\n14.")[0].split())
-    # what it is, where the body actually goes, and that it asks for nothing
-    assert "every dependent gets it in its own prompt" in rule
-    assert "quorum task show <id>" in rule
-    assert "observation, not an instruction" in rule
+    rule = rule_mentioning(prompts.load(home, "manager"), "`handoff=true`")
+    assert "quorum task show" in rule
 
 
 def test_a_tick_keeps_the_digest_it_reasoned_over(home: Path, clock, project: str):

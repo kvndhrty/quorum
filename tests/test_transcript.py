@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import harness_config, make_repo
 from quorum import fsio, tasks, transcript
 from quorum.actor import (
     journal_path,
@@ -36,7 +37,6 @@ from quorum.config import load_config
 from quorum.projects import ProjectRegistry
 from quorum.runner import run_task
 from quorum.tasks import TaskStore
-from test_tasks import harness_config, make_repo
 
 runner = CliRunner()
 
