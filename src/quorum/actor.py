@@ -52,6 +52,26 @@ def notes_path(home: Path, name: str = "manager") -> Path:
     return Path(home) / "state" / "agents" / name / "notes.jsonl"
 
 
+def runs_dir(home: Path, name: str = "manager") -> Path:
+    """Where an agent keeps a snapshot of what each run was given (same split
+    as `journal_path`).
+
+    The one thing a tick used to leave no trace of: the digest it reasoned
+    over was rendered, sent to the harness and dropped, so "why did it launch
+    that" was unanswerable an hour later. One file per run, bounded twice —
+    head-truncated on write, and only the newest `SNAPSHOT_KEEP` kept — so
+    this is an observability artifact of the journal's class, never state
+    anything reads back to decide something.
+    """
+    if name == "manager":
+        return Path(home) / "state" / "manager" / "runs"
+    return Path(home) / "state" / "agents" / name / "runs"
+
+
+def run_snapshot_path(home: Path, name: str, run_id: str) -> Path:
+    return runs_dir(home, name) / f"{run_id}.md"
+
+
 def usage_path(home: Path, name: str = "manager") -> Path:
     """An agent's per-run spend ledger (same split as `journal_path`).
 

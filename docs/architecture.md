@@ -104,7 +104,7 @@ messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
                                   (+ journal.jsonl, notes.jsonl,
-                                  transcript.jsonl and usage.jsonl for
+                                  transcript.jsonl, usage.jsonl and runs/ for
                                   harness-driven agents other than the
                                   manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
@@ -114,6 +114,14 @@ state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent and how it went ({at, run,
                                   usage|null, outcome, duration_seconds})
+state/manager/runs/<run>.md       what that run was given: the situation
+                                  digest (an agent's rendered prompt), written
+                                  before its harness starts. Bounded twice —
+                                  head-truncated at SNAPSHOT_MAX_BYTES, only
+                                  the newest SNAPSHOT_KEEP files kept — and
+                                  read by nothing that decides anything: it
+                                  exists so `quorum manager log` can show what
+                                  a tick saw (see "Reading a run")
 state/notify.json                 the [notify] hook's private board cursors
                                   (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
@@ -1507,6 +1515,57 @@ invention; a dashboard that vanishes mid-keystroke leaves nothing behind but
 the message it already queued. This revises the earlier "the views are pure
 readers whose one write affordance is nudging a task" stance (issue #11) —
 the invariant that survived it is *thin, shared, no view-local write logic*.
+
+### Reading a run
+
+A transcript is complete and illegible: a claude run is a few hundred events
+of nested `tool_use` payloads and echoed tool output, and answering "what did
+it try, what came back, why did it stop" took `jq`. `transcript.py` renders
+those files as a narrative, and it is the *only* renderer — `quorum task tail`
+/ `task log`, `quorum manager log` / `manager tail`, `agent log` / `agent
+tail`, the TUI's transcript pane and the web dashboard's task detail all call
+it, so the surfaces cannot drift into different readings of one file.
+
+What it renders: the run's start (session id, working directory), assistant
+text in full, one line per tool call with its first argument trimmed, each
+tool result collapsed to `N lines · size` (plus an exit code or an error's
+first line), quorum's own `quorum:` transcript notes, and a closing `result`
+line whose numbers come from `usage.usage_from_event` rather than a second
+reading of the same event. Reasoning blocks and the events that carry no
+story — the init banner's tool list, progress pings, token estimates, an
+allowed rate-limit notice — are folded away; `-v` unfolds all of it plus the
+full payload of every line.
+
+Three properties fence it:
+
+- **One place for harness shapes.** `tool_call`, `session_id` and `normalize`
+  are the only code that knows how each harness spells an event, on the seam
+  `usage.py` already owns for result events. `manager.loop_signal` reads
+  `transcript.tool_call` and the runner reads `transcript.session_id`, so
+  teaching quorum a new harness is one file.
+- **Fail-soft, always.** An unrecognized event renders as its raw JSON line
+  and a malformed entry as its `repr`; `normalize` catches everything. This
+  runs in a dashboard refresh loop and in `-f` tails, where a raise is a dead
+  surface.
+- **`--raw` is a promise.** It prints what `task tail` printed before the
+  renderer existed, byte for byte, so anything grepping a transcript keeps
+  working.
+
+`quorum manager log [--last N | --run <id>]` reads one *tick* rather than one
+file, out of the four the tick leaves behind: the digest snapshot it was
+given (`state/manager/runs/<run>.md`), its transcript entries, the actions the
+CLI journaled for it — each with the then-vs-now target status the next digest
+would show — and the usage-ledger line saying how it ended. `agent log <name>`
+is the same reader over a prompt agent, whose snapshot is its rendered prompt.
+Every section degrades to a note rather than an error: a run whose snapshot
+has aged out of the bounded directory, or that died before writing a ledger
+line, still renders everything else.
+
+The snapshot is the one thing here that writes, and it is deliberately not
+state: nothing reads it back to decide anything, it is head-truncated on write
+and only the newest `SNAPSHOT_KEEP` files are kept, and losing one costs a
+reader some history and the system nothing. Without it a tick's reasoning was
+unreconstructable — the digest was rendered, sent to the harness and dropped.
 
 ## Projects
 

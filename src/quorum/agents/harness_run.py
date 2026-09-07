@@ -16,11 +16,48 @@ import time
 from pathlib import Path
 
 from .. import fsio, usage
-from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, actor_env, transcript_path
+from ..actor import (
+    DEFAULT_MAX_ACTIONS_PER_RUN,
+    actor_env,
+    run_snapshot_path,
+    runs_dir,
+    transcript_path,
+)
 from ..agent import AgentContext
 from ..runner import build_harness_argv, guidance_pump, resolve_harness, stream_transcript
 
 DEFAULT_RUN_TIMEOUT_SECONDS = 300
+
+# What a run was given, kept so a later reader can see it (`quorum manager
+# log`). Bounded twice, because a tick every five minutes writes one of these
+# forever: the head of the text, and only the newest runs' worth of files.
+# Both bounds are of the journal tail's class — losing the oldest snapshot
+# costs a reader some history and costs the system nothing, so this stays an
+# observability artifact rather than durable state.
+SNAPSHOT_MAX_BYTES = 32 * 1024
+SNAPSHOT_KEEP = 50
+
+
+def write_run_snapshot(home: Path, name: str, run_id: str, text: str) -> None:
+    """Record what a run was given, under `state/.../runs/<run>.md`.
+
+    Fail-soft on purpose: this is the only file quorum writes purely so a
+    human can read a tick back, and an unwritable (or full) home must cost
+    the tick nothing.
+    """
+    body = text.encode("utf-8", "replace")
+    if len(body) > SNAPSHOT_MAX_BYTES:
+        kept = body[:SNAPSHOT_MAX_BYTES].decode("utf-8", "ignore")
+        text = kept + f"\n\n… (truncated: {len(body) - SNAPSHOT_MAX_BYTES} more bytes)\n"
+    try:
+        runs_dir(home, name).mkdir(parents=True, exist_ok=True)
+        fsio.atomic_write_text(run_snapshot_path(home, name, run_id), text)
+        # run ids are ULIDs, so the newest files sort last by name
+        stale = sorted(runs_dir(home, name).glob("*.md"))[:-SNAPSHOT_KEEP]
+        for path in stale:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def resolve_agent_harness(ctx: AgentContext):
@@ -64,9 +101,14 @@ def self_observations(home: Path, name: str, cap: int) -> list[str]:
     return lines
 
 
-def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
+def run_agent_harness(ctx: AgentContext, prompt: str, snapshot: str | None = None) -> str:
     """Run the agent's configured harness over `prompt`, synchronously,
     cwd = QUORUM_HOME. Raises on timeout or nonzero exit; returns the run id.
+
+    `snapshot` is what this run should be readable *from* afterwards — the
+    manager passes its situation digest, everything else defaults to the
+    rendered prompt. It is written before the harness starts, so a run that
+    hangs or crashes is still readable.
 
     An inject-capable harness can be steered while the run is in flight:
     messages landing in the agent's own inbox are forwarded as user turns by
@@ -91,6 +133,7 @@ def run_agent_harness(ctx: AgentContext, prompt: str) -> str:
     }
     argv = build_harness_argv(harness, prompt)
     transcript = transcript_path(ctx.home, ctx.name)
+    write_run_snapshot(ctx.home, ctx.name, run_id, prompt if snapshot is None else snapshot)
     proc = subprocess.Popen(
         argv,
         cwd=str(ctx.home),

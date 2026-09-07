@@ -205,6 +205,27 @@ so the record stays true.
   `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
   over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
   class as `possible-loop`; enforcement is deliberately not implemented.
+- `transcript.py` — the **one** renderer of a transcript, and the one place
+  that knows how each harness spells an event (`tool_call`, `session_id`,
+  `normalize` — the seam `usage.py` owns for result events, which is why
+  result lines read `usage_from_event` rather than re-deriving cost, and why
+  `manager.loop_signal` and the runner's session capture call in here). A
+  pure reader, nothing cached: `task tail`/`task log`, `manager log`/`manager
+  tail`, `agent log`/`agent tail`, the TUI pane and the web task detail all
+  call `render`, so the surfaces cannot drift. Assistant text in full, tool
+  calls one line with their first argument, results collapsed to a size/exit
+  code, reasoning and noise folded (`-v` unfolds, including every line's raw
+  payload); **fail-soft is the rule** — an unknown event is its raw line, a
+  malformed entry its `repr`, `normalize` catches everything, because this
+  runs in dashboard refreshes and `-f` tails. `--raw` is `raw_entry`: what
+  `task tail` printed before #82, byte for byte. `render_run` reads one agent
+  *tick* out of four files — the digest snapshot
+  (`state/<agent>/runs/<run>.md`, written by
+  `agents/harness_run.write_run_snapshot`, the one new durable file: bounded
+  head + newest `SNAPSHOT_KEEP`, read by nothing that decides anything), the
+  transcript entries tagged with that run, the journal actions with their
+  then-vs-now target status, and the ledger line — every section degrading to
+  a note rather than an error.
 - `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, a

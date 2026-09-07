@@ -14,6 +14,24 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Readable logs: one narrative renderer (`quorum.transcript`) behind
+  `quorum task tail` and a new `task log`, so a run reads as what it tried
+  and what came back rather than as a few hundred JSON events — assistant
+  text in full, one line per tool call with its first argument, results
+  collapsed to a size or an exit code, reasoning and noise events folded
+  (`-v` unfolds all of it, `--raw` prints the old output byte for byte, an
+  unrecognized event prints as its raw line rather than raising). The TUI's
+  transcript pane and the web dashboard's task detail render through the
+  same function, so the three surfaces cannot disagree, and the per-harness
+  event shapes now live in one place — `manager.loop_signal` and the
+  runner's session-id capture read it too.
+  `quorum manager log [--last N | --run <id>]` reads one *tick* end to end:
+  the digest it was given, what it said, the actions the CLI journaled for
+  it with their then-vs-now outcome, and what the run cost. That first part
+  needed the one new file, `state/manager/runs/<run>.md` — bounded like the
+  journal tail (newest fifty per agent, head-truncated) and read by nothing
+  that decides anything. `manager tail -f` follows a live tick; `agent log`
+  / `agent tail` do the same for a prompt agent. (#82)
 - Notification hook: a `[notify]` table holds an argv template
   (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
   no shell) that the supervisor runs once for every new message on the
