@@ -42,9 +42,12 @@ own text, its thinking, and every tool *call* (name and arguments, which is
 how a reader follows what the run did) and replaces each tool *result* with
 a marker. The shapes are the ones quorum already reads for its loop signal
 (claude `tool_result` blocks and the `tool_use_result` field beside them,
-codex `*_output` items and the output fields on a `command_execution`
-item); a plain-text harness's `line` entries carry no structure to redact
-and are kept verbatim, which the command says out loud.
+codex `*_output` items and the output fields on a `command_execution` or
+`mcp_tool_call` item, and any dict carrying a string `tool_name`); the
+keys of a result dict that are not known output fields are walked rather
+than copied, so a payload filed under a name this module does not know is
+still reached. A plain-text harness's `line` entries carry no structure to
+redact and are kept verbatim, which the command says out loud.
 """
 
 from __future__ import annotations
@@ -56,6 +59,7 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -81,10 +85,21 @@ RESULT_KINDS = frozenset(
 )
 RESULT_KEYS = ("content", "output", "result", "stdout", "stderr", "aggregated_output")
 # A dict tagged with one of these is a tool *call* that may carry its own
-# result alongside (codex's `command_execution` item does): only the output
-# fields are dropped, never the command or its arguments.
+# result alongside (codex's `command_execution` and `mcp_tool_call` items
+# both do): only the output fields are dropped, never the command or its
+# arguments. A dict carrying a string `tool_name` counts too, even with no
+# kind tag — the same widening `manager._tool_fingerprints` makes, and for
+# the same reason: harnesses label a call that way and the field is the
+# only thing that says so.
 CALL_KINDS = frozenset(
-    {"tool_use", "tool_call", "function_call", "command_execution", "local_shell_call"}
+    {
+        "tool_use",
+        "tool_call",
+        "function_call",
+        "command_execution",
+        "local_shell_call",
+        "mcp_tool_call",
+    }
 )
 CALL_OUTPUT_KEYS = ("output", "aggregated_output", "stdout", "stderr", "result")
 # Keys that hold a raw tool result wherever they appear (claude puts the
@@ -206,8 +221,13 @@ def delivered_guidance(home: Path, task: Task) -> list[dict]:
                         continue
                     if isinstance(record, dict) and record.get("to") == wanted:
                         found.append(record)
-        except (OSError, EOFError):
-            continue  # a truncated month is a skipped month, not a failed export
+        except (OSError, EOFError, zlib.error):
+            # A truncated month is a skipped month, not a failed export.
+            # gzip reports damage three ways depending on where it is: a
+            # bad header is BadGzipFile (an OSError), a stream that stops
+            # short is EOFError, and corruption inside the deflate data
+            # surfaces as zlib.error.
+            continue
     found.sort(key=lambda r: (str(r.get("created_at", "")), str(r.get("id", ""))))
     return found
 
@@ -305,17 +325,20 @@ def _redact_node(node: Any, redaction: Redaction, depth: int) -> Any:
         return node
     kinds = {str(node.get(k)) for k in ("type", "item_type") if node.get(k) is not None}
     if kinds & RESULT_KINDS:
-        out = dict(node)
-        hit = False
-        for key in RESULT_KEYS:
-            if key in out:
+        # A result dict counts once, however many of its fields are
+        # replaced. The keys that are *not* known output fields are still
+        # walked: a harness that puts the payload somewhere this list does
+        # not name would otherwise have it copied through untouched.
+        out = {}
+        for key, value in node.items():
+            if key in RESULT_KEYS:
                 out[key] = REDACTED
-                hit = True
-        if hit:
-            redaction.results += 1
+            else:
+                out[key] = _redact_node(value, redaction, depth + 1)
+        redaction.results += 1
         return out
     out = {}
-    call = bool(kinds & CALL_KINDS)
+    call = bool(kinds & CALL_KINDS) or isinstance(node.get("tool_name"), str)
     for key, value in node.items():
         if key in RESULT_KEYS_ANYWHERE or (call and key in CALL_OUTPUT_KEYS):
             out[key] = REDACTED

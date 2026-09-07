@@ -912,8 +912,12 @@ with a marker. The walk is structural and loose in the mold of
 `loop_signal`'s tool-call extraction: a dict tagged `tool_result` /
 `function_call_output` / `tool_call_output` has its output fields
 (`content`, `output`, `stdout`, …) replaced and its identity
-(`tool_use_id`, `is_error`, `call_id`) kept; a tool-call item that carries
-its own output (codex's `command_execution`) loses only the output fields;
+(`tool_use_id`, `is_error`, `call_id`) kept, while its remaining keys are
+walked rather than copied, so a payload filed under a name this module
+does not know is still reached; a tool-call item that carries its own
+output (codex's `command_execution` and `mcp_tool_call`, or any dict with
+a string `tool_name` — the same widening `_tool_fingerprints` makes) loses
+only the output fields;
 a `tool_use_result` field anywhere goes whole; past a depth bound a node is
 replaced rather than kept, because a redaction's failure direction has to
 be "dropped". A plain-text harness's `line` entries have no structure to

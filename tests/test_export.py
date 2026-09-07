@@ -188,6 +188,37 @@ def test_delivered_guidance_skips_months_before_the_task_existed(home: Path, rep
     assert export.delivered_guidance(home, task) == []
 
 
+def test_delivered_guidance_skips_a_corrupt_month(home: Path, repo: Path):
+    """A month that will not decompress costs the guidance it held, not
+    the export. gzip reports damage as BadGzipFile, EOFError or zlib.error
+    depending on where it is, so all three are caught."""
+    import gzip
+
+    task = add_task(home)
+    bus = MessageBus(home)
+    bus.send("user", inbox_name(task.id), text="the good month")
+    for claimed in bus.claim(inbox_name(task.id)):
+        claimed.ack()
+    archive = home / "messages" / "archive"
+    good = next(archive.glob("*.jsonl.gz"))
+
+    # A truncated stream: a valid header, deflate data that stops short.
+    payload = json.dumps({"to": inbox_name(task.id), "payload": {"text": "lost"}}) * 200
+    body = gzip.compress((payload + "\n").encode())
+    (archive / "2999-01.jsonl.gz").write_bytes(body[: len(body) - 12])
+    # Corruption inside the deflate data rather than at its end.
+    torn = bytearray(gzip.compress((payload + "\n").encode()))
+    torn[len(torn) // 2] ^= 0xFF
+    (archive / "2999-02.jsonl.gz").write_bytes(bytes(torn))
+    # Not gzip at all.
+    (archive / "2999-03.jsonl.gz").write_bytes(b"this was never compressed\n")
+
+    delivered = export.delivered_guidance(home, task)
+
+    assert [d["payload"]["text"] for d in delivered] == ["the good month"]
+    assert good.exists()  # a pure reader: the archive is untouched
+
+
 # -- output path ----------------------------------------------------------
 
 
@@ -365,6 +396,64 @@ def test_redact_handles_codex_shapes_and_is_pure():
     out = redaction.entries[1]["event"]
     assert out["output"] == export.REDACTED and out["call_id"] == "call_2"
     assert json.dumps(entries) == original
+
+
+def test_redact_covers_an_mcp_tool_call(home: Path, repo: Path):
+    """codex files an MCP tool's return on an `mcp_tool_call` item, which
+    carries the call and its result in one node: the arguments stay, the
+    result goes."""
+    event = {
+        "type": "item.completed",
+        "item": {
+            "id": "call_3",
+            "item_type": "mcp_tool_call",
+            "server": "files",
+            "tool": "read_file",
+            "arguments": {"path": "secrets.env"},
+            "result": "TOKEN=abc",
+        },
+    }
+
+    redaction = export.redact_transcript([{"at": "t", "event": event}])
+
+    item = redaction.entries[0]["event"]["item"]
+    assert item["tool"] == "read_file" and item["arguments"] == {"path": "secrets.env"}
+    assert item["result"] == export.REDACTED
+    assert redaction.results == 1
+    assert "TOKEN=abc" not in json.dumps(redaction.entries)
+
+
+def test_redact_covers_a_node_named_only_by_tool_name():
+    """A dict with no kind tag but a string `tool_name` is a call — the
+    same widening `manager._tool_fingerprints` makes."""
+    event = {"tool_name": "Bash", "input": {"command": "cat x"}, "output": "TOKEN=abc"}
+
+    redaction = export.redact_transcript([{"at": "t", "event": event}])
+
+    got = redaction.entries[0]["event"]
+    assert got["tool_name"] == "Bash" and got["input"] == {"command": "cat x"}
+    assert got["output"] == export.REDACTED
+    assert redaction.results == 1
+    assert "TOKEN=abc" not in json.dumps(redaction.entries)
+
+
+def test_redact_walks_a_result_dict_past_its_known_output_keys():
+    """A result whose payload sits under a key this module does not know
+    is still walked, so a tool result nested inside it is reached rather
+    than copied through."""
+    event = {
+        "type": "tool_result",
+        "tool_use_id": "toolu_9",
+        "data": {"nested": {"type": "function_call_output", "output": "TOKEN=abc"}},
+    }
+
+    redaction = export.redact_transcript([{"at": "t", "event": event}])
+
+    got = redaction.entries[0]["event"]
+    assert got["tool_use_id"] == "toolu_9"  # identity kept
+    assert got["data"]["nested"]["output"] == export.REDACTED
+    assert "TOKEN=abc" not in json.dumps(redaction.entries)
+    assert redaction.results == 2  # the outer result and the one inside it
 
 
 def test_redact_drops_what_is_nested_too_deep_to_read():
