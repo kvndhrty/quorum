@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .actor import TASK_ACTOR_PREFIX, is_task_actor
 from .home import CONFIG_NAME
 
 
@@ -232,6 +233,28 @@ class Config(BaseModel):
     harness: dict[str, HarnessConfig] = Field(default_factory=dict)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
 
+    @field_validator("agents")
+    @classmethod
+    def _reject_task_actor_names(cls, value: dict[str, AgentConfig]):
+        """`[agents.<name>]` may not claim the task-actor namespace.
+
+        config.toml is the one way into the agent map that does not go
+        through `validate_agent_name` — the builtins are configured here, so
+        the reserved-name list cannot apply wholesale — but the `task-`
+        prefix has to, because it is not cosmetic. `cli._actor_guard` reads
+        an actor name starting with `task-` as a task run and therefore
+        journals nothing and enforces no action cap, so an agent named
+        `task-x` would run with the one rail an agent has switched off.
+        """
+        for name in value:
+            if is_task_actor(name):
+                raise ValueError(
+                    f"agent name {name!r} is reserved: the {TASK_ACTOR_PREFIX!r} prefix "
+                    "is a task's actor identity, and an agent using it would be "
+                    "journaled and rate-capped as a task run is (that is, not at all)"
+                )
+        return value
+
 
 class ConfigError(RuntimeError):
     pass
@@ -240,7 +263,10 @@ class ConfigError(RuntimeError):
 AGENTS_DIR = "agents"
 
 # The names an agents/<name>.toml file may never claim: builtins configured in
-# config.toml, the supervisor control inbox, and the task-inbox namespace.
+# config.toml, the supervisor control inbox, and the task namespace (the
+# inbox name and the actor identity, which are the same string). Only the
+# last of those also binds an `[agents.<name>]` table in config.toml, since
+# that is where the builtins are configured — see `Config._reject_task_actor_names`.
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 RESERVED_AGENT_NAMES = {"manager", "supervisor", "user"}
 
@@ -251,7 +277,7 @@ def validate_agent_name(name: str) -> None:
             f"invalid agent name {name!r}: use lowercase letters, digits, '-' or '_', "
             "starting with a letter (max 32 chars)"
         )
-    if name in RESERVED_AGENT_NAMES or name.startswith("task-"):
+    if name in RESERVED_AGENT_NAMES or is_task_actor(name):
         raise ConfigError(f"agent name {name!r} is reserved")
 
 

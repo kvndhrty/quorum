@@ -89,6 +89,24 @@ def test_create_agent_refuses_duplicates_and_reserved_names(home: Path):
             validate_agent_name(bad)
 
 
+def test_config_toml_may_not_declare_an_agent_in_the_task_namespace(home: Path):
+    """`[agents.<name>]` was the one way into the agent map that skipped the
+    name check, and a `task-` name there is not cosmetic: `_actor_guard`
+    reads such an actor as a task run, so the agent would be journaled and
+    rate-capped as a task is — that is, not at all. The builtins still get
+    their table, which is why this is the only reserved name config.toml
+    enforces."""
+    write_config(home)
+    good = (home / "config.toml").read_text()
+    table = '\ntype = "prompt"\nschedule = "every 30m"\nsettings = { harness = "agenttool" }\n'
+    (home / "config.toml").write_text(good + "\n[agents.manager]" + table)
+    assert "manager" in load_config(home).agents
+
+    (home / "config.toml").write_text(good + "\n[agents.task-x]" + table)
+    with pytest.raises(ConfigError, match="reserved"):
+        load_config(home)
+
+
 # -- ticking ----------------------------------------------------------------
 
 

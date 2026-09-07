@@ -231,6 +231,23 @@ minute it is posted.
   and nothing is queued. Every forge subprocess now lives in one new
   module, `forge.py` (`ci.py` keeps the digest half); quorum still only
   ever *reads* from a forge. (#62)
+- Per-task notebook: `tasks/<id>/notes.jsonl` is the manager's notebook
+  generalized to a task — same schema, tombstones, `--ttl` expiry, torn
+  lines skipped — written with `quorum task remember <id> "…"` and
+  `quorum task forget <id> <note>` by the task's own harness, the manager
+  or you (another task or a prompt agent is refused and pointed at `task
+  nudge`; a convention read off `QUORUM_ACTOR`, not a boundary), and
+  rendered by the runner into every run's prompt, resumed or fresh, under
+  its own byte budget with a drop count. `task show` prints it; the
+  digest does not. The runner now tags a task's harness
+  `QUORUM_ACTOR=task-<id>` (identity only: nothing journals or caps a
+  task), so a task's `task nudge` and `board post` carry `task-<id>` as
+  sender where they used to read as `user`. The default preamble gains a
+  memory protocol paragraph and the manager prompt learns `task
+  remember`; re-run `quorum init` to pick up never-edited copies. An
+  adopted (attached) task is the exception: quorum does not compose its
+  prompt, so its notebook is written but never rendered into the session —
+  `task show` is the read path there. (#90)
 - Handoffs: `quorum task report <id> --status done --handoff <file|->`
   stores a body for the tasks that depend on this one — what changed,
   what is not done, what to check first — whole and atomically at
@@ -283,6 +300,15 @@ minute it is posted.
   could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
+- `quorum manager remember` from inside a task run is now refused. The
+  runner used to strip the launcher's actor tag and set nothing in its
+  place, so a task harness ran as `user` and the manager's notebook
+  admitted it; the harness is now tagged `QUORUM_ACTOR=task-<id>` and the
+  refusal points it at `quorum task report` and `quorum board post
+  attention`, which is how a task was always meant to reach the manager
+  (`quorum task nudge` is the same pointer on a task's own notebook). A
+  task's own notebook
+  (`quorum task remember`) is unaffected. (#90)
 - `quorum init` recognizes a never-edited prompt seed by a record in the
   home (`prompts/.seeded.json`: the sha256 of what init last wrote, kept
   up to date by init alone) instead of a list of superseded hashes in

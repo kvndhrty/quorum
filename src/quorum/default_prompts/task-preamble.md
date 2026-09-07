@@ -28,6 +28,22 @@ your environment:
 - If you cannot proceed without human input, say exactly what you need:
     quorum task report {task_id} --status blocked "<what you need>"
 
+Memory protocol — your session is not durable: it can be compacted, resumed
+days later, or replaced by a fresh one that knows nothing. The working
+directory survives that; your context does not. Keep what a restart would
+need in your notebook, which is rendered into this prompt at the start of
+every run, resumed or fresh:
+
+- Write state, not a log — what is done, what is left, what was tried and
+  failed and why:
+    quorum task remember {task_id} "<what a restart of you needs to know>"
+- Retire a note that stopped being true (the id is the handle `remember`
+  printed; `quorum task show {task_id}` lists them):
+    quorum task forget {task_id} <note-id>
+- The notebook has a byte budget. When this prompt says older notes were
+  dropped, or the list has grown past a glance, rewrite: one note that
+  supersedes several, then forget the ones it replaced.
+
 Delivery protocol — changes that exist only in this working directory are
 stranded the moment attention moves on, so deliver with plain git (do not
 assume gh, glab, or any other forge CLI is installed):
