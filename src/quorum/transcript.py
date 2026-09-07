@@ -202,10 +202,9 @@ def tool_call(node: object) -> ToolCall | None:
 def _clock(at: object) -> str:
     """`HH:MM:SS` from an entry's timestamp; `--:--:--` when it has none."""
     text = str(at or "")
-    try:
-        return fsio.parse_iso(text).strftime("%H:%M:%S")
-    except (ValueError, TypeError):
-        pass
+    parsed = fsio.parse_iso_or(text)
+    if parsed is not None:
+        return parsed.strftime("%H:%M:%S")
     # A hand-written or foreign stamp still usually has a clock in it.
     if "T" in text and len(text) >= 19:
         return text[11:19]
@@ -516,7 +515,7 @@ def _block_lines(block: dict, at: str, source: str = "") -> list[Line]:
 def raw_entry(entry: dict) -> str:
     """One transcript entry the way the old `task tail` printed it before this module
     existed. `--raw` is this, byte for byte."""
-    at = str(entry.get("at", "")).replace("T", " ").rstrip("Z")
+    at = fsio.display_ts(entry.get("at", ""))
     if "line" in entry:
         return f"[{at}] {entry['line']}"
     return f"[{at}] {json.dumps(entry.get('event'), ensure_ascii=False)}"

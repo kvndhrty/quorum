@@ -240,13 +240,13 @@ def test_history_survives_a_corrupt_deflate_stream_in_the_archive(home: Path):
 
     assert MessageBus(home).archived_records(inbox_name(task.id)) == []
     assert kinds(views.task_history(home, task)) == ["queued"]
-    r = runner.invoke(app, ["task", "history", task.short_id, "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", task.short_id])
     assert r.exit_code == 0, r.output
 
 
 def test_cli_prints_the_life_and_emits_json(home: Path):
     task = build_life(home)
-    r = runner.invoke(app, ["task", "history", task.short_id, "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", task.short_id])
     assert r.exit_code == 0, r.output
     lines = r.output.splitlines()
     assert lines[0].startswith(f"task {task.short_id}  ({task.id})  14 event(s)")
@@ -256,12 +256,12 @@ def test_cli_prints_the_life_and_emits_json(home: Path):
         "[2026-01-01 12:00:00] pr state observed: merged · https://github.com/o/r/pull/7"
     )
 
-    r = runner.invoke(app, ["task", "history", task.short_id, "--json", "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", task.short_id, "--json"])
     rows = json.loads(r.output)
     assert kinds(rows) == kinds(views.task_history(home, task))
     assert rows[0]["issue_url"] == "https://github.com/o/r/issues/95"
 
-    r = runner.invoke(app, ["task", "history", "zzzzzz", "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", "zzzzzz"])
     assert r.exit_code == 1 and "no task matching" in r.output
 
 
@@ -273,7 +273,7 @@ def test_cli_still_answers_for_a_pruned_task(home: Path):
     prune.archive_task(home, task.id)
     assert TaskStore(home).get(task.id) is None
 
-    r = runner.invoke(app, ["task", "history", task.short_id, "--json", "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", task.short_id, "--json"])
     assert r.exit_code == 0, r.output
     rows = json.loads(r.output)
     assert kinds(rows)[-1] == "archived" and kinds(rows)[0] == "queued"
@@ -285,9 +285,9 @@ def test_cli_still_answers_for_a_pruned_task(home: Path):
     twin = TaskStore(home).add("proj", "twin", "fake", now=at(1))
     prune.archive_task(home, twin.id)
     shared = task.id[:2]
-    r = runner.invoke(app, ["task", "history", shared, "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", shared])
     assert r.exit_code == 1 and "ambiguous" in r.output
-    r = runner.invoke(app, ["task", "history", twin.id, "--home", str(home)])
+    r = runner.invoke(app, ["task", "history", twin.id])
     assert r.exit_code == 0 and "queued on proj" in r.output
 
 

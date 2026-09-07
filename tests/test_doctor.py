@@ -762,7 +762,7 @@ def configure(home: Path, mode: str = "echo", inject: str = "") -> None:
 
 def test_doctor_command_is_green_and_silent_about_the_inapplicable(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "all checks passed" in result.output
     assert "✗" not in result.output
@@ -779,7 +779,7 @@ def test_doctor_command_is_green_on_a_freshly_initialized_home(home: Path):
     there is no harness yet, which is a decision they have not made, not a
     fault. One line says so, and the command exits 0."""
     disable_ci(home)
-    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "no harness configured yet" in result.output
     assert "✗" not in result.output
@@ -792,7 +792,7 @@ def test_doctor_command_exits_nonzero_on_any_problem(home: Path):
     (home / "config.toml").write_text(
         (home / "config.toml").read_text().replace('default_harness = ""', 'default_harness = "x"')
     )
-    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 1
     assert "no [harness.<name>] table at all" in result.output
     assert "problem(s)" in result.output
@@ -802,14 +802,14 @@ def test_doctor_command_says_so_when_a_broken_config_skips_the_smoke(home: Path)
     """A `--smoke` that silently never ran reads exactly like one that
     passed."""
     (home / "config.toml").write_text("[tasks\nbroken = ", encoding="utf-8")
-    result = runner.invoke(app, ["doctor", "--smoke", "--home", str(home)])
+    result = runner.invoke(app, ["doctor", "--smoke"])
     assert result.exit_code == 1
     assert "smoke skipped" in result.output
 
 
 def test_doctor_command_emits_json(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json", "--home", str(home)])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["home"] == str(home)
@@ -821,7 +821,7 @@ def test_doctor_command_emits_json(home: Path):
 def test_doctor_command_runs_the_smoke_probe_on_request(home: Path):
     configure(home, mode="inject", inject="stream-json")
     result = runner.invoke(
-        app, ["doctor", "--json", "--smoke", "--smoke-timeout", "30", "--home", str(home)]
+        app, ["doctor", "--json", "--smoke", "--smoke-timeout", "30"]
     )
     payload = json.loads(result.output)
     smoke = {c["name"]: c["status"] for c in payload["checks"] if c["name"].startswith("smoke.")}
@@ -835,7 +835,7 @@ def test_doctor_command_runs_the_smoke_probe_on_request(home: Path):
 
 def test_doctor_command_takes_a_named_harness_for_the_smoke_run(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json", "--smoke", "ghost", "--home", str(home)])
+    result = runner.invoke(app, ["doctor", "--json", "--smoke", "ghost"])
     payload = json.loads(result.output)
     assert any(c["name"] == "smoke.ghost" for c in payload["checks"])
     assert result.exit_code == 1
@@ -843,13 +843,13 @@ def test_doctor_command_takes_a_named_harness_for_the_smoke_run(home: Path):
 
 def test_doctor_command_skips_the_probe_by_default(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json", "--home", str(home)])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert not [c for c in json.loads(result.output)["checks"] if c["name"].startswith("smoke")]
 
 
 def test_status_points_at_doctor_when_an_agent_is_failing(home: Path):
     write_heartbeat(home, "manager", status="error", error="harness died", consecutive_failures=3)
-    result = runner.invoke(app, ["status", "--home", str(home)])
+    result = runner.invoke(app, ["status"])
     assert "`quorum doctor`" in result.output
 
 
@@ -877,11 +877,11 @@ def test_surfaces_check_counts_what_the_inventory_module_counts(home: Path):
 
 def test_doctor_command_ends_with_the_surfaces_line(home: Path):
     disable_ci(home)
-    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "– surfaces: " in result.output
     payload = json.loads(
-        runner.invoke(app, ["doctor", "--json", "--home", str(home)]).output
+        runner.invoke(app, ["doctor", "--json"]).output
     )
     assert payload["checks"][-1]["name"] == "surfaces"
     assert payload["checks"][-1]["status"] == NA

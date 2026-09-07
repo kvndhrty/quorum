@@ -79,7 +79,7 @@ def test_select_honours_older_than_over_updated_at(home: Path):
 
 def test_prune_dry_run_changes_nothing(home: Path):
     task = finished(home)
-    result = runner.invoke(app, ["task", "prune", "--dry-run", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert task.short_id in result.output
     assert "dry run" in result.output
@@ -91,7 +91,7 @@ def test_prune_archives_the_task_and_views_forget_it(home: Path):
     task = finished(home)
     keep = finished(home, "still working", status="executing")
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
 
     assert short_ids(home) == {keep.short_id}  # the dot-dir is skipped by every reader
@@ -103,7 +103,7 @@ def test_prune_archives_the_task_and_views_forget_it(home: Path):
 
 def test_prune_is_reversible_by_moving_the_directory_back(home: Path):
     task = finished(home)
-    runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    runner.invoke(app, ["task", "prune", "--yes"])
 
     prune.archived_task_dir(home, task.id).rename(home / "tasks" / task.id)
     assert short_ids(home) == {task.short_id}
@@ -140,8 +140,7 @@ def test_prune_refuses_and_says_why(home: Path, setup):
     would look like a successful prune."""
     task, reason = setup(home)
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
-
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert reason in result.output
     assert task.short_id in short_ids(home)
@@ -152,7 +151,7 @@ def test_prune_archives_a_dependency_when_its_dependent_goes_too(home: Path):
     downstream = TaskStore(home).add("proj", "builds on it", "fake", depends_on=[upstream.id])
     TaskStore(home).update(downstream.id, status="done")
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert short_ids(home) == set()
     assert sorted(prune.archived_ids(home)) == sorted([upstream.id, downstream.id])
@@ -166,12 +165,12 @@ def test_prune_refuses_stranded_work_unless_forced(home: Path, repo: Path):
     workdir = runner_mod.prepare_workdir(home, store.get(task.id), store)
     (workdir / "scratch.txt").write_text("uncommitted")
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert "stranded work" in result.output
     assert short_ids(home) == {task.short_id}
 
-    forced = runner.invoke(app, ["task", "prune", "--force", "--yes", "--home", str(home)])
+    forced = runner.invoke(app, ["task", "prune", "--force", "--yes"])
     assert forced.exit_code == 0, forced.output
     assert short_ids(home) == set()
 
@@ -184,7 +183,7 @@ def test_prune_never_judges_a_no_worktree_task_checkout(home: Path, repo: Path):
     TaskStore(home).update(task.id, workdir=str(repo))
     (repo / "unrelated.txt").write_text("the user's own uncommitted file")
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert "stranded work" not in result.output
     assert short_ids(home) == set()
@@ -203,7 +202,7 @@ def test_prune_worktrees_removes_the_worktree_and_the_merged_branch(home: Path, 
     assert branch in git_out(repo, "branch", "--list", branch)
 
     result = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--yes", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--yes"]
     )
     assert result.exit_code == 0, result.output
     assert not worktree_path(home, task.id).exists()
@@ -228,7 +227,7 @@ def test_prune_worktrees_force_deletes_an_unmerged_branch(home: Path, repo: Path
     branch = f"quorum/{task.short_id}"
 
     result = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--force", "--yes", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--force", "--yes"]
     )
     assert result.exit_code == 0, result.output
     # --force is needed at all only because the commit is unpushed; it also
@@ -254,7 +253,7 @@ def test_prune_worktrees_force_never_destroys_an_uncommitted_file(home: Path, re
     (workdir / "scratch.txt").write_text("never committed")
 
     result = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--force", "--yes", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--force", "--yes"]
     )
     assert result.exit_code == 0, result.output
     assert "worktree kept, task not archived" in result.output
@@ -272,7 +271,7 @@ def test_prune_worktrees_dry_run_names_the_worktree_and_the_branch(home: Path, r
     workdir = runner_mod.prepare_workdir(home, store.get(task.id), store)
 
     result = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--dry-run", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--dry-run"]
     )
     assert result.exit_code == 0, result.output
     assert f"would remove worktree {workdir}" in result.output
@@ -282,7 +281,7 @@ def test_prune_worktrees_dry_run_names_the_worktree_and_the_branch(home: Path, r
     assert short_ids(home) == {task.short_id}
 
     forced = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--force", "--dry-run", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--force", "--dry-run"]
     )
     assert "git branch -D" in forced.output
 
@@ -297,7 +296,7 @@ def test_prune_worktrees_dry_run_says_a_dirty_worktree_would_stay(home: Path, re
 
     result = runner.invoke(
         app,
-        ["task", "prune", "--worktrees", "--force", "--dry-run", "--home", str(home)],
+        ["task", "prune", "--worktrees", "--force", "--dry-run"],
     )
     assert result.exit_code == 0, result.output
     assert f"would keep worktree {workdir}" in result.output
@@ -318,7 +317,7 @@ def test_prune_rechecks_the_runner_lock_after_planning(home: Path, monkeypatch: 
 
     monkeypatch.setattr("quorum.cli.prune_mod.plan", a_runner_appears)
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert "holds its lock" in result.output
     assert short_ids(home) == {task.short_id}
@@ -339,7 +338,7 @@ def test_prune_keeps_an_upstream_whose_dependent_was_skipped(home: Path, repo: P
     (workdir / "scratch.txt").write_text("uncommitted")  # git will refuse to remove it
 
     result = runner.invoke(
-        app, ["task", "prune", "--worktrees", "--force", "--yes", "--home", str(home)]
+        app, ["task", "prune", "--worktrees", "--force", "--yes"]
     )
     assert result.exit_code == 0, result.output
     assert "worktree kept, task not archived" in result.output
@@ -382,7 +381,7 @@ def test_prune_older_than_leaves_a_fresh_task_alone(home: Path):
     TaskStore(home).update(old.id, now=fsio.utc_now() - timedelta(days=30))
 
     result = runner.invoke(
-        app, ["task", "prune", "--older-than", "7d", "--yes", "--home", str(home)]
+        app, ["task", "prune", "--older-than", "7d", "--yes"]
     )
     assert result.exit_code == 0, result.output
     assert short_ids(home) == {fresh.short_id}
@@ -390,7 +389,7 @@ def test_prune_older_than_leaves_a_fresh_task_alone(home: Path):
 
 def test_prune_with_nothing_to_do_says_so(home: Path):
     finished(home, "in flight", status="executing")
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
     assert "nothing to prune" in result.output
 
@@ -400,7 +399,7 @@ def test_prune_journals_through_the_actor_guard(home: Path, monkeypatch: pytest.
     monkeypatch.setenv("QUORUM_ACTOR", "manager")
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "run-1")
 
-    result = runner.invoke(app, ["task", "prune", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
 
     entries = fsio.read_jsonl(home / "state" / "manager" / "journal.jsonl")
@@ -416,7 +415,7 @@ def test_board_clear_empties_the_attention_banner_and_keeps_the_history(home: Pa
     bus.post("manager", "attention", "escalation", text="a human is needed")
     assert views.attention_summary(home)["count"] == 1
 
-    result = runner.invoke(app, ["board", "clear", "attention", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["board", "clear", "attention", "--yes"])
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
     assert [m["payload"]["text"] for m in archive_lines(home)] == ["a human is needed"]
@@ -425,7 +424,7 @@ def test_board_clear_empties_the_attention_banner_and_keeps_the_history(home: Pa
 def test_board_clear_dry_run_changes_nothing(home: Path):
     MessageBus(home).post("manager", "attention", "escalation", text="still here")
     result = runner.invoke(
-        app, ["board", "clear", "attention", "--dry-run", "--home", str(home)]
+        app, ["board", "clear", "attention", "--dry-run"]
     )
     assert result.exit_code == 0, result.output
     assert "would archive 1" in result.output
@@ -439,7 +438,7 @@ def test_board_clear_before_keeps_newer_messages(home: Path):
     MessageBus(home).post("manager", "attention", "escalation", text="recent")
 
     result = runner.invoke(
-        app, ["board", "clear", "attention", "--before", "7d", "--yes", "--home", str(home)]
+        app, ["board", "clear", "attention", "--before", "7d", "--yes"]
     )
     assert result.exit_code == 0, result.output
     live = [m.payload["text"] for m in MessageBus(home).read_topic("attention")]
@@ -448,7 +447,7 @@ def test_board_clear_before_keeps_newer_messages(home: Path):
 
 
 def test_board_clear_on_an_empty_topic_says_so(home: Path):
-    result = runner.invoke(app, ["board", "clear", "nothing", "--yes", "--home", str(home)])
+    result = runner.invoke(app, ["board", "clear", "nothing", "--yes"])
     assert result.exit_code == 0, result.output
     assert "nothing to clear" in result.output
 
@@ -456,7 +455,7 @@ def test_board_clear_on_an_empty_topic_says_so(home: Path):
 def test_board_clear_rejects_an_unparseable_cutoff(home: Path):
     MessageBus(home).post("manager", "attention", "escalation", text="here")
     result = runner.invoke(
-        app, ["board", "clear", "attention", "--before", "soon", "--yes", "--home", str(home)]
+        app, ["board", "clear", "attention", "--before", "soon", "--yes"]
     )
     assert result.exit_code != 0
     assert views.attention_summary(home)["count"] == 1
@@ -470,12 +469,12 @@ def test_task_inbox_clear_archives_pending_guidance(home: Path):
     MessageBus(home).send("user", inbox_name(task.id), text="never mind")
 
     result = runner.invoke(
-        app, ["task", "inbox", task.short_id, "--clear", "--home", str(home)]
+        app, ["task", "inbox", task.short_id, "--clear"]
     )
     assert result.exit_code == 0, result.output
     assert "archived 1" in result.output
 
-    peek = runner.invoke(app, ["task", "inbox", task.short_id, "--home", str(home)])
+    peek = runner.invoke(app, ["task", "inbox", task.short_id])
     assert "no guidance waiting" in peek.output
     assert [m["payload"]["text"] for m in archive_lines(home)] == ["never mind"]
 
@@ -487,7 +486,7 @@ def test_task_inbox_clear_leaves_a_claimed_message_alone(home: Path):
     claimed = next(bus.claim(inbox_name(task.id)))  # sits in cur/, someone owns it
 
     result = runner.invoke(
-        app, ["task", "inbox", task.short_id, "--clear", "--home", str(home)]
+        app, ["task", "inbox", task.short_id, "--clear"]
     )
     assert result.exit_code == 0, result.output
     assert "no guidance waiting" in result.output
@@ -499,7 +498,7 @@ def test_task_inbox_clear_and_claim_are_mutually_exclusive(home: Path):
     MessageBus(home).send("user", inbox_name(task.id), text="keep me")
 
     result = runner.invoke(
-        app, ["task", "inbox", task.short_id, "--claim", "--clear", "--home", str(home)]
+        app, ["task", "inbox", task.short_id, "--claim", "--clear"]
     )
     assert result.exit_code == 1
     assert MessageBus(home).pending(inbox_name(task.id))

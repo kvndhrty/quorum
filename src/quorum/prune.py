@@ -54,7 +54,6 @@ from .tasks import (
     TaskStore,
     git_runner,
     runner_alive,
-    short_handle,
     task_dir,
     tasks_dir,
     workdir_git_state,
@@ -89,23 +88,13 @@ def resolve_archived(home: Path, handle: str) -> Task:
     Everything else (`task list`, every view, the digest) keeps skipping the
     dot-prefixed directory, which is the point of it.
     """
-    handle = handle.strip().upper()
     root = archive_root(home)
     if not root.is_dir():
         raise KeyError(handle)
     names = sorted(p.name for p in root.iterdir() if p.is_dir() and not fsio.is_tmp(p.name))
-    matches = [n for n in names if n == handle] or [
-        n for n in names if n.startswith(handle) or n.endswith(handle)
-    ]
-    if not matches:
-        raise KeyError(handle)
-    if len(matches) > 1:
-        raise ValueError(
-            f"archived task handle {handle!r} is ambiguous: "
-            + ", ".join(short_handle(n) for n in matches)
-        )
+    found = fsio.resolve_handle(handle, names, what="archived task handle")
     try:
-        return Task.model_validate(fsio.read_json(archived_task_dir(home, matches[0]) / "task.json"))
+        return Task.model_validate(fsio.read_json(archived_task_dir(home, found) / "task.json"))
     except (OSError, ValueError):
         raise KeyError(handle) from None
 
@@ -144,17 +133,19 @@ def select(
     "finished a week ago" means to a reader.
     """
     wanted = {s.strip().lower() for s in statuses if s.strip()}
-    floor = (now or fsio.utc_now()) - older_than if older_than is not None else None
+    floor = (
+        fsio.window_start(now or fsio.utc_now(), older_than)
+        if older_than is not None
+        else None
+    )
     out = []
     for task in tasks:
         if task.perpetual or task.status.lower() not in wanted:
             continue
         if floor is not None:
-            try:
-                updated = fsio.parse_iso(task.updated_at)
-            except ValueError:
-                continue  # unparseable timestamp: too old to judge, so not swept
-            if updated > floor:
+            updated = fsio.parse_iso_or(task.updated_at)
+            # an unparseable timestamp is too old to judge, so not swept
+            if updated is None or updated > floor:
                 continue
         out.append(task)
     return out

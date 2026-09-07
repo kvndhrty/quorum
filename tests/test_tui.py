@@ -114,7 +114,7 @@ def test_task_table_shows_waiting_on_dependencies(home: Path, tui):
     async def script(app, pilot):
         table = app.query_one("#tasks", DataTable)
         cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
-        assert any(f"⏳{upstream.short_id}" in c for c in cells)
+        assert any(f"waiting-on {upstream.short_id}" in c for c in cells)
 
     tui(home, script)
 

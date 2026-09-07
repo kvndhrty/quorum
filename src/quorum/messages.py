@@ -362,31 +362,20 @@ class MessageBus:
         ambiguous, exactly as task resolution does — a wrong ack is silent (the
         banner just drops something else), so both fail loudly.
         """
-        handle = handle.strip().upper()
-        if not handle:
-            raise KeyError(handle)
-        matches: list[tuple[Message, Path]] = []
+        # The filename is <compact-ts>-<ULID>.json and the timestamp carries
+        # no "-", so a candidate id comes off the name. Only files that parse
+        # are candidates: one that does not can be read by nobody, so it must
+        # not join the ambiguity set and turn a good match into a refusal.
+        # That costs a read per live message, which is what `archive_topic`
+        # already pays and what a hand-typed ack can afford.
+        found: dict[str, tuple[Message, Path]] = {}
         for name in [topic] if topic else self.topics():
             for path in fsio.sorted_entries(self.board_dir / name):
-                # the filename is <compact-ts>-<ULID>.json and the timestamp
-                # carries no "-", so this is the id without reading the file
                 candidate = path.stem.split("-", 1)[-1].upper()
-                if not (candidate.startswith(handle) or candidate.endswith(handle)):
-                    continue
                 msg = _load(path)
-                if msg is None:
-                    continue
-                if msg.id.upper() == handle:
-                    return msg, path  # an exact id is never ambiguous
-                matches.append((msg, path))
-        if not matches:
-            raise KeyError(handle)
-        if len(matches) > 1:
-            raise ValueError(
-                f"message handle {handle!r} is ambiguous: "
-                + ", ".join(m.short_id for m, _ in matches)
-            )
-        return matches[0]
+                if msg is not None:
+                    found[candidate] = (msg, path)
+        return found[fsio.resolve_handle(handle, found, what="message handle")]
 
     def ack_board_message(self, handle: str, topic: str | None = None) -> Message:
         """Archive the one board message `handle` names — the per-message half

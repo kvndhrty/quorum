@@ -161,7 +161,7 @@ def test_doctor_dial_lines_show_the_configured_value(home: Path):
 
 def test_doctor_command_prints_the_dials_and_stays_green(home: Path):
     disable_ci(home)
-    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "– dial concurrent launches:" in result.output
     assert "– dial manager cadence: every 5m" in result.output  # the scaffold's manager
@@ -171,7 +171,7 @@ def test_doctor_command_prints_the_dials_and_stays_green(home: Path):
 
 def test_doctor_json_carries_every_dial(home: Path):
     disable_ci(home)
-    result = runner.invoke(app, ["doctor", "--json", "--home", str(home)])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     found = {c["name"]: c for c in payload["checks"] if c["name"].startswith("dial.")}

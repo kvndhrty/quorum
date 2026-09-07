@@ -25,7 +25,7 @@ NOTE = "a3f2k9's PR is waiting on the human — do not relaunch it"
 
 
 def invoke(home: Path, *args: str):
-    return runner.invoke(app, [*args, "--home", str(home)])
+    return runner.invoke(app, [*args])
 
 
 def lines(path: Path) -> list[dict]:

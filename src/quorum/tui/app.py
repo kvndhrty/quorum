@@ -26,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
-from .. import transcript, views
+from .. import fsio, transcript, views
 from ..messages import MessageBus
 from ..tasks import (
     Task,
@@ -58,21 +58,6 @@ FAILED = object()
 #: how many escalations the `a` list shows — deeper than the banner's own
 #: summary, because every line in it is one the reader may want to ack.
 ATTENTION_LIST_LIMIT = views.ATTENTION_LIST_LIMIT
-
-
-def _usage_cell(t: dict) -> str:
-    """The usage column: spend, plus the budget marks `task list` renders.
-
-    GATED is the one that matters here, because `s` is the binding it
-    refuses (runner.budget_blockers): without it the reader learns of the
-    gate only when the launch is turned down.
-    """
-    text = t.get("usage_text", "") or ""
-    if t.get("budget_gated"):
-        return f"{text} $! GATED".strip()
-    if t.get("budget_overages"):
-        return f"{text} $!".strip()
-    return text
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -140,7 +125,7 @@ class AttentionScreen(ModalScreen[str | None]):
         table.cursor_type = "row"
         for item in self.items:
             table.add_row(
-                item["at"].replace("T", " ").rstrip("Z"),
+                fsio.display_ts(item["at"]),
                 item["from"],
                 item["text"][:80],
                 key=item["id"],
@@ -503,7 +488,7 @@ class QuorumTUI(App):
         if journal:
             lines.append("— action journal —")
             for e in journal:
-                at = str(e.get("at", "")).replace("T", " ").rstrip("Z")
+                at = fsio.display_ts(e.get("at", ""))
                 target = f" -> {e['target']}" if e.get("target") else ""
                 args = f"  {e['args']}" if e.get("args") else ""
                 lines.append(f"[{at}] {e.get('action', '')}{target}{args}")
@@ -531,21 +516,19 @@ class QuorumTUI(App):
 
         def fill_tasks(table: DataTable) -> None:
             for t in task_rows:
-                status = t["status"] + (" ⚭" if t["attached"] else (" ▶" if t["running"] else ""))
-                if t.get("perpetual"):
-                    status += " ∞"  # never finishes by design; only the user ends it
-                # The forge's word about the PR, materialized by the manager
-                # tick so this table stays a pure file read.
-                status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
-                if t.get("waiting_on"):
-                    status += " ⏳" + ",".join(t["waiting_on"])
-                if t.get("dep_failed"):
-                    status += " DEP-FAILED"
-                if t.get("dep_missing"):
-                    status += " DEP-MISSING"
+                # Every mark here comes from views, which is where the CLI
+                # table takes it too and what `quorum status --legend`
+                # explains: the marker leads the id, the badges follow the
+                # status word, and the flags (stranded work, dependencies
+                # that cannot be satisfied) trail it, since this table has
+                # no column of its own for them.
+                status = t["status"] + views.task_badges(t)
+                flags = views.task_flags(t)
+                if flags:
+                    status += "  " + flags
                 style = "cyan" if (t["running"] or t["attached"]) else TASK_STATUS_STYLE.get(t["status"], "")
                 table.add_row(
-                    t["id_short"],
+                    f"{views.task_marker(t)} {t['id_short']}",
                     t["project"],
                     Text(status, style=style),
                     t["harness"],
@@ -555,7 +538,7 @@ class QuorumTUI(App):
                     # run went over, so `s` will refuse the next one until
                     # --force — say so here rather than at the refusal.
                     Text(
-                        _usage_cell(t),
+                        views.usage_badge(t),
                         style="yellow" if t.get("budget_overages") else "",
                     ),
                     (t["last_report"] or t["prompt"])[:60],
@@ -589,8 +572,8 @@ class QuorumTUI(App):
                     r["schedule"],
                     # "" unless this agent's own harness reported a spend.
                     r.get("usage_text", ""),
-                    (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
-                    next_run.replace("T", " ").rstrip("Z"),
+                    fsio.display_ts(r["last_end"] or "—"),
+                    fsio.display_ts(next_run),
                     key=r["name"],
                 )
 
@@ -639,7 +622,7 @@ class QuorumTUI(App):
                 "⚭ attached · ▶ running)"
             )
             lines = [
-                f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
+                f"[{fsio.display_ts(m['at'])}] #{m['topic']} <{m['from']}> {m['text']}"
                 for m in views.board_tail(self.home, limit=30)
             ]
         if lines != self._log_lines:

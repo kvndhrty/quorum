@@ -342,11 +342,9 @@ def stall_minutes(home: Path, task: tasks.Task, now: datetime) -> int | None:
 def _run_started_at(home: Path, task: tasks.Task) -> datetime | None:
     """When the live run acquired its lock, from the lock itself."""
     lock = tasks.runner_lock_path(home, task.id)
-    started = fsio.read_json_or(lock, {}).get("started_at")
-    try:
-        return fsio.parse_iso(str(started))
-    except (TypeError, ValueError):
-        pass
+    started = fsio.parse_iso_or(fsio.read_json_or(lock, {}).get("started_at"))
+    if started is not None:
+        return started
     try:
         return datetime.fromtimestamp(lock.stat().st_mtime, UTC)
     except OSError:

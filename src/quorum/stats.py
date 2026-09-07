@@ -44,7 +44,6 @@ Three rules keep them honest:
 
 from __future__ import annotations
 
-import re
 import statistics
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
@@ -58,38 +57,6 @@ from .tasks import PR_STATES, Task, TaskStore, read_reports
 # lines, and its rows carry run outcomes instead of delivery figures.
 DIMENSIONS = ("project", "harness", "week", "agent")
 TASK_DIMENSIONS = ("project", "harness", "week")
-
-_SINCE = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$")
-_UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
-
-
-def parse_since(text: str) -> timedelta:
-    """`7d` / `36h` / `2w` / `90m` → a timedelta. ValueError for anything else
-    (including `0d`: an empty window is a typo, not a request).
-
-    A count too large for a timedelta raises ValueError too, not the
-    OverflowError the constructor would: the caller rejects one bad `--since`
-    with one message, and a number nobody can type by accident is still a
-    typo.
-    """
-    m = _SINCE.match(text or "")
-    if not m or int(m.group(1)) <= 0:
-        raise ValueError(f"--since wants a positive count with a unit, e.g. 7d, 36h, 2w: {text!r}")
-    try:
-        return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
-    except OverflowError:
-        raise ValueError(f"--since window is longer than any date can express: {text!r}") from None
-
-
-def _dt(value: Any) -> datetime | None:
-    """An aware datetime off a stored timestamp, or None — a hand-edited
-    field says nothing rather than failing the report."""
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return fsio.parse_iso(value)
-    except ValueError:
-        return None
 
 
 def _seconds(start: datetime | None, end: datetime | None) -> float | None:
@@ -116,7 +83,7 @@ def done_at(home: Path, task: Task) -> datetime | None:
         return None
     for entry in reversed(read_reports(home, task.id)):
         if isinstance(entry, dict) and entry.get("status") == "done":
-            return _dt(entry.get("at"))
+            return fsio.parse_iso_or(entry.get("at"))
     return None
 
 
@@ -127,11 +94,11 @@ def task_facts(home: Path, task: Task) -> dict[str, Any]:
     group's spend is one `usage.total` over every run in it — the reduction
     the rest of quorum uses, and the only place a run count comes from.
     """
-    created = _dt(task.created_at)
-    starts = [s for r in task.runs if (s := _dt(r.started_at)) is not None]
+    created = fsio.parse_iso_or(task.created_at)
+    starts = [s for r in task.runs if (s := fsio.parse_iso_or(r.started_at)) is not None]
     first_run = min(starts) if starts else None
     finished = done_at(home, task)
-    merged_at = _dt(task.pr_state_at) if task.pr_state == "merged" else None
+    merged_at = fsio.parse_iso_or(task.pr_state_at) if task.pr_state == "merged" else None
     to_merge = _seconds(finished, merged_at)
     return {
         "id": task.id,
@@ -259,7 +226,7 @@ def agent_rows(
             e
             for e in fsio.read_jsonl(path)
             if isinstance(e, dict)
-            and (cutoff is None or ((at := _dt(e.get("at"))) is not None and at >= cutoff))
+            and (cutoff is None or ((at := fsio.parse_iso_or(e.get("at"))) is not None and at >= cutoff))
         ]
         if not entries:
             continue
@@ -282,14 +249,10 @@ def report(
         raise ValueError(f"--by wants one of {', '.join(DIMENSIONS)}: {by!r}")
     home = Path(home)
     moment = now() if callable(now) else (now or fsio.utc_now())
-    try:
-        cutoff = moment - since if since is not None else None
-    except OverflowError:
-        # A window that reaches before year 1. `parse_since` catches the
-        # counts a timedelta itself refuses; this catches the ones it holds
-        # but no instant is that far along, and both reach the CLI as the
-        # same rejection.
-        raise ValueError(f"--since window reaches before any date: {since}") from None
+    # `fsio.window_start` turns the OverflowError of a window reaching
+    # before year 1 into the ValueError the caller already handles; the CLI
+    # rejects such a window at the option, so this is for a direct caller.
+    cutoff = fsio.window_start(moment, since) if since is not None else None
     if by == "agent":
         rows, total = agent_rows(home, cutoff)
     else:

@@ -4,6 +4,7 @@ layer — everything else is exercised through the agents and views directly."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ def test_run_once_writes_a_heartbeat(home: Path):
     """Without this an agent exercised by hand keeps reading as never-ran in
     `quorum status` and both dashboards, which is how it looked in practice."""
     write_plugin(home, "okplug", OK_PLUGIN)
-    result = runner.invoke(app, ["agent", "run-once", "okplug", "--home", str(home)])
+    result = runner.invoke(app, ["agent", "run-once", "okplug"])
     assert result.exit_code == 0, result.output
 
     hb = heartbeat(home, "okplug")
@@ -60,7 +61,7 @@ def test_run_once_writes_a_heartbeat(home: Path):
 
 def test_run_once_records_a_failing_tick(home: Path):
     write_plugin(home, "boomplug", BOOM_PLUGIN)
-    result = runner.invoke(app, ["agent", "run-once", "boomplug", "--home", str(home)])
+    result = runner.invoke(app, ["agent", "run-once", "boomplug"])
     assert result.exit_code != 0
 
     hb = heartbeat(home, "boomplug")
@@ -84,7 +85,7 @@ def test_run_once_clears_a_failure_streak(home: Path):
         escalated_at="2026-08-30T22:10:04Z",
     )
 
-    result = runner.invoke(app, ["agent", "run-once", "okplug", "--home", str(home)])
+    result = runner.invoke(app, ["agent", "run-once", "okplug"])
     assert result.exit_code == 0, result.output
 
     hb = heartbeat(home, "okplug")
@@ -95,7 +96,7 @@ def test_run_once_clears_a_failure_streak(home: Path):
 
 
 def test_run_once_rejects_an_unknown_agent(home: Path):
-    result = runner.invoke(app, ["agent", "run-once", "nope", "--home", str(home)])
+    result = runner.invoke(app, ["agent", "run-once", "nope"])
     assert result.exit_code == 1
     assert "no agent" in result.output
 
@@ -116,7 +117,7 @@ def setup_task_env(home: Path, tmp_path: Path) -> str:
 
 
 def test_task_add_requires_known_project_and_harness(home: Path):
-    r = runner.invoke(app, ["task", "add", "ghost", "do it", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", "ghost", "do it"])
     assert r.exit_code == 1 and "no project" in r.output
 
 
@@ -141,7 +142,7 @@ def test_task_add_reads_prompt_from_stdin(home: Path, tmp_path: Path):
     translation: what the harness reads must be what was piped."""
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(
-        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        app, ["task", "add", slug, "-", "--harness", "fake"],
         input=ISSUE_PROMPT,
     )
     assert r.exit_code == 0, r.output
@@ -154,7 +155,7 @@ def test_task_add_stdin_keeps_crlf(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(
         app,
-        ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        ["task", "add", slug, "-", "--harness", "fake"],
         input=b"line one\r\nline two\r\n",
     )
     assert r.exit_code == 0, r.output
@@ -163,7 +164,7 @@ def test_task_add_stdin_keeps_crlf(home: Path, tmp_path: Path):
 
 def test_task_add_without_a_prompt_says_how(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "--harness", "fake"])
     assert r.exit_code == 1
     assert "a task needs a prompt" in r.output and "read stdin" in r.output
 
@@ -172,7 +173,7 @@ def test_task_add_refuses_empty_input(home: Path, tmp_path: Path):
     """A whitespace-only prompt would queue, launch, and waste a whole run."""
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(
-        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        app, ["task", "add", slug, "-", "--harness", "fake"],
         input="\n  \n",
     )
     assert r.exit_code == 1
@@ -188,7 +189,7 @@ def test_task_add_checks_everything_it_can_before_consuming_stdin(
     """A piped issue is gone the moment stdin is drained, so nothing that can
     be checked without it — the slug, the harness, `--after` — may be checked
     after it."""
-    from quorum import cli
+    from quorum.cli import _common as cli
 
     slug = setup_task_env(home, tmp_path)
     read: list[str] = []
@@ -199,12 +200,12 @@ def test_task_add_checks_everything_it_can_before_consuming_stdin(
         ([slug, "-", "--harness", "nope"], "no [harness.nope]"),
         ([slug, "-", "--harness", "fake", "--after", "ZZZZZZ"], "ZZZZZZ"),
     ):
-        r = runner.invoke(app, ["task", "add", *args, "--home", str(home)], input=ISSUE_PROMPT)
+        r = runner.invoke(app, ["task", "add", *args], input=ISSUE_PROMPT)
         assert r.exit_code == 1 and expected in r.output
         assert read == []
 
     r = runner.invoke(
-        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        app, ["task", "add", slug, "-", "--harness", "fake"],
         input=ISSUE_PROMPT,
     )
     assert r.exit_code == 0, r.output
@@ -214,10 +215,10 @@ def test_task_add_checks_everything_it_can_before_consuming_stdin(
 def test_task_add_says_it_is_waiting_on_a_typed_prompt(home: Path, tmp_path: Path, monkeypatch):
     """`-` with nothing piped in blocks on a read that otherwise looks like a
     hang; a piped one says nothing extra."""
-    from quorum import cli
+    from quorum.cli import _common as cli
 
     slug = setup_task_env(home, tmp_path)
-    args = ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)]
+    args = ["task", "add", slug, "-", "--harness", "fake"]
     assert "ctrl-D" not in runner.invoke(app, args, input=ISSUE_PROMPT).output
 
     monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
@@ -245,7 +246,7 @@ def test_task_add_from_an_issue_composes_the_prompt_and_records_the_url(
     install_gh(path_without_gh, monkeypatch, issue=ISSUE)
 
     r = runner.invoke(
-        app, ["task", "add", slug, "--issue", "62", "--harness", "fake", "--home", str(home)]
+        app, ["task", "add", slug, "--issue", "62", "--harness", "fake"]
     )
     assert r.exit_code == 0, r.output
     assert ISSUE["url"] in r.output
@@ -257,9 +258,9 @@ def test_task_add_from_an_issue_composes_the_prompt_and_records_the_url(
     assert task.issue_url == ISSUE["url"]
 
     # the listing abbreviates, `task show` has the page you open
-    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    r = runner.invoke(app, ["task", "list"])
     assert "#62" in r.output
-    r = runner.invoke(app, ["task", "show", task.short_id, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", task.short_id])
     assert ISSUE["url"] in r.output
 
 
@@ -272,7 +273,7 @@ def test_a_prompt_given_with_an_issue_is_appended(
     r = runner.invoke(
         app,
         ["task", "add", slug, "keep the diff small", "--issue", ISSUE["url"],
-         "--harness", "fake", "--home", str(home)],
+         "--harness", "fake"],
     )
     assert r.exit_code == 0, r.output
     assert stored_prompt(home) == (
@@ -292,7 +293,7 @@ def test_issue_intake_fails_loudly_and_queues_nothing(
 
     # no gh at all (path_without_gh installed none)
     r = runner.invoke(
-        app, ["task", "add", slug, "--issue", "62", "--harness", "fake", "--home", str(home)]
+        app, ["task", "add", slug, "--issue", "62", "--harness", "fake"]
     )
     assert r.exit_code == 1 and "no `gh` on PATH" in r.output
     assert TaskStore(home).list() == []
@@ -300,14 +301,14 @@ def test_issue_intake_fails_loudly_and_queues_nothing(
     # a gh that cannot find the issue
     install_gh(path_without_gh, monkeypatch, mode="noissue")
     r = runner.invoke(
-        app, ["task", "add", slug, "--issue", "999999", "--harness", "fake", "--home", str(home)]
+        app, ["task", "add", slug, "--issue", "999999", "--harness", "fake"]
     )
     assert r.exit_code == 1 and "Could not resolve to an Issue" in r.output
     assert TaskStore(home).list() == []
 
     # a reference that is not an issue at all: refused before any subprocess
     r = runner.invoke(
-        app, ["task", "add", slug, "--issue", "the auth one", "--harness", "fake", "--home", str(home)]
+        app, ["task", "add", slug, "--issue", "the auth one", "--harness", "fake"]
     )
     assert r.exit_code == 1 and "is not an issue" in r.output
     assert TaskStore(home).list() == []
@@ -322,7 +323,7 @@ def test_issue_intake_still_refuses_an_empty_prompt(
     install_gh(path_without_gh, monkeypatch, issue=ISSUE)
     r = runner.invoke(
         app,
-        ["task", "add", slug, "-", "--issue", "62", "--harness", "fake", "--home", str(home)],
+        ["task", "add", slug, "-", "--issue", "62", "--harness", "fake"],
         input="\n  \n",
     )
     assert r.exit_code == 1 and "empty prompt" in r.output
@@ -331,37 +332,37 @@ def test_issue_intake_still_refuses_an_empty_prompt(
 def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
 
-    r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake"])
     assert r.exit_code == 0, r.output
     short = r.output.split("queued task ")[1].split(" ")[0]
 
-    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    r = runner.invoke(app, ["task", "list"])
     assert short in r.output and "queued" in r.output
 
-    r = runner.invoke(app, ["task", "nudge", short, "focus on the README", "--home", str(home)])
+    r = runner.invoke(app, ["task", "nudge", short, "focus on the README"])
     assert r.exit_code == 0
 
-    r = runner.invoke(app, ["task", "inbox", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "inbox", short])
     assert "focus on the README" in r.output  # peek does not consume
-    r = runner.invoke(app, ["task", "inbox", short, "--claim", "--home", str(home)])
+    r = runner.invoke(app, ["task", "inbox", short, "--claim"])
     assert "focus on the README" in r.output
-    r = runner.invoke(app, ["task", "inbox", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "inbox", short])
     assert "no guidance waiting" in r.output  # claim consumed it
 
-    r = runner.invoke(app, ["task", "run", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", short])
     assert r.exit_code == 0, r.output
 
     r = runner.invoke(app, ["task", "report", short, "opened the PR", "--status", "pr",
-                            "--pr-url", "https://example.com/pr/1", "--home", str(home)])
+                            "--pr-url", "https://example.com/pr/1"])
     assert r.exit_code == 0
-    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short])
     assert "status:   pr" in r.output and "https://example.com/pr/1" in r.output
-    r = runner.invoke(app, ["task", "log", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "log", short])
     assert "tidy the docs" in r.output  # the fake harness echoes its prompt
 
-    r = runner.invoke(app, ["task", "cancel", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "cancel", short])
     assert r.exit_code == 0
-    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    r = runner.invoke(app, ["task", "list"])
     assert "cancelled" in r.output
 
 
@@ -369,9 +370,9 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     from quorum import fsio
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["agent", "pause", "manager", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "pause", "manager"])
     assert r.exit_code == 0, r.output
-    r = runner.invoke(app, ["agent", "pause", "ghost", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "pause", "ghost"])
     assert r.exit_code == 1
 
     inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
@@ -387,7 +388,7 @@ def test_agent_create_remove_and_reload(home: Path):
 
     r = runner.invoke(app, [
         "agent", "create", "standup", "post a standup note", "--schedule", "every 30m",
-        "--harness", "fake", "--home", str(home),
+        "--harness", "fake",
     ])
     assert r.exit_code == 0, r.output
     assert (home / "agents" / "standup.toml").exists()
@@ -398,23 +399,23 @@ def test_agent_create_remove_and_reload(home: Path):
     assert len(entries) == 1
     assert fsio.read_json(entries[0])["type"] == "agent.reload"
 
-    r = runner.invoke(app, ["agent", "list", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "list"])
     assert "standup" in r.output
 
     # duplicates and promptless prompt agents are refused
     r = runner.invoke(app, [
-        "agent", "create", "standup", "again", "--home", str(home),
+        "agent", "create", "standup", "again",
     ])
     assert r.exit_code == 1 and "already exists" in r.output
-    r = runner.invoke(app, ["agent", "create", "mute", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "create", "mute"])
     assert r.exit_code == 1 and "a prompt agent needs a prompt" in r.output
 
     # editing + reload is the update path
-    r = runner.invoke(app, ["agent", "reload", "standup", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "reload", "standup"])
     assert r.exit_code == 0, r.output
 
     # removal deletes the file, keeps the prompt, and pokes the supervisor
-    r = runner.invoke(app, ["agent", "remove", "standup", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "remove", "standup"])
     assert r.exit_code == 0, r.output
     assert not (home / "agents" / "standup.toml").exists()
     assert (home / "prompts" / "standup.md").exists()
@@ -422,7 +423,7 @@ def test_agent_create_remove_and_reload(home: Path):
     assert types.count("agent.reload") == 3
 
     # config.toml-defined agents are not removable from the CLI
-    r = runner.invoke(app, ["agent", "remove", "manager", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "remove", "manager"])
     assert r.exit_code == 1 and "config.toml" in r.output
 
 
@@ -431,10 +432,10 @@ def test_run_once_respects_the_tick_lock(home: Path):
     lock = home / "state" / "agents" / "lockplug" / "tick.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text('{"pid": 1}\n')  # pid 1 is alive and never ours
-    r = runner.invoke(app, ["agent", "run-once", "lockplug", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "run-once", "lockplug"])
     assert r.exit_code == 1 and "ticking elsewhere" in r.output
     lock.unlink()
-    r = runner.invoke(app, ["agent", "run-once", "lockplug", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "run-once", "lockplug"])
     assert r.exit_code == 0, r.output
 
 
@@ -446,17 +447,17 @@ def test_manager_tell_note_and_journal(home: Path):
     from quorum.agents.manager import journal_path
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["manager", "tell", "focus on the api task", "--home", str(home)])
+    r = runner.invoke(app, ["manager", "tell", "focus on the api task"])
     assert r.exit_code == 0
     inbox = MessageBus(home).inbox_dir / "manager" / "new"
     assert len(fsio.sorted_entries(inbox)) == 1
 
-    r = runner.invoke(app, ["manager", "note", "human-added context", "--home", str(home)])
+    r = runner.invoke(app, ["manager", "note", "human-added context"])
     assert r.exit_code == 0
     entries = fsio.read_jsonl(journal_path(home))
     assert entries[-1]["action"] == "note" and entries[-1]["actor"] == "user"
 
-    r = runner.invoke(app, ["manager", "journal", "--home", str(home)])
+    r = runner.invoke(app, ["manager", "journal"])
     assert "human-added context" in r.output
 
 
@@ -467,13 +468,13 @@ def test_mutating_commands_journal_only_for_the_manager_actor(
     from quorum.agents.manager import journal_path
 
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "user-made task", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "user-made task", "--harness", "fake"])
     assert r.exit_code == 0, r.output
     assert fsio.read_jsonl(journal_path(home)) == []  # user actions: no journal
 
     monkeypatch.setenv("QUORUM_ACTOR", "manager")
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TESTRUN")
-    r = runner.invoke(app, ["task", "add", slug, "manager-made task", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "manager-made task", "--harness", "fake"])
     assert r.exit_code == 0, r.output
     entries = fsio.read_jsonl(journal_path(home))
     assert len(entries) == 1
@@ -493,14 +494,14 @@ def test_non_manager_actor_journals_to_its_own_path_and_hits_cap(
     monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
 
     for i in range(2):
-        r = runner.invoke(app, ["task", "add", slug, f"alpha task {i}", "--harness", "fake", "--home", str(home)])
+        r = runner.invoke(app, ["task", "add", slug, f"alpha task {i}", "--harness", "fake"])
         assert r.exit_code == 0, r.output
     entries = fsio.read_jsonl(journal_path(home, "alpha"))
     assert len(entries) == 2
     assert all(e["actor"] == "alpha" and e["run"] == "01ALPHARUN" for e in entries)
     assert fsio.read_jsonl(journal_path(home)) == []  # the manager journal stays untouched
 
-    r = runner.invoke(app, ["task", "add", slug, "one too many", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "one too many", "--harness", "fake"])
     assert r.exit_code == 1
     assert "alpha action cap (2) reached" in r.output
 
@@ -522,7 +523,7 @@ def test_a_torn_journal_line_does_not_break_the_cap_count(
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TORNRUN")
     monkeypatch.setenv("QUORUM_ACTOR_CAP", "2")
 
-    r = runner.invoke(app, ["task", "add", slug, "after the torn line", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "after the torn line", "--harness", "fake"])
     assert r.exit_code == 0, r.output
     entries = [e for e in fsio.read_jsonl(journal) if isinstance(e, dict)]
     assert [e["action"] for e in entries] == ["task.add"]
@@ -538,13 +539,13 @@ def test_detached_run_journals_once_not_twice(home: Path, tmp_path: Path, monkey
     from quorum.tasks import TaskStore, runner_lock_path
 
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "detach journaling", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "detach journaling", "--harness", "fake"])
     assert r.exit_code == 0, r.output
     task = TaskStore(home).list()[0]
 
     monkeypatch.setenv("QUORUM_ACTOR", "manager")
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "01DETACH")
-    r = runner.invoke(app, ["task", "run", task.short_id, "--detach", "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", task.short_id, "--detach"])
     assert r.exit_code == 0, r.output
 
     deadline = time.time() + 15
@@ -596,7 +597,7 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     _, outcomes = home_mod.scaffold(target)
     assert outcomes == {"manager.md": "edited"}
 
-    result = runner.invoke(app, ["init", "--home", str(target)])
+    result = runner.invoke(app, ["--home", str(target), "init"])
     assert result.exit_code == 0
     assert "keeping your edits" in result.output
 
@@ -610,7 +611,7 @@ def test_init_points_an_edited_prompt_at_the_overlay(tmp_path: Path):
     home_mod.scaffold(target)
     (target / "prompts" / "manager.md").write_text("my custom manager policy\n")
 
-    result = runner.invoke(app, ["init", "--home", str(target)])
+    result = runner.invoke(app, ["--home", str(target), "init"])
     assert result.exit_code == 0
     out = _plain(result.output)
     assert "quorum prompt diff manager" in out
@@ -679,7 +680,7 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     """The babysitter example ships as a packaged prompt; creating an agent
     over it must not require pasting the prompt back in."""
     r = runner.invoke(app, [
-        "agent", "create", "babysitter", "--schedule", "every 10m", "--home", str(home),
+        "agent", "create", "babysitter", "--schedule", "every 10m",
     ])
     assert r.exit_code == 0, r.output
     assert (home / "agents" / "babysitter.toml").exists()
@@ -687,16 +688,16 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
 
     # ...under any name, via --prompt
     r = runner.invoke(app, [
-        "agent", "create", "ci-cop", "--prompt", "babysitter", "--home", str(home),
+        "agent", "create", "ci-cop", "--prompt", "babysitter",
     ])
     assert r.exit_code == 0, r.output
     assert 'prompt = "babysitter"' in (home / "agents" / "ci-cop.toml").read_text()
     assert not (home / "prompts" / "ci-cop.md").exists()
 
-    r = runner.invoke(app, ["agent", "create", "nope", "--prompt", "ghost", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "create", "nope", "--prompt", "ghost"])
     assert r.exit_code == 1 and "prompts/ghost.md" in r.output
     r = runner.invoke(app, [
-        "agent", "create", "nope", "x", "--prompt", "babysitter", "--home", str(home),
+        "agent", "create", "nope", "x", "--prompt", "babysitter",
     ])
     assert r.exit_code == 1 and "drop the prompt argument" in r.output
 
@@ -831,10 +832,28 @@ def test_version_flag():
 
 
 def test_top_level_home_is_accepted(home: Path, monkeypatch):
+    """--home is one root option, before the subcommand, and it answers
+    with no QUORUM_HOME in the environment at all."""
     monkeypatch.delenv("QUORUM_HOME")
     r = runner.invoke(app, ["--home", str(home), "task", "list"])
     assert r.exit_code == 0, r.output
     assert "no tasks" in r.output
+
+
+def test_home_after_the_subcommand_is_no_longer_an_option(home: Path):
+    """The per-command copies are gone; the flag has one position."""
+    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    assert r.exit_code == 2
+
+
+def test_root_home_is_exported_to_the_environment(home: Path, monkeypatch):
+    """Anything spawned without an environment of its own — a [notify] hook
+    calling quorum back, a harness under a foreground supervisor — must
+    resolve the home the command line named, not the default one."""
+    monkeypatch.setenv("QUORUM_HOME", str(home / "somewhere-else"))
+    r = runner.invoke(app, ["--home", str(home), "task", "list"])
+    assert r.exit_code == 0, r.output
+    assert os.environ["QUORUM_HOME"] == str(home)
 
 
 def test_status_surfaces_attention_and_empty_state(home: Path):
@@ -864,17 +883,17 @@ def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
 
     # fresh scaffold: no harness uncommented yet. An unmade decision, not a
     # fault — one `–` line about it, and a green exit.
-    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    r = runner.invoke(app, ["doctor"])
     assert r.exit_code == 0, r.output
     assert "no harness configured yet" in r.output
 
     slug = setup_task_env(home, tmp_path)  # a [harness.fake] table, no default yet
-    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    r = runner.invoke(app, ["doctor"])
     assert r.exit_code == 1
     assert "default_harness is unset" in r.output
 
     cfg.write_text(cfg.read_text().replace('default_harness = ""', 'default_harness = "fake"'))
-    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    r = runner.invoke(app, ["doctor"])
     assert r.exit_code == 0, r.output
     assert "all checks passed" in r.output
     assert f"project {slug}" in r.output
@@ -882,37 +901,37 @@ def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
     # a harness whose binary is missing fails loudly
     with open(cfg, "a", encoding="utf-8") as f:
         f.write('\n[harness.ghost]\nstart = ["no-such-binary-xyz"]\n')
-    r = runner.invoke(app, ["doctor", "--home", str(home)])
+    r = runner.invoke(app, ["doctor"])
     assert r.exit_code == 1
     assert "no-such-binary-xyz" in r.output and "not found on PATH" in r.output
 
 
 def test_task_show_is_human_first_json_on_request(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake"])
     short = r.output.split("queued task ")[1].split(" ")[0]
 
-    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short])
     assert r.exit_code == 0
     assert "project:  " + slug in r.output
     assert "tidy the docs" in r.output
     assert not r.output.lstrip().startswith("{")
 
-    r = runner.invoke(app, ["task", "show", short, "--json", "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short, "--json"])
     record = json.loads(r.output)
     assert record["prompt"] == "tidy the docs"
 
 
 def test_list_commands_emit_json(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    runner.invoke(app, ["task", "add", slug, "a task", "--harness", "fake", "--home", str(home)])
-    tasks = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    runner.invoke(app, ["task", "add", slug, "a task", "--harness", "fake"])
+    tasks = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)
     assert tasks[0]["project"] == slug
-    projects = json.loads(runner.invoke(app, ["project", "list", "--json", "--home", str(home)]).output)
+    projects = json.loads(runner.invoke(app, ["project", "list", "--json"]).output)
     assert projects[0]["slug"] == slug
-    agents = json.loads(runner.invoke(app, ["agent", "list", "--json", "--home", str(home)]).output)
+    agents = json.loads(runner.invoke(app, ["agent", "list", "--json"]).output)
     assert any(a["name"] == "manager" for a in agents)
-    overview = json.loads(runner.invoke(app, ["status", "--json", "--home", str(home)]).output)
+    overview = json.loads(runner.invoke(app, ["status", "--json"]).output)
     assert overview["attention"]["count"] == 0
 
 
@@ -926,19 +945,19 @@ def test_status_and_task_show_surface_what_a_run_spent(
     cfg = home / "config.toml"
     cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
     monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
-    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake"])
     short = r.output.split("queued task ")[1].split(" ")[0]
-    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+    assert runner.invoke(app, ["task", "run", short]).exit_code == 0
 
-    r = runner.invoke(app, ["status", "--home", str(home)])
+    r = runner.invoke(app, ["status"])
     assert "$0.42 · 11.0k tok" in r.output
     assert "$!" in r.output  # over the configured budget — marked, not blocked
 
-    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
     assert row["usage"]["cost_usd"] == 0.42 and row["usage"]["runs"] == 1
     assert row["budget_overages"] == ["run 1: cost $0.42 > max_cost_per_run $0.10"]
 
-    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short])
     assert "usage:    $0.42 · 11.0k tok" in r.output
     assert "budget:   run 1: cost $0.42 > max_cost_per_run $0.10" in r.output
 
@@ -946,15 +965,15 @@ def test_status_and_task_show_surface_what_a_run_spent(
 def test_status_stays_clean_when_no_harness_reports_usage(home: Path, tmp_path: Path):
     """The fail-soft half: no usage reported, nothing shown, no zeros."""
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "quiet work", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "quiet work", "--harness", "fake"])
     short = r.output.split("queued task ")[1].split(" ")[0]
-    runner.invoke(app, ["task", "run", short, "--home", str(home)])
+    runner.invoke(app, ["task", "run", short])
 
-    r = runner.invoke(app, ["status", "--home", str(home)])
+    r = runner.invoke(app, ["status"])
     assert "tok" not in r.output and "$" not in r.output
-    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
     assert row["usage"] is None and row["usage_text"] == "" and row["budget_overages"] == []
-    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short])
     assert "usage:" not in r.output
 
 
@@ -992,7 +1011,7 @@ def test_project_set_reads_notes_from_a_file(home: Path, tmp_path: Path):
     conventions.write_text("Base every branch on main.\nRun `just check`.\n", encoding="utf-8")
 
     r = runner.invoke(
-        app, ["project", "set", slug, "--notes-file", str(conventions), "--home", str(home)]
+        app, ["project", "set", slug, "--notes-file", str(conventions)]
     )
     assert r.exit_code == 0, r.output
     assert ProjectRegistry(home).get(slug).notes == (
@@ -1002,13 +1021,12 @@ def test_project_set_reads_notes_from_a_file(home: Path, tmp_path: Path):
     # the two spellings of one field would silently pick a winner
     r = runner.invoke(
         app,
-        ["project", "set", slug, "--notes", "x", "--notes-file", str(conventions),
-         "--home", str(home)],
+        ["project", "set", slug, "--notes", "x", "--notes-file", str(conventions)],
     )
     assert r.exit_code == 1 and "not both" in _plain(r.output)
 
     r = runner.invoke(
-        app, ["project", "set", slug, "--notes-file", str(tmp_path / "nope.md"), "--home", str(home)]
+        app, ["project", "set", slug, "--notes-file", str(tmp_path / "nope.md")]
     )
     assert r.exit_code == 1 and "cannot read" in _plain(r.output)
     assert "Traceback" not in r.output
@@ -1028,14 +1046,14 @@ def test_project_set_reads_the_notes_the_way_a_prompt_is_read(home: Path, tmp_pa
     crlf.write_bytes(b"Base on develop.\r\nRun `just check`.\r\n")
 
     r = runner.invoke(
-        app, ["project", "set", slug, "--notes-file", str(crlf), "--home", str(home)]
+        app, ["project", "set", slug, "--notes-file", str(crlf)]
     )
     assert r.exit_code == 0, r.output
     assert ProjectRegistry(home).get(slug).notes == "Base on develop.\r\nRun `just check`.\r\n"
 
     r = runner.invoke(
         app,
-        ["project", "set", slug, "--notes-file", "-", "--home", str(home)],
+        ["project", "set", slug, "--notes-file", "-"],
         input="Base on develop.\r\n",
     )
     assert r.exit_code == 0, r.output
@@ -1044,7 +1062,7 @@ def test_project_set_reads_the_notes_the_way_a_prompt_is_read(home: Path, tmp_pa
     bad = tmp_path / "bad.md"
     bad.write_bytes(b"base on \xff\xfe develop\n")
     r = runner.invoke(
-        app, ["project", "set", slug, "--notes-file", str(bad), "--home", str(home)]
+        app, ["project", "set", slug, "--notes-file", str(bad)]
     )
     assert r.exit_code == 1 and "not valid UTF-8" in _plain(r.output)
     assert "Traceback" not in r.output
@@ -1053,7 +1071,7 @@ def test_project_set_reads_the_notes_the_way_a_prompt_is_read(home: Path, tmp_pa
 def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path: Path, monkeypatch):
     """Piped notes are gone the moment stdin is drained, so a typo in the
     slug must not eat them — the rule `task add` already follows."""
-    from quorum import cli
+    from quorum.cli import _common as cli
     from quorum.projects import ProjectRegistry
 
     slug = setup_task_env(home, tmp_path)
@@ -1062,7 +1080,7 @@ def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path
 
     r = runner.invoke(
         app,
-        ["project", "set", "ghots", "--notes-file", "-", "--home", str(home)],
+        ["project", "set", "ghots", "--notes-file", "-"],
         input="base on main\n",
     )
     assert r.exit_code == 1 and "no project" in _plain(r.output)
@@ -1070,7 +1088,7 @@ def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path
 
     r = runner.invoke(
         app,
-        ["project", "set", slug, "--notes-file", "-", "--home", str(home)],
+        ["project", "set", slug, "--notes-file", "-"],
         input="base on main\n",
     )
     assert r.exit_code == 0, r.output
@@ -1083,16 +1101,16 @@ def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
     answers "what will a run actually be told", and per-project text is part
     of that answer now."""
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["prompt", "list", "--home", str(home)])
+    r = runner.invoke(app, ["prompt", "list"])
     assert r.exit_code == 0
     assert "per-project" not in _plain(r.output)  # nothing to say, nothing listed
 
-    runner.invoke(app, ["project", "set", slug, "--notes", "base on main", "--home", str(home)])
+    runner.invoke(app, ["project", "set", slug, "--notes", "base on main"])
     repo = tmp_path / "cliproj"
     (repo / ".quorum").mkdir()
     (repo / ".quorum" / "task-preamble.local.md").write_text("run `just check`\n")
 
-    r = runner.invoke(app, ["prompt", "list", "--home", str(home)])
+    r = runner.invoke(app, ["prompt", "list"])
     assert r.exit_code == 0, r.output
     out = _plain(r.output)
     assert "per-project {project} block in task-preamble:" in out
@@ -1101,27 +1119,27 @@ def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
 
     # a block quorum cannot decode is dropped at render time — say so here
     (repo / ".quorum" / "task-preamble.local.md").write_bytes(b"just \xff\xfe check\n")
-    out = _plain(runner.invoke(app, ["prompt", "list", "--home", str(home)]).output)
+    out = _plain(runner.invoke(app, ["prompt", "list"]).output)
     assert "? .quorum/task-preamble.local.md unreadable" in out
 
     # ...and so is a block with nowhere to go, in a rewritten preamble
     (home / "prompts" / "task-preamble.md").write_text("my own rewritten preamble\n")
-    out = _plain(runner.invoke(app, ["prompt", "list", "--home", str(home)]).output)
+    out = _plain(runner.invoke(app, ["prompt", "list"]).output)
     assert "has no {project} slot — these blocks are never rendered" in out
 
 
 def test_project_add_validates_the_directory(home: Path, tmp_path: Path):
-    r = runner.invoke(app, ["project", "add", str(tmp_path / "nope"), "--home", str(home)])
+    r = runner.invoke(app, ["project", "add", str(tmp_path / "nope")])
     assert r.exit_code == 1
     assert "does not exist" in r.output
 
     plain = tmp_path / "plain-dir"
     plain.mkdir()
-    r = runner.invoke(app, ["project", "add", str(plain), "--home", str(home)])
+    r = runner.invoke(app, ["project", "add", str(plain)])
     assert r.exit_code == 1
     assert "not a git repository" in r.output and "--force" in r.output
 
-    r = runner.invoke(app, ["project", "add", str(plain), "--force", "--home", str(home)])
+    r = runner.invoke(app, ["project", "add", str(plain), "--force"])
     assert r.exit_code == 0, r.output
     assert "registered project" in r.output
 
@@ -1130,32 +1148,32 @@ def test_destructive_commands_pass_through_without_a_tty(home: Path, tmp_path: P
     """CliRunner's stdin is not a tty, so scripts and harness-driven agents
     keep working with no prompt; --yes is for interactive shells."""
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["project", "remove", slug, "--home", str(home)])
+    r = runner.invoke(app, ["project", "remove", slug])
     assert r.exit_code == 0
     assert "removed" in r.output
 
 
 def test_up_detach_and_down(home: Path):
-    r = runner.invoke(app, ["up", "--detach", "--home", str(home)])
+    r = runner.invoke(app, ["up", "--detach"])
     assert r.exit_code == 0, r.output
     assert "running detached" in r.output
     try:
-        r = runner.invoke(app, ["status", "--home", str(home)])
+        r = runner.invoke(app, ["status"])
         assert "supervisor: running" in r.output
-        r = runner.invoke(app, ["up", "--detach", "--home", str(home)])
+        r = runner.invoke(app, ["up", "--detach"])
         assert r.exit_code == 1 and "already running" in r.output
     finally:
-        r = runner.invoke(app, ["down", "--home", str(home)])
+        r = runner.invoke(app, ["down"])
     assert r.exit_code == 0, r.output
     assert "supervisor stopped" in r.output
-    r = runner.invoke(app, ["down", "--home", str(home)])
+    r = runner.invoke(app, ["down"])
     assert r.exit_code == 1
     assert "not running" in r.output
 
 
 def test_run_once_failure_is_one_line_not_a_traceback(home: Path):
     write_plugin(home, "boom2", BOOM_PLUGIN)
-    r = runner.invoke(app, ["agent", "run-once", "boom2", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "run-once", "boom2"])
     assert r.exit_code == 1
     assert r.exception is None or isinstance(r.exception, SystemExit)
     assert "intentional explosion" in r.output and "--verbose" in r.output
@@ -1166,11 +1184,11 @@ def test_task_add_after_chains_two_tasks(home: Path, tmp_path: Path):
     lets it through once the upstream finishes (#31)."""
     slug = setup_task_env(home, tmp_path)
 
-    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake"])
     first = r.output.split("queued task ")[1].split(" ")[0]
 
     r = runner.invoke(app, ["task", "add", slug, "review the PR", "--harness", "fake",
-                            "--after", first, "--home", str(home)])
+                            "--after", first])
     assert r.exit_code == 0, r.output
     assert f"waits on: {first}" in r.output
     second = r.output.split("queued task ")[1].split(" ")[0]
@@ -1182,20 +1200,20 @@ def test_task_add_after_chains_two_tasks(home: Path, tmp_path: Path):
     upstream, dependent = store.resolve(first), store.resolve(second)
     assert dependent.depends_on == [upstream.id]
 
-    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", second])
     assert f"after:    {first}  (waiting on {first})" in r.output
-    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    r = runner.invoke(app, ["task", "list"])
     assert f"waiting-on {first}" in r.output
 
-    r = runner.invoke(app, ["task", "run", second, "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", second])
     assert r.exit_code == 1 and f"waiting on {first}" in r.output
     assert store.resolve(second).runs == []
 
     # --force is the escape hatch, and the refusal lifts on its own once the
     # dependency reaches a terminal status
-    r = runner.invoke(app, ["task", "report", first, "shipped", "--status", "done", "--home", str(home)])
+    r = runner.invoke(app, ["task", "report", first, "shipped", "--status", "done"])
     assert r.exit_code == 0
-    r = runner.invoke(app, ["task", "run", second, "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", second])
     assert r.exit_code == 0, r.output
     assert len(store.resolve(second).runs) == 1
 
@@ -1203,7 +1221,7 @@ def test_task_add_after_chains_two_tasks(home: Path, tmp_path: Path):
 def test_task_add_after_rejects_an_unknown_dependency(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(app, ["task", "add", slug, "review something", "--harness", "fake",
-                            "--after", "zzzzzz", "--home", str(home)])
+                            "--after", "zzzzzz"])
     assert r.exit_code == 1 and "no task matching" in r.output
     from quorum.tasks import TaskStore
 
@@ -1212,13 +1230,13 @@ def test_task_add_after_rejects_an_unknown_dependency(home: Path, tmp_path: Path
 
 def test_task_run_force_overrides_the_dependency_refusal(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "build it", "--harness", "fake"])
     first = r.output.split("queued task ")[1].split(" ")[0]
     r = runner.invoke(app, ["task", "add", slug, "review it", "--harness", "fake",
-                            "--after", first, "--home", str(home)])
+                            "--after", first])
     second = r.output.split("queued task ")[1].split(" ")[0]
 
-    r = runner.invoke(app, ["task", "run", second, "--force", "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", second, "--force"])
     assert r.exit_code == 0, r.output
     from quorum.tasks import TaskStore
 
@@ -1231,27 +1249,27 @@ def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, m
     cfg = home / "config.toml"
     cfg.write_text(cfg.read_text().replace("worktree = true", "worktree = true\nmax_cost_per_run = 0.10"))
     monkeypatch.setenv("FAKE_HARNESS_USAGE", "0.42")
-    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "spendy work", "--harness", "fake"])
     short = r.output.split("queued task ")[1].split(" ")[0]
-    assert runner.invoke(app, ["task", "run", short, "--home", str(home)]).exit_code == 0
+    assert runner.invoke(app, ["task", "run", short]).exit_code == 0
 
     from quorum.tasks import TaskStore
 
     for extra in ([], ["--detach"]):
-        r = runner.invoke(app, ["task", "run", short, *extra, "--home", str(home)])
+        r = runner.invoke(app, ["task", "run", short, *extra])
         assert r.exit_code == 1, r.output
         assert "exceeded its budget" in r.output and "next run gated" in r.output
         assert "--force" in r.output
         assert len(TaskStore(home).resolve(short).runs) == 1
 
-    r = runner.invoke(app, ["task", "list", "--home", str(home)])
+    r = runner.invoke(app, ["task", "list"])
     assert "$! GATED" in r.output
-    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
     assert row["budget_gated"] is True
-    r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", short])
     assert "gated:    the last run exceeded its budget" in r.output
 
-    r = runner.invoke(app, ["task", "run", short, "--force", "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", short, "--force"])
     assert r.exit_code == 0, r.output
     assert len(TaskStore(home).resolve(short).runs) == 2
 
@@ -1263,28 +1281,27 @@ def test_perpetual_tasks_are_queued_and_badged_everywhere(home: Path, tmp_path: 
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(
         app,
-        ["task", "add", slug, "watch CI forever", "--perpetual", "--harness", "fake",
-         "--home", str(home)],
+        ["task", "add", slug, "watch CI forever", "--perpetual", "--harness", "fake"],
     )
     assert r.exit_code == 0, r.output
     assert "queued perpetual task" in r.output and "task cancel" in r.output
     short = r.output.split("queued perpetual task ")[1].split(" ")[0]
 
-    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
     assert row["perpetual"] is True
 
-    assert "∞" in runner.invoke(app, ["task", "list", "--home", str(home)]).output
-    assert "∞" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "∞" in runner.invoke(app, ["task", "list"]).output
+    assert "∞" in runner.invoke(app, ["status"]).output
     assert "∞" in runner.invoke(app, ["status", "--legend"]).output
-    assert "perpetual" in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
+    assert "perpetual" in runner.invoke(app, ["task", "show", short]).output
 
 
 def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
-    row = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)[0]
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake"])
+    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
     assert row["perpetual"] is False
-    assert "∞" not in runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    assert "∞" not in runner.invoke(app, ["task", "list"]).output
 
 
 # -- the merged observation (#57) --------------------------------------------
@@ -1304,27 +1321,27 @@ def test_a_merged_or_closed_pr_is_badged_everywhere(home: Path, tmp_path: Path):
     store.update(dropped.id, pr_state="closed", pr_state_at="2026-01-01T00:00:00Z")
     store.add(slug, "never observed", "fake", status="done")
 
-    rows = json.loads(runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output)
+    rows = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)
     assert [r["pr_state"] for r in rows] == ["merged", "closed", None]
 
-    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    listing = runner.invoke(app, ["task", "list"]).output
     assert "done ✔" in listing and "done ⊘" in listing
-    assert "✔" in runner.invoke(app, ["status", "--home", str(home)]).output
+    assert "✔" in runner.invoke(app, ["status"]).output
     assert "✔" in runner.invoke(app, ["status", "--legend"]).output
-    shown = runner.invoke(app, ["task", "show", shipped.short_id, "--home", str(home)]).output
+    shown = runner.invoke(app, ["task", "show", shipped.short_id]).output
     assert "pr state: merged (observed 2026-01-01T00:00:00Z)" in shown
 
 
 def test_a_task_with_no_observed_pr_state_is_not_badged(home: Path, tmp_path: Path):
     """Absence means "never observed" — no gh, no PR — never "not merged"."""
     slug = setup_task_env(home, tmp_path)
-    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake", "--home", str(home)])
-    listing = runner.invoke(app, ["task", "list", "--home", str(home)]).output
+    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake"])
+    listing = runner.invoke(app, ["task", "list"]).output
     assert "✔" not in listing and "⊘" not in listing
     short = json.loads(
-        runner.invoke(app, ["task", "list", "--json", "--home", str(home)]).output
+        runner.invoke(app, ["task", "list", "--json"]).output
     )[0]["id_short"]
-    assert "pr state" not in runner.invoke(app, ["task", "show", short, "--home", str(home)]).output
+    assert "pr state" not in runner.invoke(app, ["task", "show", short]).output
 
 
 # -- one load-config fallback (#34) ------------------------------------------
@@ -1512,18 +1529,18 @@ def test_status_and_task_list_stay_greppable_when_piped(home: Path, tmp_path: Pa
     """End to end through the CLI (CliRunner is not a tty): both listings
     carry every id and status, the PR as `#N`, and `task show` the full URL."""
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["task", "add", slug, "first", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "first", "--harness", "fake"])
     first = r.output.split("queued task ")[1].split(" ")[0]
-    r = runner.invoke(app, ["task", "add", slug, "second", "--harness", "fake", "--home", str(home)])
+    r = runner.invoke(app, ["task", "add", slug, "second", "--harness", "fake"])
     second = r.output.split("queued task ")[1].split(" ")[0]
     url = "https://github.com/kvndhrty/quorum/pull/49"
     r = runner.invoke(
-        app, ["task", "report", second, "--status", "pr", "--pr-url", url, "opened", "--home", str(home)]
+        app, ["task", "report", second, "--status", "pr", "--pr-url", url, "opened"]
     )
     assert r.exit_code == 0, r.output
 
     for argv in (["task", "list"], ["status"]):
-        r = runner.invoke(app, [*argv, "--home", str(home)])
+        r = runner.invoke(app, [*argv])
         assert r.exit_code == 0, r.output
         assert "\x1b[" not in r.output
         rows = {line.split()[1]: line for line in r.output.split("\n") if f"  {slug}  " in line}
@@ -1534,29 +1551,29 @@ def test_status_and_task_list_stay_greppable_when_piped(home: Path, tmp_path: Pa
         header = next(line for line in r.output.split("\n") if line.startswith("id  "))
         assert header.split() == ["id", "project", "status", "harness", "report", "pr"]
 
-    r = runner.invoke(app, ["task", "show", second, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", second])
     assert f"pr:       {url}" in r.output
 
 
 def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
-    runner.invoke(app, ["project", "set", slug, "--deadline", "2099-01-01", "--home", str(home)])
+    runner.invoke(app, ["project", "set", slug, "--deadline", "2099-01-01"])
 
-    r = runner.invoke(app, ["agent", "list", "--home", str(home)])
+    r = runner.invoke(app, ["agent", "list"])
     assert r.exit_code == 0, r.output
     lines = r.output.rstrip("\n").split("\n")
     assert lines[0].split()[:4] == ["name", "type", "status", "schedule"]
     manager = next(line for line in lines if "manager" in line)
     assert manager.startswith("○ manager") and "never-ran" in manager
 
-    r = runner.invoke(app, ["status", "--home", str(home)])
+    r = runner.invoke(app, ["status"])
     agents = r.output.split("agents:\n")[1].split("\n")[0].split()
     assert agents[:3] == ["name", "status", "schedule"] and "type" not in agents
     projects = r.output.split("projects:\n")[1].rstrip("\n").split("\n")
     assert projects[0].split() == ["slug", "due"]  # name == slug is not repeated
     assert projects[1].startswith(slug) and "2099-01-01 (" in projects[1]
 
-    r = runner.invoke(app, ["project", "list", "--home", str(home)])
+    r = runner.invoke(app, ["project", "list"])
     assert r.exit_code == 0 and r.output.split("\n")[1].startswith(slug)
 
 
@@ -1565,7 +1582,7 @@ def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
 
 def _queue(home: Path, slug: str, prompt: str, *extra: str) -> str:
     r = runner.invoke(
-        app, ["task", "add", slug, prompt, "--harness", "fake", *extra, "--home", str(home)]
+        app, ["task", "add", slug, prompt, "--harness", "fake", *extra]
     )
     assert r.exit_code == 0, r.output
     return r.output.split("queued task ")[1].split(" ")[0]
@@ -1586,15 +1603,14 @@ def test_task_report_handoff_from_a_file_and_task_show_prints_it_in_full(
 
     r = runner.invoke(
         app,
-        ["task", "report", upstream, "shipped", "--status", "done", "--handoff", str(handoff),
-         "--home", str(home)],
+        ["task", "report", upstream, "shipped", "--status", "done", "--handoff", str(handoff)],
     )
     assert r.exit_code == 0, r.output
     assert f"task {upstream}: done — handoff stored ({len(body.encode())} bytes)" in r.output
     full_id = TaskStore(home).resolve(upstream).id
     assert tasks.read_handoff(home, full_id) == body
 
-    r = runner.invoke(app, ["task", "show", upstream, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", upstream])
     assert r.exit_code == 0, r.output
     # the reverse read: who waits on this task, and how to hand off to them
     assert f"dependents: {dependent}" in r.output
@@ -1605,7 +1621,7 @@ def test_task_report_handoff_from_a_file_and_task_show_prints_it_in_full(
         assert f"  {line}" in r.output or line == ""
 
     # a task with no dependents and no handoff shows neither line
-    r = runner.invoke(app, ["task", "show", dependent, "--home", str(home)])
+    r = runner.invoke(app, ["task", "show", dependent])
     assert "dependents:" not in r.output and "handoff (" not in r.output
 
 
@@ -1617,7 +1633,7 @@ def test_task_report_handoff_from_stdin(home: Path, tmp_path: Path):
     short = _queue(home, slug, "build it")
     r = runner.invoke(
         app,
-        ["task", "report", short, "--status", "done", "--handoff", "-", "--home", str(home)],
+        ["task", "report", short, "--status", "done", "--handoff", "-"],
         input="from stdin\n  verbatim, indentation kept\n",
     )
     assert r.exit_code == 0, r.output
@@ -1639,7 +1655,7 @@ def test_task_report_refuses_an_empty_or_unreadable_handoff(home: Path, tmp_path
 
     r = runner.invoke(
         app,
-        ["task", "report", short, "--status", "done", "--handoff", str(blank), "--home", str(home)],
+        ["task", "report", short, "--status", "done", "--handoff", str(blank)],
     )
     assert r.exit_code == 1
     assert "the handoff is empty" in r.output
@@ -1649,8 +1665,7 @@ def test_task_report_refuses_an_empty_or_unreadable_handoff(home: Path, tmp_path
 
     r = runner.invoke(
         app,
-        ["task", "report", short, "--status", "done", "--handoff", str(tmp_path / "nope.md"),
-         "--home", str(home)],
+        ["task", "report", short, "--status", "done", "--handoff", str(tmp_path / "nope.md")],
     )
     assert r.exit_code == 1
     assert "cannot read" in r.output

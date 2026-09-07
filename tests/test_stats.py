@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from quorum import stats, tasks, usage
+from quorum import fsio, stats, tasks, usage
 from quorum.cli import app
 from quorum.tasks import TaskRun, TaskStore
 
@@ -86,18 +86,40 @@ def rows_by_key(payload: dict) -> dict[str, dict]:
     return {r["key"]: r for r in payload["rows"]}
 
 
-def test_parse_since_accepts_units_and_rejects_the_rest():
-    assert stats.parse_since("7d") == timedelta(days=7)
-    assert stats.parse_since(" 36h ") == timedelta(hours=36)
-    assert stats.parse_since("2w") == timedelta(weeks=2)
-    assert stats.parse_since("90m") == timedelta(minutes=90)
+def test_parse_window_accepts_units_and_rejects_the_rest():
+    """One window grammar for every --since / --before / --older-than."""
+    assert fsio.parse_window("7d") == timedelta(days=7)
+    assert fsio.parse_window(" 36h ") == timedelta(hours=36)
+    assert fsio.parse_window("2w") == timedelta(weeks=2)
+    assert fsio.parse_window("90m") == timedelta(minutes=90)
+    assert fsio.parse_window("30s") == timedelta(seconds=30)
     for bad in ("", "7", "d", "0d", "-1d", "3x", "1.5d", "7 days"):
-        with pytest.raises(ValueError, match="--since wants"):
-            stats.parse_since(bad)
-    # a count a timedelta itself refuses is still a ValueError, not an
-    # OverflowError out of the constructor
-    with pytest.raises(ValueError, match="longer than any date"):
-        stats.parse_since("9" * 30 + "d")
+        with pytest.raises(ValueError, match="invalid window"):
+            fsio.parse_window(bad)
+    # A count no date can express is a ValueError either way it fails: the
+    # timedelta constructor refuses the first, and only the subtraction
+    # from now refuses the second.
+    for too_long in ("9" * 30 + "d", "142857142w"):
+        with pytest.raises(ValueError, match="longer than any date"):
+            fsio.parse_window(too_long)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["usage", "--since", "142857142w"], id="usage"),
+        pytest.param(["board", "read", "--since", "142857142w"], id="board-read"),
+        pytest.param(["board", "clear", "attention", "--before", "142857142w"], id="board-clear"),
+        pytest.param(["task", "prune", "--older-than", "142857142w"], id="task-prune"),
+    ],
+)
+def test_every_window_option_refuses_an_impossible_span_the_same_way(home: Path, args):
+    """A window a timedelta holds but no instant is far enough along for used
+    to reach three of these four as an OverflowError traceback."""
+    r = runner.invoke(app, args)
+    assert r.exit_code == 2, r.output
+    assert "longer than any date" in r.output
+    assert "Traceback" not in r.output
 
 
 def test_by_project_counts_every_task_and_sums_only_what_was_reported(home: Path):
@@ -273,7 +295,7 @@ def test_format_span_and_summary_cells():
 
 def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
     build_home(home)
-    r = runner.invoke(app, ["usage", "--by", "harness", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "harness"])
     assert r.exit_code == 0, r.output
     assert "\x1b[" not in r.output
     lines = r.output.split("\n")
@@ -300,7 +322,7 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
         data = json.loads(tasks.task_json_path(home, t.id).read_text())
         data.update(pr_state=None, pr_state_at=None)
         tasks.task_json_path(home, t.id).write_text(json.dumps(data))
-    r = runner.invoke(app, ["usage", "--by", "project", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "project"])
     assert r.exit_code == 0, r.output
     header = r.output.split("\n")[1].split()
     assert "merged" not in header and "done→merged" not in header and "queue→done" in header
@@ -308,7 +330,7 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
 
 def test_cli_reported_column_says_what_the_cost_covers(home: Path):
     build_home(home)
-    r = runner.invoke(app, ["usage", "--by", "project", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "project"])
     assert r.exit_code == 0, r.output
     lines = r.output.split("\n")
     assert "reported" in lines[1].split()
@@ -320,7 +342,7 @@ def test_cli_reported_column_says_what_the_cost_covers(home: Path):
     codex = next(
         line
         for line in runner.invoke(
-            app, ["usage", "--by", "harness", "--home", str(home)]
+            app, ["usage", "--by", "harness"]
         ).output.split("\n")
         if line.startswith("codex ")
     )
@@ -330,41 +352,42 @@ def test_cli_reported_column_says_what_the_cost_covers(home: Path):
 def test_cli_by_agent_and_since_and_json(home: Path):
     usage.record_agent_run(home, "manager", "r1", CLAUDE_RUN, now=T0, outcome="ok", duration_seconds=12)
     usage.record_agent_run(home, "manager", "r2", None, now=T0 + timedelta(hours=1), outcome="timeout", duration_seconds=900)
-    r = runner.invoke(app, ["usage", "--by", "agent", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent"])
     assert r.exit_code == 0, r.output
     lines = r.output.split("\n")
     assert lines[1].split() == ["agent", "runs", "reported", "timeout", "cost", "tokens", "duration"]
     assert lines[2].split() == ["manager", "2", "1/2", "1", "$1.50", "500", "7m36s"]
 
-    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m", "--json", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
     assert payload["by"] == "agent" and payload["since_seconds"] == 1800
     assert payload["rows"] == [] and payload["total"] is None  # T0 is years before now
 
     build_home(home)
-    r = runner.invoke(app, ["usage", "--since", "1w", "--json", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--since", "1w", "--json"])
     payload = json.loads(r.output)
     assert payload["by"] == "project" and payload["cutoff"] is not None
     assert all(row["queue_to_run"] is None or "median_seconds" in row["queue_to_run"] for row in payload["rows"])
 
 
 def test_cli_says_when_nothing_is_recorded(home: Path):
-    r = runner.invoke(app, ["usage", "--home", str(home)])
+    r = runner.invoke(app, ["usage"])
     assert r.exit_code == 0, r.output
     assert r.output.split("\n")[1] == "nothing recorded"
-    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "1d", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "1d"])
     assert r.exit_code == 0 and "nothing recorded in that window" in r.output
 
 
 def test_cli_rejects_a_bad_since_and_an_unknown_dimension(home: Path):
-    r = runner.invoke(app, ["usage", "--since", "3x", "--home", str(home)])
-    assert r.exit_code == 1 and "--since wants a positive count" in r.output
-    # a window no instant is that far along: the same rejection, not a traceback
-    r = runner.invoke(app, ["usage", "--since", "99999999d", "--home", str(home)])
-    assert r.exit_code == 1 and "--since window reaches before any date" in r.output
+    r = runner.invoke(app, ["usage", "--since", "3x"])
+    assert r.exit_code == 2 and "invalid window" in r.output
+    # a window no instant is that far along is the same rejection (its own
+    # test above covers all four commands), never a traceback
+    r = runner.invoke(app, ["usage", "--since", "99999999d"])
+    assert r.exit_code == 2 and "longer than any date" in r.output
     assert "Traceback" not in r.output
-    r = runner.invoke(app, ["usage", "--by", "model", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "model"])
     assert r.exit_code != 0 and "project" in r.output
-    r = runner.invoke(app, ["usage", "--by", "WEEK", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "WEEK"])
     assert r.exit_code == 0 and r.output.startswith("usage by week")

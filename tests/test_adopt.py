@@ -36,7 +36,7 @@ def adopt(home: Path, repo: Path, *extra: str):
     r = runner.invoke(
         app,
         ["task", "adopt", "fix the flaky auth test", "--dir", str(repo),
-         "--session", "sess-live-1", "--json", "--home", str(home), *extra],
+         "--session", "sess-live-1", "--json", *extra],
     )
     assert r.exit_code == 0, r.output
     out = json.loads(r.output.strip().splitlines()[-1])
@@ -191,7 +191,7 @@ def test_task_run_detach_refuses_attached_tasks(home: Path, repo: Path):
     """--detach must surface the substrate rail in the parent, not report a
     green success and let only the detached child refuse."""
     task = adopt(home, repo)
-    r = runner.invoke(app, ["task", "run", task.short_id, "--detach", "--home", str(home)])
+    r = runner.invoke(app, ["task", "run", task.short_id, "--detach"])
     assert r.exit_code != 0
     assert "attached to a live interactive session" in r.output
 
@@ -214,7 +214,7 @@ def test_hook_session_end_records_the_event(home: Path, repo: Path):
 
 def test_detach_makes_the_task_runnable_again(home: Path, repo: Path):
     task = adopt(home, repo)
-    r = runner.invoke(app, ["task", "detach", task.short_id, "--home", str(home)])
+    r = runner.invoke(app, ["task", "detach", task.short_id])
     assert r.exit_code == 0, r.output
     fresh = TaskStore(home).get(task.id)
     assert fresh.attached is False

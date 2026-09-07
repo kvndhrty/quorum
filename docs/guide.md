@@ -23,7 +23,8 @@ writing your own agents. (Internals and design rationale live in
 Five words carry the whole system:
 
 - **Home** — one directory (`~/.quorum` by default, `$QUORUM_HOME` or
-  `--home` to override) holding every durable byte quorum touches. Plain
+  `quorum --home <dir> <command>` to override — the flag goes before the
+  subcommand) holding every durable byte quorum touches. Plain
   JSON/JSONL/TOML/Markdown; `ls` and `cat` are debuggers; copying the
   directory migrates the whole setup. One more resolution rule to know: a
   `quorum-home/` directory in the current working directory wins over

@@ -19,7 +19,8 @@ import subprocess
 import threading
 import time
 import unicodedata
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -95,6 +96,141 @@ def parse_iso(s: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def parse_iso_or(value: Any, default: T = None) -> datetime | T:
+    """The timestamp in `value`, or `default` when it is not one.
+
+    The fail-soft companion to `parse_iso`, and the reason readers do not
+    each write their own try/except: everything quorum writes goes through
+    `iso`, so a value that fails here came off a torn line, a hand-edited
+    file or a harness that wrote its own — which a listing should survive.
+    """
+    if not isinstance(value, str) or not value:
+        return default
+    try:
+        return parse_iso(value)
+    except ValueError:
+        return default
+
+
+def display_ts(value: Any) -> str:
+    """A stored timestamp as a surface prints it: `2026-09-07 11:42:03`.
+
+    One spelling of the same two edits (drop the `T`, drop the trailing
+    `Z`) that every listing, pane and log line used to make for itself.
+    Anything that is not a timestamp — an em dash a caller substituted for
+    a missing value, say — passes through unchanged.
+    """
+    return str(value or "").replace("T", " ").rstrip("Z")
+
+
+_WINDOW = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$")
+_WINDOW_UNITS = {
+    "s": "seconds",
+    "m": "minutes",
+    "h": "hours",
+    "d": "days",
+    "w": "weeks",
+}
+
+
+def looks_like_window(text: str) -> bool:
+    """Whether `text` is shaped like a window at all — a count and one of the
+    five units. What it does not answer is whether that window is usable:
+    a caller that also accepts a date uses this to decide which of the two
+    mistakes to report, and `parse_window` decides the rest.
+    """
+    return bool(_WINDOW.match(text or ""))
+
+
+def parse_window(text: str) -> timedelta:
+    """`90m` / `36h` / `7d` / `2w` / `30s` → a timedelta.
+
+    The one window grammar in quorum: `usage --since`, `board read --since`,
+    `board clear --before` and `task prune --older-than` all take these five
+    units, so a person who has learned one has learned them all.
+
+    ValueError for anything else, including `0d`: an empty window is a typo,
+    not a request. A count no date can express is a ValueError too, not the
+    OverflowError it would otherwise be — whether the count overflows the
+    timedelta itself (`9999...d`) or only the subtraction from now
+    (`142857142w`, a span a timedelta holds but no instant is far enough
+    along for). Both are the same typo to a person, so both raise the same
+    message and every window option refuses them the same way.
+    """
+    m = _WINDOW.match(text or "")
+    if not m or int(m.group(1)) <= 0:
+        raise ValueError(
+            f"invalid window {text!r} — a positive count and a unit, e.g. 90m, 24h, 7d, 2w"
+        )
+    too_long = ValueError(f"window {text!r} is longer than any date can express")
+    try:
+        delta = timedelta(**{_WINDOW_UNITS[m.group(2)]: int(m.group(1))})
+    except OverflowError:
+        raise too_long from None
+    try:
+        window_start(utc_now(), delta)
+    except ValueError:
+        raise too_long from None
+    return delta
+
+
+def window_start(now: datetime, delta: timedelta) -> datetime:
+    """`now - delta`, as a ValueError rather than an OverflowError when the
+    result is before any date a datetime can name.
+
+    Every reader that takes a window subtracts it from some instant, and
+    `datetime` raises OverflowError there rather than at the timedelta —
+    which reached a person as a traceback in three of the four commands.
+    """
+    try:
+        return now - delta
+    except OverflowError:
+        raise ValueError(f"window of {delta} reaches before any date") from None
+
+
+def resolve_handle(
+    handle: str,
+    candidates: Iterable[str],
+    *,
+    what: str = "handle",
+    render: Callable[[str], str] | None = None,
+) -> str:
+    """The one candidate `handle` names: a full id, a unique prefix, or a
+    unique suffix, matched case-insensitively.
+
+    Every id quorum hands a person is a ULID, and what a person has in front
+    of them is usually the tail of one (`short_id`), copied off another line
+    of output — so tasks, board messages, notes, archived tasks and agent
+    runs all accept the same three forms. This is the one implementation of
+    that grammar; callers pass their own candidate ids.
+
+    An exact id wins outright, so an id that also happens to be another id's
+    prefix or suffix is never ambiguous. Raises KeyError(handle) when
+    nothing matches (an empty handle included: it would match everything)
+    and ValueError when more than one does, naming the matches with
+    `render` — the short form, unless a caller says otherwise. Callers turn
+    both into their own messages.
+    """
+    wanted = handle.strip().upper()
+    if not wanted:
+        raise KeyError(handle)
+    ids = list(candidates)
+    for candidate in ids:
+        if candidate.upper() == wanted:
+            return candidate
+    matches = [
+        c for c in ids if c.upper().startswith(wanted) or c.upper().endswith(wanted)
+    ]
+    if not matches:
+        raise KeyError(handle)
+    if len(matches) > 1:
+        show = render or (lambda c: c[-6:].lower())
+        raise ValueError(
+            f"{what} {handle!r} is ambiguous: " + ", ".join(show(m) for m in matches)
+        )
+    return matches[0]
 
 
 def slugify(text: str) -> str:

@@ -71,10 +71,7 @@ def _estimate_next_run(schedule: str, hb: dict[str, Any], now) -> str | None:
     except Exception:
         return None
     if kwargs.pop("trigger") == "interval":
-        try:
-            base = fsio.parse_iso(hb["last_end"]) if hb.get("last_end") else now
-        except (KeyError, ValueError):
-            base = now
+        base = fsio.parse_iso_or(hb.get("last_end"), now)
         nxt = base + timedelta(**kwargs)
         return fsio.iso(max(nxt, now))  # overdue → due as soon as the supervisor is back
     try:
@@ -99,11 +96,8 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
         if not acfg.enabled or status in ("paused", "removed"):
             next_run = None
         else:
-            try:
-                stale = next_run is None or fsio.parse_iso(next_run) < now
-            except ValueError:
-                stale = True
-            if stale:
+            due = fsio.parse_iso_or(next_run)
+            if due is None or due < now:
                 est = _estimate_next_run(acfg.schedule, hb, now)
                 if est:
                     next_run, estimated = est, True
@@ -262,6 +256,87 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     return rows
 
 
+# -- one rendering of a task row -------------------------------------------
+#
+# `task_rows` returns facts; these four turn them into the marks a person
+# reads, once, for every surface. `quorum status --legend` names exactly
+# this set of glyphs, and `usage_text` above set the precedent: a thing
+# shown two ways is rendered here and copied there.
+
+
+def task_marker(row: dict[str, Any]) -> str:
+    """The one-character state marker that leads a task's id cell.
+
+    Liveness first, because it is what a reader is looking for: an adopted
+    session, a live run, then the terminal statuses quorum itself knows
+    (`done`, `blocked`), then `·` for a status only the harness understands.
+    """
+    if row.get("attached"):
+        return "⚭"
+    if row.get("running"):
+        return "▶"
+    return {"done": "✓", "blocked": "✗"}.get(row.get("status") or "", "·")
+
+
+def task_badges(row: dict[str, Any]) -> str:
+    """The marks that follow a task's status word: `∞` for a perpetual task,
+    then the forge's word about its pull request.
+
+    "done ✔" is delivered and "done ⊘" is a pull request somebody closed
+    unmerged. The absence of both means nothing was ever observed — the
+    manager tick materializes `pr_state`, so a home with no `gh` never
+    badges one.
+    """
+    marks = " ∞" if row.get("perpetual") else ""
+    return marks + {"merged": " ✔", "closed": " ⊘"}.get(row.get("pr_state") or "", "")
+
+
+def task_flags(row: dict[str, Any]) -> str:
+    """Stranded work and unsatisfied dependencies: the observations that ask
+    a reader (or the manager) to decide something.
+
+    Only `waiting-on` blocks a run. `DEP-FAILED` / `DEP-MISSING` /
+    `DEP-CYCLE` name dependencies that can never finish, so nothing waits on
+    them and the decision is a person's.
+    """
+    flags = []
+    git = row.get("git")
+    if git and (git["dirty"] or git["unpushed"]):
+        risks = []
+        if git["dirty"]:
+            risks.append(f"{git['dirty']} uncommitted")
+        if git["unpushed"]:
+            risks.append(f"{git['unpushed']} unpushed")
+        flags.append("⚠ " + ", ".join(risks))
+    if row.get("waiting_on"):
+        flags.append(f"waiting-on {','.join(row['waiting_on'])}")
+    if row.get("dep_failed"):
+        flags.append(f"DEP-FAILED {','.join(row['dep_failed'])}")
+    if row.get("dep_missing"):
+        flags.append(f"DEP-MISSING {','.join(row['dep_missing'])}")
+    if row.get("dep_cycle"):
+        flags.append("DEP-CYCLE")
+    return "  ".join(flags)
+
+
+def usage_badge(row: dict[str, Any]) -> str:
+    """A task's spend with the budget marks on it, or "" when the harness
+    reported nothing.
+
+    `$!` says a run went over `[tasks].max_cost_per_run` /
+    `max_tokens_per_run`; `$! GATED` says the *last* run did, which is the
+    one the runner refuses to follow until `--force` or a cheaper run. The
+    gate is the sharper case, so it is spelled out rather than left to the
+    refusal.
+    """
+    text = row.get("usage_text") or ""
+    if row.get("budget_gated"):
+        return f"{text} $! GATED".strip()
+    if row.get("budget_overages"):
+        return f"{text} $!".strip()
+    return text
+
+
 # -- task history ----------------------------------------------------------
 #
 # One chronological list of what happened to a task, read back out of the
@@ -299,11 +374,7 @@ def _at_parses(at: Any) -> bool:
     """Whether a row's `at` is a stamp the list can order by. Everything
     quorum writes goes through `fsio.iso`, so a value that fails here came
     off a torn line, a hand-edited file, or a harness that wrote its own."""
-    try:
-        fsio.parse_iso(str(at))
-    except (TypeError, ValueError):
-        return False
-    return True
+    return fsio.parse_iso_or(str(at)) is not None
 
 
 def _human_at(at: Any) -> str:
@@ -311,7 +382,7 @@ def _human_at(at: Any) -> str:
     parse. A row quorum cannot place in time is still shown — dropping it
     would lose the event — so the line says the time is not to be trusted
     instead of presenting a position in the list it did not earn."""
-    text = str(at or "").replace("T", " ").rstrip("Z")
+    text = fsio.display_ts(at)
     if _at_parses(at):
         return text
     return f"? {text}".rstrip()

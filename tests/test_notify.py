@@ -520,7 +520,7 @@ def test_arming_and_the_per_tick_cap_bound_the_parsing_too(home: Path, delivered
 
 def test_notify_test_sends_through_the_template_and_touches_nothing(home: Path, delivered):
     configure(home)
-    result = runner.invoke(app, ["notify", "test", "hello there", "--home", str(home)])
+    result = runner.invoke(app, ["notify", "test", "hello there"])
     assert result.exit_code == 0, result.output
     assert "delivered" in result.output
     assert delivered() == [["-m", "hello there"]]
@@ -530,7 +530,7 @@ def test_notify_test_sends_through_the_template_and_touches_nothing(home: Path, 
 
 def test_notify_test_is_loud_about_a_template_that_cannot_run(home: Path, tmp_path: Path):
     configure(home, command=[str(tmp_path / "no-such-notifier"), "{text}"])
-    result = runner.invoke(app, ["notify", "test", "hello", "--home", str(home)])
+    result = runner.invoke(app, ["notify", "test", "hello"])
     assert result.exit_code == 1
     assert "not delivered" in result.output and "not found" in result.output
 
@@ -538,12 +538,12 @@ def test_notify_test_is_loud_about_a_template_that_cannot_run(home: Path, tmp_pa
 def test_notify_test_is_loud_about_a_nonzero_exit(home: Path, delivered, monkeypatch):
     configure(home)
     monkeypatch.setenv("FAKE_NOTIFY_MODE", "fail")
-    result = runner.invoke(app, ["notify", "test", "hello", "--home", str(home)])
+    result = runner.invoke(app, ["notify", "test", "hello"])
     assert result.exit_code == 1
     assert "exit 3" in result.output
 
 
 def test_notify_test_without_a_table_says_how_to_add_one(home: Path):
-    result = runner.invoke(app, ["notify", "test", "hello", "--home", str(home)])
+    result = runner.invoke(app, ["notify", "test", "hello"])
     assert result.exit_code == 1
     assert "no [notify] table" in result.output
