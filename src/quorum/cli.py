@@ -287,6 +287,37 @@ def _resolve_task(home: Path, prefix: str):
         raise _fail(str(e)) from None
 
 
+def _journal_task(home: Path, task, action: str, args: str | None = None) -> None:
+    """Journal one action against a task.
+
+    The three fields every task command records — the action, the short id
+    and the status the task had at the time — spelled once, so the journal
+    the next digest reads back cannot drift between commands. Every caller
+    reaches this only *after* its own validation: a journal line says
+    something happened, and it costs a slot of an agent's per-run action
+    cap, so a refused command must not write one.
+    """
+    _actor_guard(home, action, target=task.short_id, target_status=task.status, args=args)
+
+
+def _task_action(action: str, task_id: str, args: str | None = None):
+    """The whole prelude of a task command that has nothing of its own to
+    check: resolve the home, resolve the task, journal the action. Returns
+    the home and the task.
+
+    Commands with a check between the resolution and the journal line keep
+    those three steps apart — `task report` reads its handoff first, `task
+    detach` refuses a task that is not attached, `task cancel` asks before
+    it kills a runner, `task run` applies the dependency and budget
+    refusals. Forcing them through here would move the journal line in
+    front of the refusal it belongs behind.
+    """
+    home = get_home()
+    task = _resolve_task(home, task_id)
+    _journal_task(home, task, action, args)
+    return home, task
+
+
 @app.command()
 def init() -> None:
     """Create the QUORUM_HOME directory tree and a starter config.toml."""
@@ -1314,7 +1345,7 @@ def task_adopt(
 
 
 @task_app.command("detach")
-def task_detach(task_id: str, ) -> None:
+def task_detach(task_id: str) -> None:
     """Detach an adopted task from its interactive session — after this the
     manager may run it headless like any other task."""
     from .tasks import TaskStore
@@ -1323,7 +1354,7 @@ def task_detach(task_id: str, ) -> None:
     task = _resolve_task(target, task_id)
     if not task.attached:
         raise _fail(f"task {task.short_id} is not attached")
-    _actor_guard(target, "task.detach", target=task.short_id, target_status=task.status)
+    _journal_task(target, task, "task.detach")
     TaskStore(target).update(task.id, attached=False)
     typer.secho(f"task {task.short_id} detached — runnable again", fg="green")
 
@@ -1709,10 +1740,7 @@ def task_run(
         over = budget_blockers(config.tasks, task)
         if over:
             raise _fail(budget_refusal(task, over))
-    _actor_guard(
-        target, "task.run", target=task.short_id, target_status=task.status,
-        args="--fresh-session" if fresh_session else None,
-    )
+    _journal_task(target, task, "task.run", "--fresh-session" if fresh_session else None)
     if detach:
         pid = launch_detached(target, task.id, force=force, fresh_session=fresh_session)
         typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task log {task.short_id} -f`", fg="green")
@@ -1824,8 +1852,9 @@ def task_report(
     body = _verbatim_text(handoff, "handoff") if handoff is not None else None
     if body is not None and not body.strip():
         raise _fail("the handoff is empty — give it a body, or leave --handoff off")
-    _actor_guard(target, "task.report", target=task.short_id, target_status=task.status,
-                   args=status + (" +handoff" if body is not None else ""))
+    _journal_task(
+        target, task, "task.report", status + (" +handoff" if body is not None else "")
+    )
     tasks_mod.report(target, task.id, status=status, text=text, pr_url=pr_url, handoff=body)
     typer.echo(
         f"task {task.short_id}: {status}"
@@ -1856,10 +1885,7 @@ def task_inbox(
         if not pending:
             typer.echo("no guidance waiting")
             return
-        _actor_guard(
-            target, "task.inbox.clear", target=task.short_id, target_status=task.status,
-            args=f"{len(pending)} message(s)",
-        )
+        _journal_task(target, task, "task.inbox.clear", f"{len(pending)} message(s)")
         cleared = bus.clear_inbox(inbox_name(task.id))
         typer.secho(
             f"archived {len(cleared)} pending message(s) for task {task.short_id}", fg="green"
@@ -1888,7 +1914,7 @@ def task_inbox(
 
 
 @task_app.command("nudge")
-def task_nudge(task_id: str, text: str, ) -> None:
+def task_nudge(task_id: str, text: str) -> None:
     """Send guidance to a task; the next run (or a cooperative harness
     mid-run) will see it.
 
@@ -1896,10 +1922,7 @@ def task_nudge(task_id: str, text: str, ) -> None:
     """
     from .tasks import nudge
 
-    target = get_home()
-    task = _resolve_task(target, task_id)
-    _actor_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
-                   args=text[:80])
+    target, task = _task_action("task.nudge", task_id, text[:80])
     nudge(target, task, text, sender=current_actor())
     typer.secho(f"guidance queued for task {task.short_id}", fg="green")
 
@@ -1952,7 +1975,7 @@ def task_remember(
 
 
 @task_app.command("forget")
-def task_forget(task_id: str, note_id: str, ) -> None:
+def task_forget(task_id: str, note_id: str) -> None:
     """Retire a note in a task's notebook (append-only: the file keeps it,
     readers hide it). The note id is the handle `task remember` printed and
     `task show` lists."""
@@ -1981,9 +2004,7 @@ def task_stop(
     """
     from .runner import RunnerError, stop_run
 
-    target = get_home()
-    task = _resolve_task(target, task_id)
-    _actor_guard(target, "task.stop", target=task.short_id, target_status=task.status)
+    target, task = _task_action("task.stop", task_id)
     try:
         result = stop_run(target, task.id)
     except RunnerError as e:
@@ -2018,7 +2039,7 @@ def task_cancel(
     task = _resolve_task(target, task_id)
     if kill:
         _confirm(yes, f"cancel task {task.short_id} and SIGTERM its live runner?")
-    _actor_guard(target, "task.cancel", target=task.short_id, target_status=task.status)
+    _journal_task(target, task, "task.cancel")
     TaskStore(target).update(task.id, status="cancelled")
     typer.echo(f"task {task.short_id} cancelled")
     if kill:
@@ -2792,19 +2813,19 @@ def _agent_command(name: str, command: str, note: str) -> None:
 
 
 @agent_app.command("pause")
-def agent_pause(name: str, ) -> None:
+def agent_pause(name: str) -> None:
     """Pause an agent's schedule (applied by a running supervisor within seconds)."""
     _agent_command(name, "pause", f"pause queued for {name} — takes effect while `quorum up` is running")
 
 
 @agent_app.command("resume")
-def agent_resume(name: str, ) -> None:
+def agent_resume(name: str) -> None:
     """Resume a paused agent (also clears the auto-pause failure counter)."""
     _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
 
 
 @agent_app.command("run-now")
-def agent_run_now(name: str, ) -> None:
+def agent_run_now(name: str) -> None:
     """Ask the running supervisor to tick an agent immediately.
 
     This is a message to `quorum up`, so it needs the supervisor running and
@@ -2915,7 +2936,7 @@ def agent_remove(
 
 
 @agent_app.command("reload")
-def agent_reload(name: str, ) -> None:
+def agent_reload(name: str) -> None:
     """Ask the running supervisor to re-read an agent's config (after editing
     agents/<name>.toml or its prompt's settings)."""
     _agent_command(name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
@@ -2925,7 +2946,7 @@ def agent_reload(name: str, ) -> None:
 
 
 @notify_app.command("test")
-def notify_test(text: str, ) -> None:
+def notify_test(text: str) -> None:
     """Send one message through the [notify] template, right now.
 
     Proves the wiring without waiting for an escalation. It goes straight
@@ -2963,7 +2984,7 @@ def notify_test(text: str, ) -> None:
 
 
 @manager_app.command("tell")
-def manager_tell(text: str, ) -> None:
+def manager_tell(text: str) -> None:
     """Send the manager a directive; its next run starts with it in the digest."""
     target = get_home()
     MessageBus(target).send("user", "manager", type="directive", text=text)
@@ -2971,7 +2992,7 @@ def manager_tell(text: str, ) -> None:
 
 
 @manager_app.command("note")
-def manager_note(text: str, ) -> None:
+def manager_note(text: str) -> None:
     """Journal a reasoning note (the manager's harness calls this; humans can too)."""
     target = get_home()
     _actor_guard(target, "note", args=text, always_journal=True)
