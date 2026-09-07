@@ -1180,13 +1180,11 @@ def launch_detached(
 
 
 def _find_session_id(event: dict) -> str | None:
-    # claude emits session_id; codex `exec --json` calls it thread_id
-    # (first event: {"type": "thread.started", "thread_id": ...}).
-    for key in ("session_id", "sessionId", "thread_id", "threadId"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
+    # claude emits session_id; codex `exec --json` calls it thread_id. Which
+    # harness spells it how is `transcript.py`'s business, not the runner's.
+    from .transcript import session_id
+
+    return session_id(event)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
