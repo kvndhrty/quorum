@@ -36,11 +36,8 @@ whole in `handoff.md` (`write_handoff`, atomic, last write wins) and read
 back by `read_handoff` for the dependent's prompt (capped there), `task
 show` (in full) and the digest (existence only).
 
-`priority` and `held` are the user's two hands on the queue, and neither is
-a scheduler either: `priority` is an integer the digest renders and the
-manager's prompt reads as an ordering preference (nothing in Python sorts by
-it), and `held` parks a task — a substrate refusal in the runner, never a
-status.
+Ordering is not quorum's job: no reader here sorts tasks, and the manager
+decides what to launch from the digest.
 """
 
 from __future__ import annotations
@@ -144,20 +141,6 @@ class Task(BaseModel):
     # prompt is told to relaunch it forever and never call a long run count
     # stuck. See docs/architecture.md ("Perpetual tasks").
     perpetual: bool = False
-    # The user's ordering signal among launchable tasks: higher goes first,
-    # 0 is the default, negative pushes work to the back. Quorum orders
-    # **nothing** by it — no reader here sorts, no scheduler consumes it.
-    # It is rendered on the digest task line (only when non-zero) and badged
-    # in the views, and the manager's prompt is what turns it into a launch
-    # order. See docs/architecture.md ("Priority and hold").
-    priority: int = 0
-    # True: the user parked this task with `quorum task hold`. Not a status
-    # — status stays the harness's word, and a held task keeps whatever it
-    # last reported — but a substrate refusal: `run_task` will not launch it
-    # unless `--force`, the same narrow class as the attached and dependency
-    # refusals. Only a human releases it (`quorum task release`); the
-    # manager's prompt is told never to.
-    held: bool = False
     # What the forge last said about this task's pull request: one of
     # `PR_STATES`, and when it was observed. Quorum's **one** materialized
     # probe result — written only from the manager tick's digest build
@@ -264,8 +247,6 @@ class TaskStore:
         issue_url: str | None = None,
         depends_on: list[str] | None = None,
         perpetual: bool = False,
-        priority: int = 0,
-        held: bool = False,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -282,8 +263,6 @@ class TaskStore:
             issue_url=issue_url,
             depends_on=list(depends_on or []),
             perpetual=perpetual,
-            priority=priority,
-            held=held,
             created_at=created,
             updated_at=created,
         )
