@@ -275,7 +275,7 @@ def test_format_span_and_summary_cells():
 
 def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
     build_home(home)
-    r = runner.invoke(app, ["usage", "--by", "harness", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "harness"])
     assert r.exit_code == 0, r.output
     assert "\x1b[" not in r.output
     lines = r.output.split("\n")
@@ -302,7 +302,7 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
         data = json.loads(tasks.task_json_path(home, t.id).read_text())
         data.update(pr_state=None, pr_state_at=None)
         tasks.task_json_path(home, t.id).write_text(json.dumps(data))
-    r = runner.invoke(app, ["usage", "--by", "project", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "project"])
     assert r.exit_code == 0, r.output
     header = r.output.split("\n")[1].split()
     assert "merged" not in header and "done→merged" not in header and "queue→done" in header
@@ -310,7 +310,7 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
 
 def test_cli_reported_column_says_what_the_cost_covers(home: Path):
     build_home(home)
-    r = runner.invoke(app, ["usage", "--by", "project", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "project"])
     assert r.exit_code == 0, r.output
     lines = r.output.split("\n")
     assert "reported" in lines[1].split()
@@ -322,7 +322,7 @@ def test_cli_reported_column_says_what_the_cost_covers(home: Path):
     codex = next(
         line
         for line in runner.invoke(
-            app, ["usage", "--by", "harness", "--home", str(home)]
+            app, ["usage", "--by", "harness"]
         ).output.split("\n")
         if line.startswith("codex ")
     )
@@ -332,41 +332,41 @@ def test_cli_reported_column_says_what_the_cost_covers(home: Path):
 def test_cli_by_agent_and_since_and_json(home: Path):
     usage.record_agent_run(home, "manager", "r1", CLAUDE_RUN, now=T0, outcome="ok", duration_seconds=12)
     usage.record_agent_run(home, "manager", "r2", None, now=T0 + timedelta(hours=1), outcome="timeout", duration_seconds=900)
-    r = runner.invoke(app, ["usage", "--by", "agent", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent"])
     assert r.exit_code == 0, r.output
     lines = r.output.split("\n")
     assert lines[1].split() == ["agent", "runs", "reported", "timeout", "cost", "tokens", "duration"]
     assert lines[2].split() == ["manager", "2", "1/2", "1", "$1.50", "500", "7m36s"]
 
-    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m", "--json", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m", "--json"])
     assert r.exit_code == 0, r.output
     payload = json.loads(r.output)
     assert payload["by"] == "agent" and payload["since_seconds"] == 1800
     assert payload["rows"] == [] and payload["total"] is None  # T0 is years before now
 
     build_home(home)
-    r = runner.invoke(app, ["usage", "--since", "1w", "--json", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--since", "1w", "--json"])
     payload = json.loads(r.output)
     assert payload["by"] == "project" and payload["cutoff"] is not None
     assert all(row["queue_to_run"] is None or "median_seconds" in row["queue_to_run"] for row in payload["rows"])
 
 
 def test_cli_says_when_nothing_is_recorded(home: Path):
-    r = runner.invoke(app, ["usage", "--home", str(home)])
+    r = runner.invoke(app, ["usage"])
     assert r.exit_code == 0, r.output
     assert r.output.split("\n")[1] == "nothing recorded"
-    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "1d", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "1d"])
     assert r.exit_code == 0 and "nothing recorded in that window" in r.output
 
 
 def test_cli_rejects_a_bad_since_and_an_unknown_dimension(home: Path):
-    r = runner.invoke(app, ["usage", "--since", "3x", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--since", "3x"])
     assert r.exit_code == 2 and "invalid window" in r.output
     # a window no instant is that far along: the same rejection, not a traceback
-    r = runner.invoke(app, ["usage", "--since", "99999999d", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--since", "99999999d"])
     assert r.exit_code == 1 and "--since window reaches before any date" in r.output
     assert "Traceback" not in r.output
-    r = runner.invoke(app, ["usage", "--by", "model", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "model"])
     assert r.exit_code != 0 and "project" in r.output
-    r = runner.invoke(app, ["usage", "--by", "WEEK", "--home", str(home)])
+    r = runner.invoke(app, ["usage", "--by", "WEEK"])
     assert r.exit_code == 0 and r.output.startswith("usage by week")

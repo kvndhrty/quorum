@@ -656,7 +656,7 @@ def start_detached_run(
     """
     return subprocess.Popen(
         [
-            sys.executable, "-m", "quorum", "task", "run", task_id, "--home", str(home),
+            sys.executable, "-m", "quorum", "task", "run", task_id,
             *(["--fresh-session"] if fresh_session else []),
         ],
         stdout=subprocess.DEVNULL,

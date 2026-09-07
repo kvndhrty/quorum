@@ -101,7 +101,7 @@ def test_ack_drops_one_escalation_from_the_banner_and_the_archive_holds_it(home:
     msg = bus.post("manager", "attention", "escalation", text="a human is needed")
     assert views.attention_summary(home)["count"] == 1
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id, "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", msg.short_id])
     assert result.exit_code == 0, result.output
     assert msg.short_id in result.output
     assert views.attention_summary(home)["count"] == 0
@@ -114,7 +114,7 @@ def test_ack_leaves_the_other_escalations_alone(home: Path):
     second = bus.post("manager", "attention", "escalation", text="second")
     bus.post("manager", "attention", "escalation", text="third")
 
-    result = runner.invoke(app, ["board", "ack", second.short_id, "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", second.short_id])
     assert result.exit_code == 0, result.output
     live = [m.payload["text"] for m in bus.read_topic("attention")]
     assert live == ["first", "third"]
@@ -123,7 +123,7 @@ def test_ack_leaves_the_other_escalations_alone(home: Path):
 
 def test_ack_of_an_unknown_id_fails_loudly(home: Path):
     MessageBus(home).post("manager", "attention", "escalation", text="still here")
-    result = runner.invoke(app, ["board", "ack", "ZZZZZZ", "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", "ZZZZZZ"])
     assert result.exit_code != 0
     assert "no live board message" in result.output
     assert views.attention_summary(home)["count"] == 1
@@ -134,7 +134,7 @@ def test_ack_of_an_ambiguous_id_fails_loudly(home: Path):
     post_with_id(home, "01SHAREDHEAD0000000000000A", "one")
     post_with_id(home, "01SHAREDHEAD0000000000000B", "two")
 
-    result = runner.invoke(app, ["board", "ack", "01SHAREDHEAD", "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", "01SHAREDHEAD"])
     assert result.exit_code != 0
     assert "ambiguous" in result.output
     assert views.attention_summary(home)["count"] == 2
@@ -143,7 +143,7 @@ def test_ack_of_an_ambiguous_id_fails_loudly(home: Path):
 def test_ack_dry_run_changes_nothing(home: Path):
     msg = MessageBus(home).post("manager", "attention", "escalation", text="untouched")
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--dry-run", "--home", str(home)]
+        app, ["board", "ack", msg.short_id, "--dry-run"]
     )
     assert result.exit_code == 0, result.output
     assert "would ack" in result.output
@@ -156,14 +156,14 @@ def test_ack_is_one_message_only(home: Path):
     no --before: one spelling for the sweep, one for the single message."""
     msg = MessageBus(home).post("manager", "attention", "escalation", text="here")
     for extra in (["--all"], ["--before", "7d"]):
-        result = runner.invoke(app, ["board", "ack", msg.short_id, *extra, "--home", str(home)])
+        result = runner.invoke(app, ["board", "ack", msg.short_id, *extra])
         assert result.exit_code != 0
         assert views.attention_summary(home)["count"] == 1
 
 
 def test_board_read_prints_the_handle_an_ack_needs(home: Path):
     msg = MessageBus(home).post("manager", "attention", "escalation", text="ack me")
-    result = runner.invoke(app, ["board", "read", "attention", "--home", str(home)])
+    result = runner.invoke(app, ["board", "read", "attention"])
     assert result.exit_code == 0, result.output
     assert msg.short_id in result.output
 
@@ -177,7 +177,7 @@ def test_an_agents_ack_lands_in_its_journal(home: Path, monkeypatch):
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "run-1")
     monkeypatch.setenv("QUORUM_ACTOR_CAP", "10")
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id, "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", msg.short_id])
     assert result.exit_code == 0, result.output
     entries = fsio.read_jsonl(home / "state" / "manager" / "journal.jsonl")
     assert [e["action"] for e in entries] == ["board.ack"]
@@ -190,14 +190,14 @@ def test_topic_scopes_the_cli_ack(home: Path):
     bus = MessageBus(home)
     msg = bus.post("manager", "attention", "escalation", text="escalated")
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--topic", "notes", "--home", str(home)]
+        app, ["board", "ack", msg.short_id, "--topic", "notes"]
     )
     assert result.exit_code != 0
     assert "on notes" in result.output
     assert views.attention_summary(home)["count"] == 1
 
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--topic", "attention", "--home", str(home)]
+        app, ["board", "ack", msg.short_id, "--topic", "attention"]
     )
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
@@ -219,7 +219,7 @@ def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypat
 
     monkeypatch.setattr(MessageBus, "resolve_board_message", racing)
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id, "--home", str(home)])
+    result = runner.invoke(app, ["board", "ack", msg.short_id])
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
     assert [m["payload"]["text"] for m in archive_lines(home)] == ["handled elsewhere"]

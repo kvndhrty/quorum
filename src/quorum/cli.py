@@ -84,18 +84,22 @@ def _main(
     ),
     home: Path | None = typer.Option(
         None, "--home",
-        help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum); also accepted after any subcommand.",
+        help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum). "
+             "It goes before the subcommand: `quorum --home /path task list`.",
     ),
 ) -> None:
-    if home is not None:
-        # export so every subcommand (and any child it spawns) sees the same home
-        os.environ["QUORUM_HOME"] = str(home)
-
-_HOME_OPT = typer.Option(None, "--home", help="QUORUM_HOME directory (default: $QUORUM_HOME or ~/.quorum).")
+    global _home_option
+    _home_option = home
 
 
-def get_home(explicit: Path | None = None, must_exist: bool = True) -> Path:
-    home = home_mod.resolve_home(explicit)
+#: the --home given on the command line, before the subcommand. One option on
+#: the root app rather than a copy on each of sixty commands; `get_home` is
+#: the only reader, and `$QUORUM_HOME` still answers when nothing was given.
+_home_option: Path | None = None
+
+
+def get_home(must_exist: bool = True) -> Path:
+    home = home_mod.resolve_home(_home_option)
     if must_exist and not (home / home_mod.CONFIG_NAME).exists():
         typer.secho(f"no quorum home at {home} — run `quorum init` first", fg="red", err=True)
         raise typer.Exit(1) from None
@@ -284,9 +288,9 @@ def _resolve_task(home: Path, prefix: str):
 
 
 @app.command()
-def init(home: Path | None = _HOME_OPT) -> None:
+def init() -> None:
     """Create the QUORUM_HOME directory tree and a starter config.toml."""
-    target = home_mod.resolve_home(home)
+    target = get_home(must_exist=False)
     fresh, prompts = home_mod.scaffold(target)
     if fresh:
         typer.secho(f"initialized quorum home at {target}", fg="green")
@@ -351,9 +355,9 @@ def _read_prompt_file(target: Path) -> str | None:
 
 
 @prompt_app.command("list")
-def prompt_list(home: Path | None = _HOME_OPT) -> None:
+def prompt_list() -> None:
     """Show each prompt template: home copy vs packaged default, and overlay."""
-    target = get_home(home)
+    target = get_home()
     names = _prompt_names(target)
     for name in names:
         default = prompts_mod.packaged(name)
@@ -439,7 +443,6 @@ def _print_project_blocks(target: Path) -> None:
 @prompt_app.command("diff")
 def prompt_diff(
     name: str = typer.Argument(help="Template name, e.g. manager (no .md)."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Diff this home's copy of a prompt against the packaged default.
 
@@ -449,7 +452,7 @@ def prompt_diff(
     """
     import difflib
 
-    target = get_home(home)
+    target = get_home()
     name = name[:-3] if name.endswith(".md") else name
     default = prompts_mod.packaged(name)
     if default is None:
@@ -498,7 +501,6 @@ def prompt_diff(
 
 @app.command()
 def up(
-    home: Path | None = _HOME_OPT,
     detach: bool = typer.Option(
         False, "--detach", help="Start the supervisor in the background and return (`quorum down` stops it)."
     ),
@@ -511,7 +513,7 @@ def up(
     from . import views
     from .supervisor import Supervisor
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     if detach:
         sup = views.supervisor_status(target)
@@ -521,7 +523,7 @@ def up(
 
         log_path = target / "logs" / "supervisor.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        argv = [sys.executable, "-m", "quorum", "up", "--home", str(target)]
+        argv = [sys.executable, "-m", "quorum", "--home", str(target), "up"]
         if self_sandbox:
             argv.append("--self-sandbox")
         with open(log_path, "ab") as log:
@@ -555,11 +557,11 @@ def up(
 
 
 @app.command()
-def down(home: Path | None = _HOME_OPT) -> None:
+def down() -> None:
     """Stop a running supervisor (started with `quorum up` or `up --detach`)."""
     from . import views
 
-    target = get_home(home)
+    target = get_home()
     sup = views.supervisor_status(target)
     if not sup.get("alive"):
         raise _fail("supervisor is not running")
@@ -583,7 +585,6 @@ def doctor(
         help="Which harness --smoke runs (default: the configured default harness). "
         "Naming one implies --smoke.",
     ),
-    home: Path | None = _HOME_OPT,
     json_out: bool = typer.Option(False, "--json", help="Emit every check as JSON, for scripts."),
     smoke: bool = typer.Option(
         False,
@@ -602,7 +603,7 @@ def doctor(
     It is a pure reader apart from the opt-in `quorum doctor --smoke [HARNESS]`
     probe, which actually runs the harness in a scratch directory.
     """
-    target = home_mod.resolve_home(home)
+    target = get_home(must_exist=False)
     smoke_arg = harness if (smoke or harness) else None
     checks = doctor_mod.run_checks(target, smoke=smoke_arg, smoke_timeout=smoke_timeout)
     counts = doctor_mod.tally(checks)
@@ -652,7 +653,6 @@ STATUS_LEGEND = """glyphs (the same ones in `task list`, `status` and the TUI):
 def status(
     legend: bool = typer.Option(False, "--legend", help="Explain the status glyphs and exit."),
     json_out: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Show supervisor liveness, agents, tasks, and project deadlines
     (`--legend` explains the glyphs)."""
@@ -661,7 +661,7 @@ def status(
     if legend:
         typer.echo(STATUS_LEGEND)
         return
-    target = get_home(home)
+    target = get_home()
     if json_out:
         typer.echo(json.dumps(views.overview(target), indent=2, ensure_ascii=False))
         return
@@ -723,7 +723,6 @@ def usage_cmd(
         help="Only tasks queued (or agent runs made) in the last 7d / 36h / 2w / 90m.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Usage and delivery statistics by project, harness, week or agent:
     tasks, runs, reruns, cost and tokens as the harness reported them, and
@@ -732,7 +731,7 @@ def usage_cmd(
     home; the supervisor need not be running."""
     from . import stats
 
-    target = get_home(home)
+    target = get_home()
     window = _parse_window(since) if since is not None else None
     try:
         payload = stats.report(target, by=by.value, since=window)
@@ -1154,7 +1153,6 @@ def task_add(
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
     perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
     yourself with `quorum task run`.
@@ -1183,7 +1181,7 @@ def task_add(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, resolve_dependencies, short_handle
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     known_project = ProjectRegistry(target).get(project)
     if known_project is None:
@@ -1253,7 +1251,6 @@ def task_adopt(
     harness: str | None = typer.Option(None, "--harness", help="Which \\[harness.<name>] this session runs (default: \\[tasks].default_harness)."),
     herdr_pane: str = typer.Option("", "--herdr-pane", help="The herdr pane hosting the session (enables pane observation and the nudge doorbell)."),
     json_out: bool = typer.Option(False, "--json", help="Print the created task ids as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Adopt a live interactive coding session into quorum, mid-problem.
 
@@ -1267,7 +1264,7 @@ def task_adopt(
     from .projects import ProjectRegistry
     from .tasks import TaskStore, write_attached_state
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     workdir = (directory or Path.cwd()).expanduser().resolve()
     if not workdir.is_dir():
@@ -1317,12 +1314,12 @@ def task_adopt(
 
 
 @task_app.command("detach")
-def task_detach(task_id: str, home: Path | None = _HOME_OPT) -> None:
+def task_detach(task_id: str, ) -> None:
     """Detach an adopted task from its interactive session — after this the
     manager may run it headless like any other task."""
     from .tasks import TaskStore
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     if not task.attached:
         raise _fail(f"task {task.short_id} is not attached")
@@ -1380,7 +1377,6 @@ def task_hook_stop(
         "Stop-hook block protocol) or 'text' (bare guidance lines, for shims that "
         "inject the continuation themselves, e.g. the opencode plugin).",
     ),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Harness stop/idle-hook entry point (reads the hook's JSON on stdin).
 
@@ -1397,7 +1393,7 @@ def task_hook_stop(
     if format not in ("decision", "text"):
         raise _fail(f"unknown --format {format!r} (expected 'decision' or 'text')")
     payload = _read_hook_payload()
-    target = home_mod.resolve_home(home)
+    target = get_home(must_exist=False)
     if not (target / home_mod.CONFIG_NAME).exists():
         raise typer.Exit(0)
     session_id = str(payload.get("session_id") or "")
@@ -1429,7 +1425,7 @@ def task_hook_stop(
 
 
 @task_app.command("hook-session-start", rich_help_panel="Harness protocol")
-def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
+def task_hook_session_start() -> None:
     """Harness SessionStart-hook entry point: refreshes an adopted task's
     liveness record and learns the (possibly new) session id — harnesses
     whose sessions can't shell out with their own id at adopt time (Codex)
@@ -1437,7 +1433,7 @@ def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
     from .tasks import TaskStore, write_attached_state
 
     payload = _read_hook_payload()
-    target = home_mod.resolve_home(home)
+    target = get_home(must_exist=False)
     if not (target / home_mod.CONFIG_NAME).exists():
         raise typer.Exit(0)
     session_id = str(payload.get("session_id") or "")
@@ -1450,13 +1446,13 @@ def task_hook_session_start(home: Path | None = _HOME_OPT) -> None:
 
 
 @task_app.command("hook-session-end", rich_help_panel="Harness protocol")
-def task_hook_session_end(home: Path | None = _HOME_OPT) -> None:
+def task_hook_session_end() -> None:
     """Harness SessionEnd-hook entry point: records that an adopted session
     ended (the task stays attached — sessions get reopened)."""
     from .tasks import write_attached_state
 
     payload = _read_hook_payload()
-    target = home_mod.resolve_home(home)
+    target = get_home(must_exist=False)
     if not (target / home_mod.CONFIG_NAME).exists():
         raise typer.Exit(0)
     task = _match_attached(
@@ -1470,12 +1466,11 @@ def task_hook_session_end(home: Path | None = _HOME_OPT) -> None:
 @task_app.command("list")
 def task_list(
     json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """List tasks, newest last (`quorum status --legend` explains the glyphs)."""
     from . import views
 
-    rows = views.task_rows(get_home(home))
+    rows = views.task_rows(get_home())
     if json_out:
         typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
@@ -1489,7 +1484,6 @@ def task_list(
 def task_show(
     task_id: str,
     json_out: bool = typer.Option(False, "--json", help="Dump the full task record as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Show one task: what it is, where it stands, its recent reports and
     its notebook."""
@@ -1505,7 +1499,7 @@ def task_show(
         short_handle,
     )
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     if json_out:
         typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
@@ -1624,7 +1618,6 @@ def task_show(
 def task_history(
     task_id: str,
     json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Everything that happened to a task, oldest first: queued, each run's
     start and end (exit, cost, stopped, stalled, fresh session), every
@@ -1640,7 +1633,7 @@ def task_history(
     from .prune import archived_task_dir, resolve_archived
     from .tasks import TaskStore
 
-    target = get_home(home)
+    target = get_home()
     root = None
     try:
         task = TaskStore(target).resolve(task_id)
@@ -1676,7 +1669,6 @@ def task_run(
         "--fresh-session",
         help="Forget the captured session id and start a new session (same worktree).",
     ),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Execute one harness run of a task (the manager does this automatically
     under `quorum up`).
@@ -1695,7 +1687,7 @@ def task_run(
         unmet_dependencies,
     )
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     config = _load_config(target)
     # mirror the runner's substrate rails here so --detach fails in the
@@ -1782,7 +1774,6 @@ def task_log(
     follow: bool = _FOLLOW_OPT,
     raw: bool = _RAW_OPT,
     verbose: bool = _VERBOSE_OPT,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Render a task's harness transcript as a narrative.
 
@@ -1791,7 +1782,7 @@ def task_log(
     """
     from .tasks import transcript_path
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     path = transcript_path(target, task.id)
 
@@ -1822,12 +1813,11 @@ def task_report(
             "tasks/<id>/handoff.md; a later --handoff replaces it."
         ),
     ),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Record task progress (harnesses call this; humans can too)."""
     from . import tasks as tasks_mod
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     # Read (and refuse) the handoff before anything is journaled or written:
     # an empty or unreadable body must not half-apply a report.
@@ -1851,13 +1841,12 @@ def task_inbox(
     clear: bool = typer.Option(
         False, "--clear", help="Archive the pending guidance instead of delivering it."
     ),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Read guidance sent to a task. Without --claim, messages are only peeked."""
     from .runner import guidance_note
     from .tasks import inbox_name
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     bus = MessageBus(target)
     if clear:
@@ -1899,7 +1888,7 @@ def task_inbox(
 
 
 @task_app.command("nudge")
-def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
+def task_nudge(task_id: str, text: str, ) -> None:
     """Send guidance to a task; the next run (or a cooperative harness
     mid-run) will see it.
 
@@ -1907,7 +1896,7 @@ def task_nudge(task_id: str, text: str, home: Path | None = _HOME_OPT) -> None:
     """
     from .tasks import nudge
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     _actor_guard(target, "task.nudge", target=task.short_id, target_status=task.status,
                    args=text[:80])
@@ -1920,7 +1909,6 @@ def task_remember(
     task_id: str,
     text: str,
     ttl: int = typer.Option(0, "--ttl", help="Days until the note expires (0: never)."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Write a standing note into a task's notebook; every future run of the
     task reads it — resumed or fresh.
@@ -1938,7 +1926,7 @@ def task_remember(
     """
     from . import notes as notes_mod
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     entry = _notebook_write(
         target, notes_mod.task_notebook(target, task.id), "task.remember",
@@ -1964,13 +1952,13 @@ def task_remember(
 
 
 @task_app.command("forget")
-def task_forget(task_id: str, note_id: str, home: Path | None = _HOME_OPT) -> None:
+def task_forget(task_id: str, note_id: str, ) -> None:
     """Retire a note in a task's notebook (append-only: the file keeps it,
     readers hide it). The note id is the handle `task remember` printed and
     `task show` lists."""
     from . import notes as notes_mod
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     note = _notebook_write(
         target, notes_mod.task_notebook(target, task.id), "task.forget",
@@ -1982,7 +1970,6 @@ def task_forget(task_id: str, note_id: str, home: Path | None = _HOME_OPT) -> No
 @task_app.command("stop")
 def task_stop(
     task_id: str,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """End a task's live run without ending the task.
 
@@ -1994,7 +1981,7 @@ def task_stop(
     """
     from .runner import RunnerError, stop_run
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     _actor_guard(target, "task.stop", target=task.short_id, target_status=task.status)
     try:
@@ -2023,12 +2010,11 @@ def task_cancel(
         help="Also SIGTERM a live runner (`task stop` ends a run without ending the task).",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Mark a task cancelled so the manager stops attending to it."""
     from .tasks import TaskStore, runner_lock_path
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     if kill:
         _confirm(yes, f"cancel task {task.short_id} and SIGTERM its live runner?")
@@ -2061,7 +2047,6 @@ def task_prune(
              "(losing its commits). Never forces a dirty worktree's removal.",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Archive finished tasks into `tasks/.archive/<id>/` so they leave every view.
 
@@ -2074,7 +2059,7 @@ def task_prune(
     """
     from .tasks import TaskStore
 
-    target = get_home(home)
+    target = get_home()
     window = _parse_window(older_than) if older_than else None
     statuses = [s for s in status.split(",") if s.strip()]
     candidates = prune_mod.plan(target, statuses=statuses, older_than=window, force=force)
@@ -2167,7 +2152,6 @@ def task_export(
         help="Replace every tool result in the transcript with a marker; keep the assistant's "
              "text and its tool calls.",
     ),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Pack one task into a tar.gz for sharing or a bug report.
 
@@ -2180,7 +2164,7 @@ def task_export(
     """
     from . import export as export_mod
 
-    target = get_home(home)
+    target = get_home()
     task = _resolve_task(target, task_id)
     destination = out if out is not None else export_mod.default_output(task)
     refused = export_mod.output_refusal(destination, target)
@@ -2217,10 +2201,9 @@ def board_post(
     text: str,
     type: str = typer.Option("note", "--type", help="Message type tag."),
     sender: str = typer.Option("user", "--from", help="Sender name."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Post a message to a board topic."""
-    target = get_home(home)
+    target = get_home()
     _actor_guard(target, "board.post", args=f"{topic}: {text[:80]}")
     if sender == "user":
         sender = current_actor()  # a manager-tagged call attributes itself
@@ -2233,10 +2216,9 @@ def board_read(
     topic: str | None = typer.Argument(None, help="Topic to read (default: all topics)."),
     since: str = typer.Option("24h", "--since", help="Window like 90m, 24h or 7d."),
     as_json: bool = typer.Option(False, "--json", help="Emit raw JSON lines."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Read recent board messages."""
-    bus = MessageBus(get_home(home))
+    bus = MessageBus(get_home())
     window = _parse_window(since)
     topics = [topic] if topic else bus.topics()
     floor = fsio.utc_now() - window
@@ -2266,7 +2248,6 @@ def board_clear(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Archive a board topic, emptying it.
 
@@ -2274,7 +2255,7 @@ def board_clear(
     hourly janitor writes — nothing is lost, it just stops being live.
     `quorum board clear attention` is the one that empties the banner.
     """
-    _clear_topic(get_home(home), topic, before=before, dry_run=dry_run, yes=yes)
+    _clear_topic(get_home(), topic, before=before, dry_run=dry_run, yes=yes)
 
 
 @board_app.command("ack")
@@ -2286,7 +2267,6 @@ def board_ack(
         None, "--topic", help="Only look in this topic (default: every topic)."
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Say "I have seen this one": archive a single board message.
 
@@ -2298,7 +2278,7 @@ def board_ack(
 
     A whole topic at once is `quorum board clear <topic>`.
     """
-    home_path = get_home(home)
+    home_path = get_home()
     bus = MessageBus(home_path)
     try:
         msg, path = bus.resolve_board_message(target_id, topic=topic)
@@ -2353,7 +2333,6 @@ def project_add(
     notes: str = typer.Option("", "--notes", help="Free-form notes shown in views."),
     marker: bool = typer.Option(False, "--marker", help="Also write a .quorum.toml into the project dir."),
     force: bool = typer.Option(False, "--force", help="Register even if the directory is not a git repository."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Register a project directory (tasks run against registered projects).
 
@@ -2361,7 +2340,7 @@ def project_add(
     """
     from .projects import ProjectRegistry
 
-    target = get_home(home)
+    target = get_home()
     resolved = path.expanduser().resolve()
     if resolved.is_dir() and not (resolved / ".git").exists() and not force:
         raise _fail(
@@ -2387,12 +2366,11 @@ def project_add(
 @project_app.command("list")
 def project_list(
     json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """List registered projects (marker-file fields merged in)."""
     from . import views
 
-    rows = views.project_rows(get_home(home))
+    rows = views.project_rows(get_home())
     if json_out:
         typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
@@ -2438,7 +2416,6 @@ def project_set(
     ),
     name: str | None = typer.Option(None, "--name"),
     tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Update a project's metadata in the registry.
 
@@ -2450,7 +2427,7 @@ def project_set(
 
     if notes_file is not None and notes is not None:
         raise _fail("pass --notes or --notes-file, not both")
-    target = get_home(home)
+    target = get_home()
     registry = ProjectRegistry(target)
     if notes_file is not None:
         # Read last, after everything that can be checked without it: piped
@@ -2477,12 +2454,11 @@ def project_set(
 def project_remove(
     slug: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Unregister a project (its directory is untouched)."""
     from .projects import ProjectRegistry
 
-    target = get_home(home)
+    target = get_home()
     _confirm(yes, f"unregister project {slug!r}? (its directory is untouched)")
     _actor_guard(target, "project.remove", target=slug)
     if ProjectRegistry(target).remove(slug):
@@ -2599,9 +2575,9 @@ def integration_install(
 
 
 @app.command()
-def tui(home: Path | None = _HOME_OPT) -> None:
+def tui() -> None:
     """Open the terminal dashboard."""
-    target = get_home(home)
+    target = get_home()
     try:
         from .tui.app import QuorumTUI
     except ImportError:
@@ -2653,10 +2629,10 @@ def _check_agent_name(name: str) -> None:
 
 
 def _run_log(
-    home: Path | None, name: str, last: int, run: str | None, verbose: bool, raw: bool
+    name: str, last: int, run: str | None, verbose: bool, raw: bool
 ) -> None:
     _check_agent_name(name)
-    target = get_home(home)
+    target = get_home()
     if run:
         ids = [_resolve_run(target, name, run)]
     else:
@@ -2671,12 +2647,12 @@ def _run_log(
 
 
 def _run_tail(
-    home: Path | None, name: str, lines: int, follow: bool, verbose: bool, raw: bool
+    name: str, lines: int, follow: bool, verbose: bool, raw: bool
 ) -> None:
     from .actor import transcript_path
 
     _check_agent_name(name)
-    target = get_home(home)
+    target = get_home()
     path = transcript_path(target, name)
 
     def render(entries: list) -> list[str]:
@@ -2701,12 +2677,11 @@ _RUN_OPT = typer.Option(None, "--run", help="One run, by id, unique prefix, or u
 @agent_app.command("list")
 def agent_list(
     json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """List configured agents and their last heartbeat."""
     from . import views
 
-    rows = views.agent_rows(get_home(home))
+    rows = views.agent_rows(get_home())
     if json_out:
         typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
         return
@@ -2720,7 +2695,6 @@ def agent_list(
 def agent_run_once(
     name: str,
     verbose: bool = typer.Option(False, "--verbose", help="Show the full traceback when the tick fails."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Construct an agent and run a single tick in this process.
 
@@ -2732,7 +2706,7 @@ def agent_run_once(
     from .agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from .registry import AgentResolutionError, resolve
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     acfg = config.agents.get(name)
     if acfg is None:
@@ -2788,7 +2762,6 @@ def agent_log(
     follow: bool = _FOLLOW_OPT,
     verbose: bool = _VERBOSE_OPT,
     raw: bool = _RAW_OPT,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Render an agent's run end to end: what it saw, said, did, and cost.
 
@@ -2803,13 +2776,13 @@ def agent_log(
     if lines or follow:
         if run:
             raise _fail("--run reads a finished run; -n/-f follow the transcript itself")
-        _run_tail(home, name, lines, follow, verbose, raw)
+        _run_tail(name, lines, follow, verbose, raw)
         return
-    _run_log(home, name, last, run, verbose, raw)
+    _run_log(name, last, run, verbose, raw)
 
 
-def _agent_command(home: Path | None, name: str, command: str, note: str) -> None:
-    target = get_home(home)
+def _agent_command(name: str, command: str, note: str) -> None:
+    target = get_home()
     config = _load_config(target)
     if name not in config.agents:
         raise _fail(f"no agent {name!r} in config.toml or agents/") from None
@@ -2819,26 +2792,26 @@ def _agent_command(home: Path | None, name: str, command: str, note: str) -> Non
 
 
 @agent_app.command("pause")
-def agent_pause(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_pause(name: str, ) -> None:
     """Pause an agent's schedule (applied by a running supervisor within seconds)."""
-    _agent_command(home, name, "pause", f"pause queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "pause", f"pause queued for {name} — takes effect while `quorum up` is running")
 
 
 @agent_app.command("resume")
-def agent_resume(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_resume(name: str, ) -> None:
     """Resume a paused agent (also clears the auto-pause failure counter)."""
-    _agent_command(home, name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
 
 
 @agent_app.command("run-now")
-def agent_run_now(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_run_now(name: str, ) -> None:
     """Ask the running supervisor to tick an agent immediately.
 
     This is a message to `quorum up`, so it needs the supervisor running and
     returns before the tick does. With the supervisor stopped, or to watch
     the tick happen, use `quorum agent run-once`.
     """
-    _agent_command(home, name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
 
 
 def _prompt_exists(home: Path, name: str) -> bool:
@@ -2863,7 +2836,6 @@ def agent_create(
     prompt_template: str = typer.Option("", "--prompt", help="Use an existing template instead of writing one (e.g. the shipped 'babysitter')."),
     timeout: int = typer.Option(0, "--timeout", help="run_timeout_seconds for the agent's harness runs."),
     max_actions: int = typer.Option(0, "--max-actions", help="Per-run action cap for the agent's harness runs."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Create a file-defined agent (agents/<name>.toml + prompts/<name>.md).
 
@@ -2877,7 +2849,7 @@ def agent_create(
     """
     from .config import ConfigError, create_agent
 
-    target = get_home(home)
+    target = get_home()
     text: str | None = None
     if prompt == "-":
         text = _verbatim_text(Path("-"), "prompt")
@@ -2922,12 +2894,11 @@ def agent_create(
 def agent_remove(
     name: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Remove a file-defined agent (keeps its prompt and state files)."""
     from .config import agent_file_path
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     path = agent_file_path(target, name)
     if not path.exists():
@@ -2944,17 +2915,17 @@ def agent_remove(
 
 
 @agent_app.command("reload")
-def agent_reload(name: str, home: Path | None = _HOME_OPT) -> None:
+def agent_reload(name: str, ) -> None:
     """Ask the running supervisor to re-read an agent's config (after editing
     agents/<name>.toml or its prompt's settings)."""
-    _agent_command(home, name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "reload", f"reload queued for {name} — takes effect while `quorum up` is running")
 
 
 # -- notify ----------------------------------------------------------------
 
 
 @notify_app.command("test")
-def notify_test(text: str, home: Path | None = _HOME_OPT) -> None:
+def notify_test(text: str, ) -> None:
     """Send one message through the [notify] template, right now.
 
     Proves the wiring without waiting for an escalation. It goes straight
@@ -2965,7 +2936,7 @@ def notify_test(text: str, home: Path | None = _HOME_OPT) -> None:
     from . import notify as notify_mod
     from .messages import Message
 
-    target = get_home(home)
+    target = get_home()
     config = _load_config(target)
     if config.notify is None:
         raise _fail(
@@ -2992,17 +2963,17 @@ def notify_test(text: str, home: Path | None = _HOME_OPT) -> None:
 
 
 @manager_app.command("tell")
-def manager_tell(text: str, home: Path | None = _HOME_OPT) -> None:
+def manager_tell(text: str, ) -> None:
     """Send the manager a directive; its next run starts with it in the digest."""
-    target = get_home(home)
+    target = get_home()
     MessageBus(target).send("user", "manager", type="directive", text=text)
     typer.secho("directive queued for the manager's next run", fg="green")
 
 
 @manager_app.command("note")
-def manager_note(text: str, home: Path | None = _HOME_OPT) -> None:
+def manager_note(text: str, ) -> None:
     """Journal a reasoning note (the manager's harness calls this; humans can too)."""
-    target = get_home(home)
+    target = get_home()
     _actor_guard(target, "note", args=text, always_journal=True)
     typer.echo("noted")
 
@@ -3018,7 +2989,6 @@ def manager_remember(
     text: str,
     ttl: int = typer.Option(0, "--ttl", help="Days until the note expires (0: never)."),
     agent: str = _AGENT_OPT,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Write a standing note every future run of that agent will read.
 
@@ -3029,7 +2999,7 @@ def manager_remember(
     """
     from . import notes as notes_mod
 
-    target = get_home(home)
+    target = get_home()
     entry = _notebook_write(
         target, _agent_notebook(target, agent), "remember",
         journal_target=agent, arg=text, ttl=ttl, always_journal=True,
@@ -3045,13 +3015,12 @@ def manager_remember(
 def manager_forget(
     note_id: str,
     agent: str = _AGENT_OPT,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Retire a standing note that stopped being true (append-only: the file
     keeps it, readers hide it)."""
     from . import notes as notes_mod
 
-    target = get_home(home)
+    target = get_home()
     note = _notebook_write(
         target, _agent_notebook(target, agent), "forget",
         journal_target=agent, arg=note_id, retire=True, always_journal=True,
@@ -3062,20 +3031,18 @@ def manager_forget(
 @manager_app.command("notes")
 def manager_notes(
     agent: str = _AGENT_OPT,
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Print the notebook exactly as the digest renders it for that agent."""
-    for line in _agent_notebook(get_home(home), agent).render():
+    for line in _agent_notebook(get_home(), agent).render():
         typer.echo(line)
 
 
 @manager_app.command("journal")
 def manager_journal(
     lines: int = typer.Option(20, "-n", "--lines", help="Entries to show."),
-    home: Path | None = _HOME_OPT,
 ) -> None:
     """Print the manager's recent action journal (auto-recorded, per-run tagged)."""
-    entries = fsio.read_jsonl_tail(journal_path(get_home(home)), limit=lines)
+    entries = fsio.read_jsonl_tail(journal_path(get_home()), limit=lines)
     if not entries:
         typer.echo("no manager actions recorded yet")
         return

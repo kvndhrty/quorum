@@ -1173,8 +1173,8 @@ def launch_detached(
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
             [
-                sys.executable, "-m", "quorum", "task", "run", task_id,
-                "--home", str(home), *(["--force"] if force else []),
+                sys.executable, "-m", "quorum", "--home", str(home),
+                "task", "run", task_id, *(["--force"] if force else []),
                 *(["--fresh-session"] if fresh_session else []),
             ],
             stdout=log,

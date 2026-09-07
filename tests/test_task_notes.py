@@ -40,7 +40,7 @@ NOTE = "the parser is written and committed; the tests for it are not"
 
 
 def invoke(home: Path, *args: str):
-    return runner.invoke(app, [*args, "--home", str(home)])
+    return runner.invoke(app, [*args])
 
 
 def notes_file(home: Path, task_id: str) -> Path:
