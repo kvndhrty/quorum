@@ -2651,20 +2651,17 @@ def tui(home: Path | None = _HOME_OPT) -> None:
 def _resolve_run(home: Path, name: str, ref: str) -> str:
     """A run id from a full id, a unique prefix, or a unique suffix.
 
-    The same grammar `TaskStore.resolve` gives task ids, for the same reason:
-    what a person has in front of them is the tail of a ULID off another
-    line of output.
+    `fsio.resolve_handle`'s grammar, the same one task ids get, for the same
+    reason: what a person has in front of them is the tail of a ULID off
+    another line of output.
     """
     ids = transcript_mod.run_ids(home, name, limit=0)
-    ref = ref.strip().upper()
-    matches = [r for r in ids if r == ref] or [
-        r for r in ids if r.startswith(ref) or r.endswith(ref)
-    ]
-    if not matches:
-        raise _fail(f"no {name} run matching {ref!r} (see `quorum agent log {name} --last 5`)")
-    if len(matches) > 1:
-        raise _fail(f"{ref!r} matches {len(matches)} {name} runs: " + ", ".join(matches))
-    return matches[0]
+    try:
+        return fsio.resolve_handle(ref, ids, what=f"{name} run", render=lambda r: r)
+    except KeyError:
+        raise _fail(f"no {name} run matching {ref!r} (see `quorum agent log {name} --last 5`)") from None
+    except ValueError as e:
+        raise _fail(str(e)) from None
 
 
 def _check_agent_name(name: str) -> None:

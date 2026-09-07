@@ -54,7 +54,6 @@ from .tasks import (
     TaskStore,
     git_runner,
     runner_alive,
-    short_handle,
     task_dir,
     tasks_dir,
     workdir_git_state,
@@ -89,23 +88,13 @@ def resolve_archived(home: Path, handle: str) -> Task:
     Everything else (`task list`, every view, the digest) keeps skipping the
     dot-prefixed directory, which is the point of it.
     """
-    handle = handle.strip().upper()
     root = archive_root(home)
     if not root.is_dir():
         raise KeyError(handle)
     names = sorted(p.name for p in root.iterdir() if p.is_dir() and not fsio.is_tmp(p.name))
-    matches = [n for n in names if n == handle] or [
-        n for n in names if n.startswith(handle) or n.endswith(handle)
-    ]
-    if not matches:
-        raise KeyError(handle)
-    if len(matches) > 1:
-        raise ValueError(
-            f"archived task handle {handle!r} is ambiguous: "
-            + ", ".join(short_handle(n) for n in matches)
-        )
+    found = fsio.resolve_handle(handle, names, what="archived task handle")
     try:
-        return Task.model_validate(fsio.read_json(archived_task_dir(home, matches[0]) / "task.json"))
+        return Task.model_validate(fsio.read_json(archived_task_dir(home, found) / "task.json"))
     except (OSError, ValueError):
         raise KeyError(handle) from None
 

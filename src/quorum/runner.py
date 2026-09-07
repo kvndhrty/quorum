@@ -81,6 +81,17 @@ class RunnerError(RuntimeError):
     """A run could not start; the message is fit to show a CLI user."""
 
 
+def resolve_task(store: TaskStore, handle: str) -> Task:
+    """The task `handle` names, with the store's two failures turned into the
+    one error the runner's callers already display."""
+    try:
+        return store.resolve(handle)
+    except KeyError:
+        raise RunnerError(f"no task matching {handle!r} — `quorum task list`") from None
+    except ValueError as e:
+        raise RunnerError(str(e)) from None
+
+
 # How often the guidance pump checks the inbox during a live run. Read at
 # wait time so tests can shrink it; nudges are human-paced, so seconds are fine.
 GUIDANCE_POLL_SECONDS = 2.0
@@ -791,12 +802,7 @@ def run_task(
     """
     home = Path(home)
     store = TaskStore(home)
-    try:
-        task = store.resolve(task_prefix)
-    except KeyError:
-        raise RunnerError(f"no task matching {task_prefix!r} — `quorum task list`") from None
-    except ValueError as e:
-        raise RunnerError(str(e)) from None
+    task = resolve_task(store, task_prefix)
     if task.attached:
         # A substrate rail, not supervision policy (same class as the runner
         # lock): the workdir is the user's live checkout with an interactive
@@ -985,12 +991,7 @@ def stop_run(
     """
     home = Path(home)
     store = TaskStore(home)
-    try:
-        task = store.resolve(task_prefix)
-    except KeyError:
-        raise RunnerError(f"no task matching {task_prefix!r} — `quorum task list`") from None
-    except ValueError as e:
-        raise RunnerError(str(e)) from None
+    task = resolve_task(store, task_prefix)
     if task.attached:
         raise RunnerError(
             f"task {task.short_id} is attached to a live interactive session — "

@@ -446,7 +446,7 @@ def test_an_unknown_run_reference_is_refused_not_guessed_at(home: Path):
     missing = runner.invoke(app, ["agent", "log", "manager", "--run", "ZZZZZZ"])
     assert missing.exit_code == 1 and "no manager run matching" in missing.output
     ambiguous = runner.invoke(app, ["agent", "log", "manager", "--run", "01AGENTRUN"])
-    assert ambiguous.exit_code == 1 and "matches 2 manager runs" in ambiguous.output
+    assert ambiguous.exit_code == 1 and "manager run '01AGENTRUN' is ambiguous" in ambiguous.output
 
 
 def test_agent_log_reads_a_prompt_agent_whole_or_as_a_tail(home: Path):

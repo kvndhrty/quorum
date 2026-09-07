@@ -290,23 +290,16 @@ class TaskStore:
         """Find a task by full id, unique id prefix, or unique suffix — the
         suffix form is what `short_id` hands out (case-insensitive).
 
-        Raises KeyError when nothing matches, ValueError when the handle is
-        ambiguous — callers turn both into friendly CLI errors.
+        The handle grammar is `fsio.resolve_handle`'s, shared with board
+        messages, notes, archived tasks and agent runs. Raises KeyError when
+        nothing matches, ValueError when the handle is ambiguous — callers
+        turn both into friendly CLI errors.
         """
-        handle = handle.strip().upper()
-        exact = self.get(handle)
+        exact = self.get(handle.strip().upper())
         if exact is not None:
             return exact
-        matches = [
-            t for t in self.list() if t.id.startswith(handle) or t.id.endswith(handle)
-        ]
-        if not matches:
-            raise KeyError(handle)
-        if len(matches) > 1:
-            raise ValueError(
-                f"task handle {handle!r} is ambiguous: {', '.join(t.short_id for t in matches)}"
-            )
-        return matches[0]
+        by_id = {t.id: t for t in self.list()}
+        return by_id[fsio.resolve_handle(handle, by_id, what="task handle")]
 
     def update(self, task_id: str, now: Any = None, **fields: Any) -> Task:
         task = self.get(task_id)

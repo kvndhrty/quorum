@@ -211,25 +211,22 @@ class Notebook:
 
     def resolve(self, handle: str, now: datetime | None = None) -> dict:
         """Find one note by full id, unique prefix, or unique suffix (what
-        `short_id` hands out) — the same handle rules as tasks."""
-        wanted = handle.strip().upper()
-        if not wanted:
-            # every id starts with and ends with "", so an empty handle would
-            # match the whole notebook and read as "ambiguous"; say what's wrong
+        `short_id` hands out) — `fsio.resolve_handle`'s grammar, the one
+        tasks and board messages use, wearing the notebook's own errors.
+
+        An empty handle is refused with its own message: `resolve_handle`
+        reads it as "nothing matches", but a reader who typed nothing is
+        better told what to type than told there is no such note.
+        """
+        if not handle.strip():
             raise NotebookError(f"a note handle is required — `{self.read_cmd}`")
-        matches = [
-            e
-            for e in self.active(now=now)
-            if e["id"] == wanted or e["id"].startswith(wanted) or e["id"].endswith(wanted)
-        ]
-        if not matches:
-            raise NotebookError(f"no note matching {handle!r} — `{self.read_cmd}`")
-        if len(matches) > 1:
-            raise NotebookError(
-                f"note handle {handle!r} is ambiguous: "
-                + ", ".join(short_id(e["id"]) for e in matches)
-            )
-        return matches[0]
+        by_id = {e["id"]: e for e in self.active(now=now)}
+        try:
+            return by_id[fsio.resolve_handle(handle, by_id, what="note handle")]
+        except KeyError:
+            raise NotebookError(f"no note matching {handle!r} — `{self.read_cmd}`") from None
+        except ValueError as e:
+            raise NotebookError(str(e)) from None
 
     # -- writes --------------------------------------------------------------
 

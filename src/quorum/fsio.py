@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -95,6 +96,49 @@ def parse_iso(s: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def resolve_handle(
+    handle: str,
+    candidates: Iterable[str],
+    *,
+    what: str = "handle",
+    render: Callable[[str], str] | None = None,
+) -> str:
+    """The one candidate `handle` names: a full id, a unique prefix, or a
+    unique suffix, matched case-insensitively.
+
+    Every id quorum hands a person is a ULID, and what a person has in front
+    of them is usually the tail of one (`short_id`), copied off another line
+    of output — so tasks, board messages, notes, archived tasks and agent
+    runs all accept the same three forms. This is the one implementation of
+    that grammar; callers pass their own candidate ids.
+
+    An exact id wins outright, so an id that also happens to be another id's
+    prefix or suffix is never ambiguous. Raises KeyError(handle) when
+    nothing matches (an empty handle included: it would match everything)
+    and ValueError when more than one does, naming the matches with
+    `render` — the short form, unless a caller says otherwise. Callers turn
+    both into their own messages.
+    """
+    wanted = handle.strip().upper()
+    if not wanted:
+        raise KeyError(handle)
+    ids = list(candidates)
+    for candidate in ids:
+        if candidate.upper() == wanted:
+            return candidate
+    matches = [
+        c for c in ids if c.upper().startswith(wanted) or c.upper().endswith(wanted)
+    ]
+    if not matches:
+        raise KeyError(handle)
+    if len(matches) > 1:
+        show = render or (lambda c: c[-6:].lower())
+        raise ValueError(
+            f"{what} {handle!r} is ambiguous: " + ", ".join(show(m) for m in matches)
+        )
+    return matches[0]
 
 
 def slugify(text: str) -> str:
