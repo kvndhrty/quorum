@@ -468,7 +468,7 @@ def build_digest(
     # only part of the digest a *previous* you wrote deliberately for this
     # run, and it must not compete for room with per-task output that grows
     # with the number of live tasks.
-    lines += notes.digest_section(home, "manager", now=now) + [""]
+    lines += notes.agent_notebook(home, "manager").render(now=now) + [""]
     # Resolved once: without gh (or with [ci].enabled = false) no task is
     # probed at all.
     ci_budget = CI_MAX_PROBES if ci.available(home) else 0

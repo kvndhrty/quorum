@@ -852,7 +852,7 @@ scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
   escalating with `board post attention` instead. The prompt is the fence
   here, not a check: `task release` is an ordinary CLI verb and a harness
   that ignores its instructions can call it, which is exactly the
-  convention-not-boundary line `notes.may_write` draws.
+  convention-not-boundary line `Notebook.may_write` draws.
 - **Every verb is an ordinary `TaskStore.update` behind `_actor_guard`**, so
   `task.hold` / `task.release` / `task.set-priority` are journaled and count
   against an agent's per-run action cap like anything else. The TUI's `h`
@@ -888,16 +888,20 @@ task, on the same substrate and under the same rules:
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to a
   one-shot nudge) and an untagged human; any other task and any prompt
-  agent is refused with a pointer to `task nudge`. The same honesty as the
+  agent is refused with a pointer to `task nudge`. "The manager" is read
+  from config by *type* (`notes.manager_writers`), so a manager configured
+  as `[agents.boss] type = "manager"` — tagged `QUORUM_ACTOR=boss` — is
+  admitted; a config quorum cannot parse falls back to the literal name
+  rather than raising, because this is read on every task run. The same honesty as the
   manager's fence applies: it reads `QUORUM_ACTOR`, which any process that
   can run the CLI can set, so it is a **convention against accidental
   crowding, not a security boundary** — the sandbox is. The manager's
   notebook now refuses a task run, which is a change: before the task actor
   tag existed the runner stripped the launcher's tag and set nothing in its
-  place, so a task harness ran as `user` and `notes.may_write` admitted it —
+  place, so a task harness ran as `user` and the fence admitted it —
   a task could write into the manager's notebook. Tagging it `task-<id>`
   closes that; a task reaches the manager with `quorum task report` and the
-  board, as the fence always intended.
+  board.
 - **Reader.** `runner.compose_prompt` renders the notebook into every
   composed prompt — a resumed session and a fresh one alike, because the
   fresh one is the run that needs it — after the task body and the
@@ -910,7 +914,7 @@ task, on the same substrate and under the same rules:
   teaches the command. `quorum task show` prints the same rendering. The
   digest deliberately does not: the manager reads reports, and the
   notebook is the task's own.
-- **Attached tasks are the exception, and it is a real one.** An adopted
+- **Attached tasks are the exception.** An adopted
   session (*Attached tasks* below) does not go through the runner, so
   nothing composes a prompt for it and **its notebook is never rendered
   into the session**; `quorum task show <id>` is the read path there, for
@@ -1228,16 +1232,19 @@ It is a **separate buffer** on both sides, and that is the whole design:
 
 - *Write side.* Not a board topic, so no reporting task or chatty agent
   posts into it in the ordinary course of things. Only the notebook's own
-  agent and an untagged human may write (`notes.may_write`); a call tagged
-  as a task or another agent is refused with a pointer to `task report` and
-  `board post attention`. Be honest about what that fence is: `may_write`
-  reads `QUORUM_ACTOR` from the environment, and any process that can run
-  the quorum CLI can set it. The runner stripping the actor tag from task
-  runs, and this check, are **conventions that keep honest callers out of
-  each other's memory** — they stop accidental crowding, not a harness that
-  decides to impersonate the manager. The real boundary around a notebook
-  is the filesystem the run is given (`sandbox.py`), not this check.
-- *Read side.* `notes.digest_section` renders the notebook **before** the
+  agent and an untagged human may write (`Notebook.may_write`); a call
+  tagged as a task or another agent is refused with a pointer to
+  `task report` and `board post attention`. Be honest about what that fence
+  is: `may_write` reads `QUORUM_ACTOR` from the environment, and any process
+  that can run the quorum CLI can set it. The check is a **convention that
+  keeps honest callers out of each other's memory** — it stops accidental
+  crowding, not a harness that decides to impersonate the manager. The real
+  boundary around a notebook is the filesystem the run is given
+  (`sandbox.py`), not this check. The runner does not protect the manager's
+  notebook by stripping the actor tag: it strips the launcher's tag and then
+  sets the task's own (`task-<id>`, see *Task notebooks* above), and that is
+  the name the check reads.
+- *Read side.* `Notebook.render` renders the notebook **before** the
   task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
   else in the digest spends. Ten live tasks with long report tails cannot
   shrink it. Over the cap the newest notes are kept and the digest says how

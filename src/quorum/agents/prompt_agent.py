@@ -45,7 +45,7 @@ class PromptAgent(Agent):
                 notes="\n".join(
                     self_observations(self.ctx.home, self.ctx.name, agent_cap(self.ctx))
                     + [""]
-                    + notes.digest_section(self.ctx.home, self.ctx.name, now=self.ctx.now())
+                    + notes.agent_notebook(self.ctx.home, self.ctx.name).render(now=self.ctx.now())
                 ),
             )
             run_agent_harness(self.ctx, prompt)

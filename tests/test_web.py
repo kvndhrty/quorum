@@ -88,7 +88,7 @@ def test_agent_create_detail_and_control(client: TestClient, home: Path):
     # the notebook rides along with the detail, read straight off its file
     from quorum import notes
 
-    notes.remember(home, "the standup skips weekends", owner="standup")
+    notes.agent_notebook(home, "standup").remember("the standup skips weekends")
     detail = client.get("/api/agents/standup").json()
     assert [n["text"] for n in detail["notes"]] == ["the standup skips weekends"]
     assert "skips weekends" in detail["notes_text"]

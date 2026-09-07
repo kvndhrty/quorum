@@ -5,7 +5,9 @@ it spawns with these env vars; the CLI reads them to journal (and rate-cap)
 that agent's actions in its journal and to attribute messages. Anything that
 spawns a further process on an actor's behalf (task runs, detached children)
 strips the tag so the child acts as itself — a leaked tag would journal the
-child's quorum calls as the agent's actions and burn the agent's cap.
+child's quorum calls as the agent's actions and burn the agent's cap. The
+runner then tags a task's harness `QUORUM_ACTOR=task-<id>`, so a task run
+acts under its own identity rather than as nobody.
 """
 
 from __future__ import annotations
@@ -103,8 +105,13 @@ def task_actor(task_id: str) -> str:
 
 
 def is_task_actor(name: str) -> bool:
-    """Whether an actor name is a task's (`task-<id>`) rather than an agent's."""
-    return name.startswith(TASK_ACTOR_PREFIX) and len(name) > len(TASK_ACTOR_PREFIX)
+    """Whether an actor name is a task's (`task-<id>`) rather than an agent's.
+
+    The bare prefix counts: `config.validate_agent_name` calls this to reject
+    agent names that would collide with a task identity, and an agent named
+    `task-` collides with the whole space.
+    """
+    return name.startswith(TASK_ACTOR_PREFIX)
 
 
 def current_actor() -> str:

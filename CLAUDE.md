@@ -383,14 +383,16 @@ option with a default has no row.
   separate buffer from both the journal (a bounded tail of one run's actions,
   which a busy tick scrolls) and the board (which anything may post to).
   Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
-  through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
-  any actor that is not the notebook's own agent or an untagged human — tasks
+  through `_actor_guard`, `forget` appends a tombstone, and
+  `Notebook.may_write` refuses any actor that is not the notebook's own
+  agent, one of its extra `writers`, or an untagged human — tasks
   reach the manager with `task report` and the board. That fence reads
   `QUORUM_ACTOR`, so it is a **convention against accidental crowding, not a
   security boundary** (the sandbox is); say so in docs rather than overselling
   it. Reads are owner-checked too (`check_owner`, `--agent` is a path
-  component), and a malformed line is skipped, never raised, so one bad line
-  can't fail every tick. `digest_section` renders it **before** the task
+  component), and a malformed line — or a notes.jsonl that is unreadable or
+  a directory — is skipped, never raised, so one bad line can't fail every
+  tick. `Notebook.render` renders it **before** the task
   section under its own `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else
   spends that budget, so noisy tasks can't shrink it), keeps the newest over
   the cap and says how many it dropped — plus how many bytes fell outside
@@ -403,10 +405,15 @@ option with a default has no row.
   admitted as an extra writer, rendered by `runner.compose_prompt` into
   every run's prompt (resume and fresh alike, after the task body, before
   guidance) under `TASK_NOTES_MAX_ENTRIES`/`TASK_NOTES_MAX_BYTES`, nothing
-  when empty, printed by `task show`, **never in the digest**. The
-  module-level functions are the manager-shaped face over `agent_notebook`
-  and their behaviour is unchanged; `quorum task remember|forget` are the
-  task verbs, through `_actor_guard` like the manager's.
+  when empty, printed by `task show`, **never in the digest**. Which names
+  count as "the manager" there comes from config by *type*
+  (`manager_writers`), so a renamed manager is admitted. `agent_notebook`
+  and `task_notebook` are the only entry points — every caller holds a
+  `Notebook` and calls its methods, there are no module-level
+  pass-throughs; `quorum task remember|forget` are the task verbs, through
+  `_actor_guard` like the manager's, sharing one `cli._notebook_write`
+  with `manager remember|forget` so the fence decision, the single
+  journaled refusal and the refusal wording exist once.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
 - `sandbox.py` — the *only* module that imports `nono_py`, always lazily and inside
