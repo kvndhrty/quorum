@@ -339,9 +339,11 @@ async function renderTaskDetail() {
   const text = [...lines, ...(reports.length ? ["— reports —", ...reports] : [])].join("\n") || "no output yet";
   if ($("task-tail").textContent !== text) $("task-tail").textContent = text;
   // One line per event, the same `[at] text` shape `quorum task history`
-  // and the TUI print — the rows arrive rendered, so the surfaces agree.
+  // and the TUI print. Both halves arrive rendered — `at_text` already
+  // carries the `?` a stamp that would not parse gets — so the surfaces
+  // agree without this reimplementing views.history_line.
   const history = (t.history || []).map(h =>
-    `[${(h.at || "").replace("T", " ").replace("Z", "")}] ${h.text}`).join("\n") || "nothing yet";
+    `[${h.at_text || ""}] ${h.text}`).join("\n") || "nothing yet";
   if ($("task-history").textContent !== history) $("task-history").textContent = history;
 }
 

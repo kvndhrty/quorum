@@ -1515,11 +1515,12 @@ the invariant that survived it is *thin, shared, no view-local write logic*.
 `views.task_history(home, task)` is the first of the post-hoc readers
 (#88): one list, oldest first, of everything that happened to a task,
 assembled from the files that already record it and nothing else. Every
-row is `{at, kind, text, ...}` — `at` an ISO-8601 UTC stamp, `kind` one of
+row is `{at, at_text, kind, text, ...}` — `at` the ISO-8601 UTC stamp as it
+was written, `at_text` that stamp as a surface prints it, `kind` one of
 `queued`, `action`, `guidance`, `run.started`, `report`, `run.ended`,
-`pr_state`, `archived`, and `text` the one line every surface prints
-(`views.history_line`: `[at] text`), with the kind's raw fields beside it
-for `--json`. `quorum task history`, the TUI's `t` tab and the web task
+`pr_state`, `archived`, and `text` the rest of the line every surface
+prints (`views.history_line`: `[at_text] text`), with the kind's raw fields
+beside it for `--json`. `quorum task history`, the TUI's `t` tab and the web task
 page (`history` on `/api/tasks/{id}`) all render the same rows, so they
 cannot disagree. The sources, and what each contributes:
 
@@ -1545,8 +1546,21 @@ where it happens (as `pr_state_at` was, #79), never to compute and cache
 it here. It is bounded and fail-soft in the read model's way — the
 journals over a byte budget, the archive from the task's own month on, a
 torn line or an undecodable archive file costs the rows it held and never
-the list — because the TUI re-reads it every two seconds while the tab is
-open. And it outlives pruning: `quorum task history` resolves a handle
+the list. A stamp that will not parse sorts after every real row instead of
+by string comparison, and `at_text` marks it with a `?`, so an event quorum
+cannot place in time is visible rather than silently misfiled. Guidance is
+deduplicated by message id, furthest-along state winning, because `ack()`
+archives before it unlinks the `cur/` copy and a consumer that dies between
+the two leaves the message in both places for good.
+
+Even bounded it is too expensive for a polling loop: on a home with four
+agents' journals at the byte budget and a year of archives it takes about
+four tenths of a second. So the TUI's tab is a snapshot, not a follower —
+rebuilt on `t`, on `r`, on opening a different task and after any write the
+dashboard itself made, and reused on the two-second tick. The web page
+builds it once per request for one task, which is the same bound.
+
+And it outlives pruning: `quorum task history` resolves a handle
 out of `tasks/.archive/` (`prune.resolve_archived`, the same
 full-id/prefix/suffix grammar as `TaskStore.resolve`) when the live
 listing has nothing, because archival is the last thing that happens to a

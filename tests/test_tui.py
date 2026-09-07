@@ -660,3 +660,59 @@ def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path):
         assert mode_text(app).startswith("board")
 
     drive(home, script)
+
+
+def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
+    """Building a history reads every agent's journal and the message
+    archive, which is far too much work for the two-second tick. So the tab
+    is rebuilt when `t` opens it, when `r` is pressed, when a write goes
+    through the dashboard and when a different task is opened — and the tick
+    reuses what it has."""
+    from quorum import tasks
+    from quorum.tui import app as tui_app
+
+    ids = populate(home)
+    builds: list[str] = []
+    real = tui_app.views.task_history
+    monkeypatch.setattr(
+        tui_app.views,
+        "task_history",
+        lambda h, task, **kw: (builds.append(task.id), real(h, task, **kw))[1],
+    )
+
+    async def script(app, pilot):
+        await pilot.press("down", "t")
+        await pilot.pause()
+        assert builds == [ids[1]]  # opening the tab built it once
+
+        # the interval tick is refresh_data; it must not rebuild
+        app.refresh_data()
+        app.refresh_data()
+        assert builds == [ids[1]]
+
+        # a report landing out of band is not picked up until asked for
+        tasks.report(home, ids[1], status="executing", text="on it")
+        app.refresh_data()
+        assert not any("reported executing: on it" in line for line in app._log_lines)
+
+        await pilot.press("r")
+        await pilot.pause()
+        assert builds == [ids[1], ids[1]]
+        assert any("reported executing: on it" in line for line in app._log_lines)
+
+        # opening another task rebuilds for that task, and only once
+        await pilot.press("up", "enter")
+        await pilot.pause()
+        app.refresh_data()
+        assert builds == [ids[1], ids[1], ids[0]]
+
+        # and a write from the dashboard drops the snapshot it invalidates
+        await pilot.press("n")
+        await pilot.pause()
+        app.query_one("#nudge", Input).value = "steer left"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert builds[-1] == ids[0] and len(builds) == 4
+        assert any("guidance from" in line and "steer left" in line for line in app._log_lines)
+
+    drive(home, script)

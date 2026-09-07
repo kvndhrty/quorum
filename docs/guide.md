@@ -1166,7 +1166,13 @@ quietly ignored.
 
   `enter` and `t` are the two tabs of a task's detail — the transcript
   tail and its history ([the life of a task](#watching-the-life-of-a-task))
-  — and the one you chose sticks as you open other tasks.
+  — and the one you chose sticks as you open other tasks. The transcript
+  tail follows along on its own; the history tab is a snapshot, because
+  building it reads every agent's journal and the message archive and that
+  is too much work for the dashboard's two-second tick. It is rebuilt when
+  you press `t`, when you press `r`, when you open a different task, and
+  after anything you do from the dashboard itself (`n`, `s`, `c`, `h`,
+  `+`/`-`) — so press `r` to pick up a run's own progress.
 
   `n`, `s` and `c` act on the row you're pointing at, so you never have to
   open a task to act on it; while you're reading one task's transcript they

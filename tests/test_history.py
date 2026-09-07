@@ -287,3 +287,61 @@ def test_cli_still_answers_for_a_pruned_task(home: Path):
     assert r.exit_code == 1 and "ambiguous" in r.output
     r = runner.invoke(app, ["task", "history", twin.id, "--home", str(home)])
     assert r.exit_code == 0 and "queued on proj" in r.output
+
+
+def test_an_unparseable_stamp_sorts_last_and_says_so(home: Path):
+    """A row quorum cannot place in time is still shown, but it goes after
+    every real row and its line is marked `?`. Ordering by raw string
+    comparison would file an empty stamp as the first thing that ever
+    happened to the task and `not-a-date` as the last, both silently."""
+    task = TaskStore(home).add("proj", "x", "fake", now=at(2))
+    with open(tasks.reports_path(home, task.id), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": fsio.iso(at(3)), "status": "executing", "text": "real"}) + "\n")
+        f.write(json.dumps({"status": "planning", "text": "no at key"}) + "\n")
+        f.write(json.dumps({"at": "", "status": "planning", "text": "empty at"}) + "\n")
+        f.write(json.dumps({"at": "not-a-date", "status": "planning", "text": "junk at"}) + "\n")
+    rows = views.task_history(home, task)
+    assert [r["text"] for r in rows][:2] == [
+        f"queued on {task.project} · harness fake",
+        "reported executing: real",
+    ]
+    assert {r["text"] for r in rows[2:]} == {
+        "reported planning: no at key",
+        "reported planning: empty at",
+        "reported planning: junk at",
+    }
+    marked = [views.history_line(r) for r in rows[2:]]
+    assert all(line.startswith("[?") for line in marked)
+    assert "[? not-a-date]" in " ".join(marked)
+    assert views.history_line(rows[0]).startswith("[2026-01-01 02:00:00]")
+    # the raw stamp survives for --json; only the rendered half is marked
+    assert [r["at"] for r in rows[2:]].count("") == 2
+    assert json.dumps(rows)
+
+
+def test_guidance_in_two_places_at_once_is_one_row(home: Path):
+    """`ack()` appends to the archive before it unlinks the `cur/` copy, so a
+    consumer that dies between the two leaves the message in both — and the
+    janitor then returns the orphaned claim to `new/`, where nothing ever
+    re-archives it. The history must list that nudge once, in the furthest
+    state it reached, not once per place a copy of it is lying in."""
+    from quorum.messages import _archive_one
+
+    task = TaskStore(home).add("proj", "x", "fake", now=at(1))
+    bus = MessageBus(home)
+    tasks.nudge(home, task, "steer left", sender="user")
+    claimed = next(bus.claim(inbox_name(task.id)))
+    assert claimed.message.payload["text"] == "steer left"
+    # ack() halfway through: archived, but the cur/ copy still on disk, which
+    # is what a crash between its two lines leaves behind
+    _archive_one(bus.archive_dir, claimed.message.dump())
+    assert claimed.path.exists()
+    rows = [r for r in views.task_history(home, task) if r["kind"] == "guidance"]
+    assert len(rows) == 1
+    assert rows[0]["state"] == "delivered"
+    assert rows[0]["text"] == "guidance from user: steer left"
+    # and still one row once the janitor has put the orphaned claim back
+    claimed.reject()
+    rows = [r for r in views.task_history(home, task) if r["kind"] == "guidance"]
+    assert len(rows) == 1
+    assert rows[0]["state"] == "delivered"

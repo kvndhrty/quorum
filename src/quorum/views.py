@@ -306,13 +306,32 @@ _HISTORY_KINDS = (
 )
 
 
-def _human_at(at: str) -> str:
-    return str(at or "").replace("T", " ").rstrip("Z")
+def _at_parses(at: Any) -> bool:
+    """Whether a row's `at` is a stamp the list can order by. Everything
+    quorum writes goes through `fsio.iso`, so a value that fails here came
+    off a torn line, a hand-edited file, or a harness that wrote its own."""
+    try:
+        fsio.parse_iso(str(at))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _human_at(at: Any) -> str:
+    """The stamp as a surface prints it, with a leading `?` when it does not
+    parse. A row quorum cannot place in time is still shown — dropping it
+    would lose the event — so the line says the time is not to be trusted
+    instead of presenting a position in the list it did not earn."""
+    text = str(at or "").replace("T", " ").rstrip("Z")
+    if _at_parses(at):
+        return text
+    return f"? {text}".rstrip()
 
 
 def history_line(row: dict[str, Any]) -> str:
     """One history row as the line every surface prints: `[at] text`."""
-    return f"[{_human_at(row.get('at', ''))}] {row.get('text', '')}"
+    at = row.get("at_text") or _human_at(row.get("at", ""))
+    return f"[{at}] {row.get('text', '')}"
 
 
 def _run_started_text(n: int, fresh: bool, live: bool) -> str:
@@ -423,8 +442,22 @@ def _guidance_rows(home: Path, task: Task) -> list[dict[str, Any]]:
     found += [("delivered", m) for m in bus.archived_direct(inbox, since=since)]
     found += [("claimed", m) for m in bus.inbox_messages(inbox, "cur")]
     found += [("waiting", m) for m in bus.inbox_messages(inbox, "new")]
-    rows = []
+    # One row per message, however many places it is sitting in. `ack()`
+    # appends to the archive *before* it unlinks the `cur/` copy, so a
+    # consumer that dies between the two leaves the message in both — and the
+    # janitor then returns the orphaned claim to `new/`, where it stays,
+    # because nothing re-archives an already archived message. Without this
+    # the same nudge is listed twice for good. The furthest-along state is
+    # the true one: a message in the archive was delivered whatever copy of
+    # it is still lying around.
+    rank = {"waiting": 0, "claimed": 1, "delivered": 2}
+    best: dict[str, tuple[str, Any]] = {}
     for state, m in found:
+        seen = best.get(m.id)
+        if seen is None or rank[state] > rank[seen[0]]:
+            best[m.id] = (state, m)
+    rows = []
+    for state, m in best.values():
         note = str(m.payload.get("text", ""))
         marker = "" if state == "delivered" else f" ({state})"
         rows.append(
@@ -445,8 +478,10 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
     """Everything that happened to one task, oldest first.
 
     A pure reader over what is already on disk; every row carries `at`
-    (ISO-8601 UTC), `kind` (one of `_HISTORY_KINDS`) and `text` (the line
-    every surface prints — `history_line`), plus the raw fields of its kind.
+    (ISO-8601 UTC as it was written), `at_text` (that stamp as a surface
+    prints it, behind a `?` when it does not parse), `kind` (one of
+    `_HISTORY_KINDS`) and `text` (the rest of the line every surface prints
+    — `history_line`), plus the raw fields of its kind.
     `root` is the task's directory, which for a pruned task is under
     `tasks/.archive/` (the caller resolved it there; see
     `prune.resolve_archived`) — the one row with no record of its own,
@@ -571,8 +606,22 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
                 "text": "archived by `task prune` (moved to tasks/.archive; `mv` restores it)",
             }
         )
+    # Total over whatever is on disk. A stamp that parses orders by its own
+    # string (every writer here uses `fsio.iso`, so string order is time
+    # order) then by kind; one that does not parse sorts *after* every real
+    # row rather than landing mid-list by string comparison — an empty `at`
+    # would otherwise read as the first thing that ever happened to the task,
+    # and `not-a-date` as the last. `at_text` carries the `?` that says so.
     order = {kind: i for i, kind in enumerate(_HISTORY_KINDS)}
-    rows.sort(key=lambda r: (r["at"], order.get(r["kind"], len(order))))
+    for row in rows:
+        row["at_text"] = _human_at(row.get("at", ""))
+    rows.sort(
+        key=lambda r: (
+            0 if _at_parses(r.get("at")) else 1,
+            str(r.get("at") or ""),
+            order.get(r.get("kind"), len(order)),
+        )
+    )
     return rows
 
 

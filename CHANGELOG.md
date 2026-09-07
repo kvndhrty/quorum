@@ -212,7 +212,9 @@ minute it is posted.
   record each fact (`task.json`, `reports.jsonl`, the inbox and message
   archive, the agents' journals, `tasks/.archive`); nothing new is written.
   It still answers for a pruned task, resolved out of the archive. The same
-  list is the TUI's `t` tab on a task and a block on the web task page. (#95)
+  list is the TUI's `t` tab on a task and a block on the web task page; the
+  tab is a snapshot rather than a follower, since building it is too much
+  work for the two-second tick — `r` rebuilds it. (#95)
 
 ### Changed
 - `quorum init` recognizes a never-edited prompt seed by a record in the

@@ -208,6 +208,14 @@ class QuorumTUI(App):
         # what happened to it (views.task_history). `t` switches; the choice
         # sticks across tasks the way a tab does.
         self._task_view = "transcript"
+        # The history tab's last content, and the task it was built for.
+        # `views.task_history` reads every agent's journal and the message
+        # archive, which is far more work than the two-second tick can carry,
+        # so the tab is a snapshot rather than a follower: `t`, `r`, a write
+        # this dashboard made, and opening a different task rebuild it, and
+        # nothing else does.
+        self._history_lines: list[str] | None = None
+        self._history_for: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -241,6 +249,7 @@ class QuorumTUI(App):
     # -- actions -----------------------------------------------------------
 
     def action_refresh(self) -> None:
+        self._invalidate_history()
         self.refresh_data()
 
     def action_show_board(self) -> None:
@@ -257,7 +266,9 @@ class QuorumTUI(App):
     def action_history(self) -> None:
         """Show the highlighted (or open) task's history in the detail pane;
         pressed again on an open task, switch back to its transcript. A read,
-        like `enter` — it arms nothing."""
+        like `enter` — it arms nothing. Pressing `t` is also what rebuilds
+        the tab, so a second press on a task already showing its history
+        both closes the tab and drops what it was holding."""
         task_id = self._highlighted_task() or self.selected_task
         if task_id is None:
             self.notify("no task to show", severity="warning")
@@ -266,6 +277,7 @@ class QuorumTUI(App):
             self._task_view = "transcript"
         else:
             self._task_view = "history"
+        self._invalidate_history()
         self.selected_task, self.selected_agent = task_id, None
         self.refresh_data()
 
@@ -464,6 +476,10 @@ class QuorumTUI(App):
         That surfaces as the KeyError/ValueError board resolution raises, not
         as OSError, and it is the same class of disappointment: say so and keep
         the view up."""
+        # Every write here is an event in some task's life, so the history
+        # tab must not go on showing the list from before it. Dropping it on
+        # a write that then fails costs one rebuild and nothing else.
+        self._invalidate_history()
         try:
             return do()
         except (OSError, KeyError, ValueError) as e:
@@ -674,9 +690,10 @@ class QuorumTUI(App):
             if self._task_view == "history":
                 mode.update(
                     f"task {short} — history, oldest first   "
-                    "(t: transcript · esc: board · n: nudge · m: manager · s: run · c: cancel)"
+                    "(t: transcript · r: rebuild · esc: board · n: nudge · m: manager · "
+                    "s: run · c: cancel)"
                 )
-                lines = self._task_history_lines(self.selected_task)
+                lines = self._history_pane_lines(self.selected_task)
             else:
                 mode.update(
                     f"task {short} — transcript tail   "
@@ -704,6 +721,22 @@ class QuorumTUI(App):
             log.clear()
             for line in lines:
                 log.write(line)
+
+    def _invalidate_history(self) -> None:
+        """Drop the history tab's snapshot; the next render rebuilds it."""
+        self._history_lines = None
+
+    def _history_pane_lines(self, task_id: str) -> list[str]:
+        """What the history tab shows, rebuilt only when something asked for
+        it — `t`, `r`, a write this dashboard made, or a different task being
+        opened. The two-second tick reuses what is here, because building the
+        list reads every agent's journal and the message archive and would
+        otherwise hold up the interface for a fifth of every tick on a home
+        with any history behind it."""
+        if self._history_lines is None or self._history_for != task_id:
+            self._history_for = task_id
+            self._history_lines = self._task_history_lines(task_id)
+        return self._history_lines
 
     def _task_history_lines(self, task_id: str) -> list[str]:
         """The task's life as `quorum task history` prints it — the same
