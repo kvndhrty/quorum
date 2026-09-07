@@ -213,9 +213,12 @@ option with a default has no row.
   `state/agents/<name>/usage.jsonl`) — every run, failures included, read back
   over a bounded tail by `usage.agent_usage`. Views/`quorum status`/the digest
   surface both (the digest opens with the manager's own spend).
-  `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
-  over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
-  class as `possible-loop`; enforcement is deliberately not implemented.
+  `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) flag an
+  over-budget run (`BUDGET-EXCEEDED`, `$!`) in the digest and in views. A
+  task whose *last* run went over is then refused its next run by `task
+  run` (`runner.budget_blockers`/`budget_refusal`), waivable with
+  `--force`; nothing is killed mid-run and no particular choice is vetoed,
+  so the gate is a rate limit of the action cap's class, not a veto.
 - `agents/manager.py` — the flagship builtin, and it makes **no decisions in Python**:
   its tick builds a situation digest (`build_digest`, pure over files — task
   statuses, runner liveness, quiet time, report/transcript tails, a

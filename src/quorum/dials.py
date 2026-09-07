@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import get_args
 
 from .actor import DEFAULT_MAX_ACTIONS_PER_RUN, DEFAULT_RUN_TIMEOUT_SECONDS
 from .config import AgentConfig, Config, TasksConfig
@@ -48,16 +49,29 @@ MANAGER_OVERLAY = "prompts/manager.local.md"
 GUIDE_ANCHOR = "docs/guide.md#loosening-the-rails-as-trust-is-earned"
 
 
+def _is_numeric_annotation(annotation) -> bool:
+    """True for `int`, `float`, and unions of those with `None`.
+
+    Checked on the annotation, not the value: `bool` is an `int` subclass and
+    a switch is not a dial. Unions are unwrapped because `int | None` is an
+    ordinary way to spell "off by default" for a numeric option, and a knob
+    written that way must still be caught by the guide's table test.
+    """
+    if annotation in (int, float):
+        return True
+    args = [arg for arg in get_args(annotation) if arg is not type(None)]
+    return bool(args) and all(arg in (int, float) for arg in args)
+
+
 def numeric_options(model: type) -> dict[str, int | float]:
     """Every int/float field of a pydantic config model that has a default.
 
-    Checked on the annotation, not the value: `bool` is an `int` subclass and
-    a switch is not a dial. A required field (no default) is skipped — the
-    table documents defaults, and a field with none has nothing to loosen.
+    A required field (no default) is skipped — the table documents defaults,
+    and a field with none has nothing to loosen.
     """
     found: dict[str, int | float] = {}
     for name, field in model.model_fields.items():
-        if field.annotation not in (int, float):
+        if not _is_numeric_annotation(field.annotation):
             continue
         if field.is_required():
             continue

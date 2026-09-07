@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 
+from pydantic import BaseModel
 from typer.testing import CliRunner
 
 from quorum import dials, doctor
@@ -54,6 +55,25 @@ def test_numeric_options_reads_int_and_float_defaults_and_skips_switches():
     }
     assert "worktree" not in found  # bool is an int subclass; a switch is not a dial
     assert "auto_commit" not in found
+
+
+def test_numeric_options_unwraps_optional_numeric_annotations():
+    """`int | None` is an ordinary way to spell "off by default"; a knob
+    written that way must still be found, or the guide's table test would
+    pass while the option had no row."""
+
+    class Model(BaseModel):
+        plain: int = 1
+        optional_int: int | None = None
+        optional_float: float | None = 2.5
+        optional_switch: bool | None = None
+        text: str = ""
+        required: int
+
+    found = dials.numeric_options(Model)
+    assert found == {"plain": 1, "optional_int": None, "optional_float": 2.5}
+    assert "optional_switch" not in found  # a switch is not a dial, optional or not
+    assert "required" not in found
 
 
 def test_agent_numeric_options_name_the_settings_the_runs_read():

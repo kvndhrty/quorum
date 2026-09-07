@@ -231,10 +231,13 @@ home: /Users/you/.quorum
   – dial manager cadence: every 5m
 ```
 
-`✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
-something you switched off, never configured, or that could not answer
-(a `gh` that timed out is `–`, not a failure: offline says nothing about
-whether you are logged in). Only `✗` affects the exit code, so a `–` never
+`✓` is fine, `✗` is a problem, and `–` is everything that is neither. Most
+`–` lines mean there was nothing to check: something you switched off,
+never configured, or that could not answer (a `gh` that timed out is `–`,
+not a failure: offline says nothing about whether you are logged in). The
+`dial` lines are the other kind — they report a current setting rather
+than check it, and a cautious default and a value you loosened on purpose
+are both facts, not faults. Only `✗` affects the exit code, so a `–` never
 trains you to ignore the output — a freshly `init`ed home with no harness
 chosen yet says so in one `–` line and exits 0. Doctor **diagnoses and
 never repairs**: every `✗` names the fix, and applying it stays your call.
