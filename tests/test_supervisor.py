@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, installed_version, views
-from quorum.config import Config, load_config
+from quorum.config import Config, ConfigError, load_config
 from quorum.messages import MessageBus
 from quorum.registry import AgentResolutionError, resolve
 from quorum.supervisor import MAX_CONSECUTIVE_FAILURES, Supervisor
@@ -104,6 +104,32 @@ def test_startup_failure_propagates_and_releases_lock(home: Path):
     with pytest.raises(Boom):
         sup.run()
     assert not (home / "supervisor.lock").exists()
+
+
+def test_a_bad_cron_field_is_rejected_at_load_not_inside_quorum_up(home: Path):
+    """`_schedule_agent` calls `add_job` outside the per-agent try that
+    records a load failure, so an out-of-range cron field found there comes
+    out of `quorum up` itself. APScheduler parses the expression at
+    validation time instead, where it is one bad agent file."""
+    (home / "plugins" / "cronny.py").write_text(
+        "from quorum.agent import Agent\nclass Cronny(Agent):\n    def tick(self):\n        pass\n"
+    )
+    agent_file = home / "agents" / "cronny.toml"
+    agent_file.write_text('type = "cronny:Cronny"\nschedule = "cron 99 * * * *"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        write_config(home, "")
+    assert "cronny.toml" in str(excinfo.value) and "99" in str(excinfo.value)
+
+    # And what the validator accepts, APScheduler schedules: the two parse
+    # the same expression, so a loaded config can no longer surprise `up`.
+    agent_file.write_text('type = "cronny:Cronny"\nschedule = "cron */5 2 * * 1-5"\n')
+    sup = Supervisor(home, write_config(home, ""))
+    sup.scheduler.start(paused=True)
+    try:
+        sup._schedule_agent("cronny", sup.agents["cronny"])
+        assert sup.scheduler.get_job("cronny") is not None
+    finally:
+        sup.scheduler.shutdown(wait=False)
 
 
 def test_supervisor_lock_records_the_running_version(home: Path):
