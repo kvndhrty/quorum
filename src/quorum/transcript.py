@@ -659,7 +659,7 @@ def render_run(
     out.append("")
     out.append(f"--- what it saw ({actor.run_snapshot_path(home, name, run_id).name})")
     if not snapshot.strip():
-        out.append("(no snapshot kept for this run)")
+        out.append("(the digest this run was given is no longer kept)")
     else:
         lines = snapshot.splitlines()
         shown = lines if verbose else lines[:SNAPSHOT_PREVIEW_LINES]

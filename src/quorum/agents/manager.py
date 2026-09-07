@@ -3,7 +3,7 @@
 Supervision policy is not code here. Each tick, the manager compiles a
 situation digest — every active task's status, liveness, quiet time, recent
 reports and output, plus the manager's own recent action journal and any
-directives the user sent — renders it into the user-editable
+guidance the user sent — renders it into the user-editable
 `prompts/manager.md`, and runs the configured coding harness over it. The
 harness then acts with real authority by invoking the quorum CLI:
 `task add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`,
@@ -722,7 +722,7 @@ def build_digest(
         lines.append(line)
     lines.append("")
 
-    lines.append("## Directives from the user")
+    lines.append("## Guidance from the user")
     if directives:
         lines.extend(f"- {d}" for d in directives)
     else:

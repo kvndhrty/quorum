@@ -14,7 +14,7 @@ merges — and get the task that owns it working on the fix.
 
 Run time: {now}
 
-Directives from the user (follow these above all else):
+Guidance from the user (follow this above all else):
 {directives}
 
 QUORUM_HOME is your working directory and is set in your environment. Your

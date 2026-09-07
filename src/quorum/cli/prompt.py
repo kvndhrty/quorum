@@ -95,11 +95,12 @@ PREAMBLE = "task-preamble"
 
 
 def _print_project_blocks(target: Path) -> None:
-    """The fourth prompt layer: what each project puts in the preamble's
-    `{project}` slot (its registry notes, its own .quorum file, or both).
+    """The fourth prompt layer: the project overlay each project puts in the
+    preamble's `{project}` slot (its registry notes, its own .quorum file, or
+    both).
 
-    Only projects that actually contribute a block are listed — the point is
-    to make per-project prompt text findable, not to re-list the registry.
+    Only projects that actually contribute one are listed — the point is to
+    make per-project prompt text findable, not to re-list the registry.
     """
     from ..projects import ProjectRegistry
 
@@ -119,7 +120,7 @@ def _print_project_blocks(target: Path) -> None:
             rows.append((project.slug, " + ".join(sources)))
     if not rows:
         return
-    typer.echo(f"  per-project {{project}} block in {PREAMBLE}:")
+    typer.echo(f"  per-project overlay in {PREAMBLE} ({{project}} slot):")
     for slug, sources in rows:
         typer.echo(f"    {slug:<14} {sources}")
     try:
@@ -128,7 +129,8 @@ def _print_project_blocks(target: Path) -> None:
         return  # already reported above as missing or unreadable
     if not prompts_mod.has_slot(template, "project"):
         typer.secho(
-            f"    prompts/{PREAMBLE}.md has no {{project}} slot — these blocks are never rendered",
+            f"    prompts/{PREAMBLE}.md has no {{project}} slot —"
+            " these overlays are never rendered",
             fg="yellow",
         )
 

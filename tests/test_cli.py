@@ -1113,7 +1113,7 @@ def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
     r = runner.invoke(app, ["prompt", "list"])
     assert r.exit_code == 0, r.output
     out = _plain(r.output)
-    assert "per-project {project} block in task-preamble:" in out
+    assert "per-project overlay in task-preamble ({project} slot):" in out
     assert f"{slug}" in out and "notes (registry)" in out
     assert ".quorum/task-preamble.local.md" in out
 
@@ -1125,7 +1125,7 @@ def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
     # ...and so is a block with nowhere to go, in a rewritten preamble
     (home / "prompts" / "task-preamble.md").write_text("my own rewritten preamble\n")
     out = _plain(runner.invoke(app, ["prompt", "list"]).output)
-    assert "has no {project} slot — these blocks are never rendered" in out
+    assert "has no {project} slot — these overlays are never rendered" in out
 
 
 def test_project_add_validates_the_directory(home: Path, tmp_path: Path):

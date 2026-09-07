@@ -2,7 +2,7 @@
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
 CLI makes: `n` sends guidance into a task's inbox, `m` sends a
-directive to the manager's inbox (`quorum manager tell`), `s` launches a
+guidance to the manager's inbox (`quorum manager tell`), `s` launches a
 detached run, `c` cancels a task — the one destructive binding, so it confirms
 first — and `a` acks an escalation off the #attention banner
 (`quorum board ack`).
@@ -272,8 +272,8 @@ class QuorumTUI(App):
 
     def action_directive(self) -> None:
         """`quorum manager tell`, from the dashboard: the manager's next run
-        starts with the directive in its digest. No task selection needed."""
-        self._open_input("manager", "directive for the manager — enter sends, esc cancels")
+        starts with that guidance in its digest. No task selection needed."""
+        self._open_input("manager", "guidance for the manager — enter sends, esc cancels")
 
     def action_run_task(self) -> None:
         task = self._target_task()
@@ -362,12 +362,12 @@ class QuorumTUI(App):
             return
         if target == "manager":
             sent = self._write(
-                "queue the directive",
+                "queue the guidance",
                 lambda: MessageBus(self.home).send("user", "manager", type="directive", text=text),
             )
             if sent is FAILED:
                 return
-            self.notify("directive queued for the manager's next run")
+            self.notify("guidance queued for the manager's next run")
             self.refresh_data()
             return
         task = TaskStore(self.home).get(task_id) if task_id else None

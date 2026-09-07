@@ -211,7 +211,7 @@ def task_adopt(
 
 @task_app.command("detach")
 def task_detach(task_id: str) -> None:
-    """Detach an adopted task from its interactive session — after this the
+    """Detach an attached task from its interactive session — after this the
     manager may run it headless like any other task."""
     from ..tasks import TaskStore
 
@@ -229,7 +229,7 @@ def _match_attached(home: Path, session_id: str, cwd: str):
     then the working directory. The cwd fallback only fires when the task
     has no *live* session of its own — adopted id-less, or its known session
     already ended (a resume under a fresh id) — so a second concurrent
-    session in the same checkout can't steal an adopted task's guidance or
+    session in the same checkout can't steal an attached task's guidance or
     overwrite its session id."""
     from ..tasks import TERMINAL_STATUSES, TaskStore, attached_state
 
@@ -276,7 +276,7 @@ def task_hook_stop(
 ) -> None:
     """Harness stop/idle-hook entry point (reads the hook's JSON on stdin).
 
-    For an adopted session this refreshes its liveness record and, when
+    For an attached session this refreshes its liveness record and, when
     guidance is waiting in the task inbox, emits it — by default as the
     Stop-hook block-protocol JSON that continues the session (Claude Code and
     Codex speak the same one). For everything else it exits 0 silently — the
@@ -322,7 +322,7 @@ def task_hook_stop(
 
 @task_app.command("hook-session-start", rich_help_panel="Harness protocol")
 def task_hook_session_start() -> None:
-    """Harness SessionStart-hook entry point: refreshes an adopted task's
+    """Harness SessionStart-hook entry point: refreshes an attached task's
     liveness record and learns the (possibly new) session id — harnesses
     whose sessions can't shell out with their own id at adopt time (Codex)
     get it associated here instead."""
@@ -343,7 +343,7 @@ def task_hook_session_start() -> None:
 
 @task_app.command("hook-session-end", rich_help_panel="Harness protocol")
 def task_hook_session_end() -> None:
-    """Harness SessionEnd-hook entry point: records that an adopted session
+    """Harness SessionEnd-hook entry point: records that an attached session
     ended (the task stays attached — sessions get reopened)."""
     from ..tasks import write_attached_state
 
@@ -760,7 +760,7 @@ def task_remember(
     """Write a standing note into a task's notebook; every future run of the
     task reads it — resumed or fresh.
 
-    An attached task is the exception: an adopted session does not go through
+    An attached task is the exception: an attached session does not go through
     the runner, so nothing renders its notebook into the session and
     `quorum task show` is the read path.
 
@@ -781,13 +781,13 @@ def task_remember(
     )
     for_days = f", for {ttl}d" if ttl else ""
     if task.attached:
-        # An adopted session does not go through the runner, so nothing
+        # An attached session does not go through the runner, so nothing
         # composes a prompt for it and the note is never rendered into the
         # session. It is kept, and `task show` is the read path.
         typer.secho(
             f"remembered ({notes_mod.short_id(entry['id'])}) — task {task.short_id} is "
             f"attached, so `quorum task show {task.short_id}` is where it is read; an "
-            "adopted session is not handed its notebook" + for_days,
+            "attached session is not handed its notebook" + for_days,
             fg="green",
         )
         return

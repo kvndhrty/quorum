@@ -207,7 +207,7 @@ agent table prints the status word itself.
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
              means nothing was ever observed (no PR yet, or no `gh` here)
-  flags:  ⚠ uncommitted/unpushed work in the task's workdir
+  flags:  ⚠ uncommitted/unpushed work in the task's working directory
           waiting-on <ids> unfinished dependencies (`task add --after`); the
              runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
              name dependencies that can never finish — nothing waits on those,

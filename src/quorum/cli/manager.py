@@ -21,15 +21,15 @@ from ._common import (
 
 @manager_app.command("tell")
 def manager_tell(text: str) -> None:
-    """Send the manager a directive; its next run starts with it in the digest."""
+    """Send the manager guidance; its next run starts with it in the digest."""
     target = get_home()
     MessageBus(target).send("user", "manager", type="directive", text=text)
-    typer.secho("directive queued for the manager's next run", fg="green")
+    typer.secho("guidance queued for the manager's next run", fg="green")
 
 
 @manager_app.command("note")
 def manager_note(text: str) -> None:
-    """Journal a reasoning note (the manager's harness calls this; humans can too)."""
+    """Journal the reason for an action (the manager's harness calls this; humans can too)."""
     target = get_home()
     _actor_guard(target, "note", args=text, always_journal=True)
     typer.echo("noted")
