@@ -395,11 +395,23 @@ minute it is posted.
   also fixes `--prompt-file`'s locale-dependent decoding. `--prompt <name>`
   (reuse an existing template) is unchanged, and an agent whose template
   already resolves still needs no prompt text at all.
+- The queue controls (#102). `quorum task hold`, `task release` and
+  `task set-priority`, the `task add --priority` option, the `priority` and
+  `held` fields on `task.json`, the digest's `priority=` / `held=true`
+  marks and the hold clauses in `prompts/manager.md`, the runner's held
+  refusal (`--force` keeps its other three: attached task, unfinished
+  dependencies, a last run over budget), the `⏸` / `↑N` / `↓N` badges in
+  `quorum status`, `task list`, `task show` and the TUI, and the TUI keys
+  `h`, `+` and `-`. Evidence: in 30 days of the dogfood home the three
+  commands were never called and no task among the 33 had a non-default
+  `priority` or `held`. Ordering stays where the design already put it —
+  the manager's judgement from the digest, steered by
+  `quorum manager tell` — and `task add --after <id>` remains the one
+  ordering constraint the substrate enforces.
 - The web dashboard (#102). `quorum web`, the `web` optional-dependency
   extra (fastapi, uvicorn), `src/quorum/web/` and its thirteen HTTP routes
   are gone. The terminal dashboard is the one dashboard: `quorum tui` has
-  nudge, manager directive, run, cancel, hold/release, priority and
-  attention-ack, `quorum status [--json]` is the one-shot read of the same
+  nudge, manager directive, run, cancel and attention-ack, `quorum status [--json]` is the one-shot read of the same
   model, and `quorum task history <id>` is the per-task list the web task
   page carried. What the browser could do and the TUI cannot is on the CLI:
   `quorum agent create`, `agent pause|resume|run-now|reload`, `project set`
@@ -519,6 +531,12 @@ minute it is posted.
   `quorum up` and returns before the tick does; `run-once` builds the agent
   in your shell and runs the tick in the foreground, which works with the
   supervisor stopped. Each command's help now says which to reach for.
+- `priority` and `held` keys in existing `tasks/<id>/task.json` files are
+  ignored: the model drops unknown fields, so an old record loads as an
+  ordinary task and the next write leaves the keys out. Nothing needs
+  editing by hand. `quorum task hold`, `quorum task release` and
+  `quorum task set-priority` now exit with an unknown-command error, and
+  `quorum task add --priority` with an unknown-option error.
 - The web dashboard is gone, so reinstall without the extra:
   `uv tool install quorum-orchestrator` (or `pip install
   quorum-orchestrator`). `quorum-orchestrator[web]` no longer resolves;
