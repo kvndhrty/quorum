@@ -767,7 +767,12 @@ task, on the same substrate and under the same rules:
   manager's fence applies: it reads `QUORUM_ACTOR`, which any process that
   can run the CLI can set, so it is a **convention against accidental
   crowding, not a security boundary** — the sandbox is. The manager's
-  notebook keeps refusing a task-tagged call exactly as before.
+  notebook now refuses a task run, which is a change: before the task actor
+  tag existed the runner stripped the launcher's tag and set nothing in its
+  place, so a task harness ran as `user` and `notes.may_write` admitted it —
+  a task could write into the manager's notebook. Tagging it `task-<id>`
+  closes that; a task reaches the manager with `quorum task report` and the
+  board, as the fence always intended.
 - **Reader.** `runner.compose_prompt` renders the notebook into every
   composed prompt — a resumed session and a fresh one alike, because the
   fresh one is the run that needs it — after the task body and the
@@ -780,6 +785,19 @@ task, on the same substrate and under the same rules:
   teaches the command. `quorum task show` prints the same rendering. The
   digest deliberately does not: the manager reads reports, and the
   notebook is the task's own.
+- **Attached tasks are the exception, and it is a real one.** An adopted
+  session (*Attached tasks* below) does not go through the runner, so
+  nothing composes a prompt for it and **its notebook is never rendered
+  into the session**; `quorum task show <id>` is the read path there, for
+  the user or the manager. The writes work — an attached task's notebook is
+  an ordinary file at `tasks/<id>/notes.jsonl` — but the session that would
+  read them has to be handed them, by a `task nudge` or by the user pasting
+  what `task show` printed. The identity differs too: an adopted session
+  runs under the user's own shell with no `QUORUM_ACTOR` set, so its
+  `task remember` is admitted as a human and its notes carry
+  `sender: user`, not `task-<id>`. Closing this would mean the hooks
+  (`task hook-session-start`) injecting the notebook the way `hook-stop`
+  injects pending guidance; that is not done.
 - **Policy.** The preamble says what the notebook is for — state worth
   having after a restart (what is done, what is left, what was tried and
   failed), not a log — and to rewrite one superseding note rather than

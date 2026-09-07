@@ -214,9 +214,21 @@ minute it is posted.
   task), so a task's `task nudge` and `board post` carry `task-<id>` as
   sender where they used to read as `user`. The default preamble gains a
   memory protocol paragraph and the manager prompt learns `task
-  remember`; re-run `quorum init` to pick up never-edited copies. (#90)
+  remember`; re-run `quorum init` to pick up never-edited copies. An
+  adopted (attached) task is the exception: quorum does not compose its
+  prompt, so its notebook is written but never rendered into the session —
+  `task show` is the read path there. (#90)
 
 ### Changed
+- `quorum manager remember` from inside a task run is now refused. The
+  runner used to strip the launcher's actor tag and set nothing in its
+  place, so a task harness ran as `user` and the manager's notebook
+  admitted it; the harness is now tagged `QUORUM_ACTOR=task-<id>` and the
+  refusal points it at `quorum task report` and `quorum board post
+  attention`, which is how a task was always meant to reach the manager
+  (`quorum task nudge` is the same pointer on a task's own notebook). A
+  task's own notebook
+  (`quorum task remember`) is unaffected. (#90)
 - `quorum init` recognizes a never-edited prompt seed by a record in the
   home (`prompts/.seeded.json`: the sha256 of what init last wrote, kept
   up to date by init alone) instead of a list of superseded hashes in

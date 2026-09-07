@@ -646,8 +646,8 @@ A task's session is not durable: models compact their own context, a
 resumed session can be days old, and a fresh session starts with nothing
 but the worktree. Every task has a notebook for what a restart would need —
 `~/.quorum/tasks/<id>/notes.jsonl`, the same notebook the manager has
-([The notebook](#the-notebook)), and every run of the task reads it back at
-the top of its prompt, resumed or fresh:
+([The notebook](#the-notebook)), and every run quorum starts for the task
+reads it back at the top of its prompt, resumed or fresh:
 
 ```bash
 quorum task remember a3f2k9 "parser done and committed; tests not started"
@@ -674,6 +674,16 @@ sandbox is what actually confines a run. The manager never sees a task's
 notebook in its digest: it reads the task's reports, and the notebook is
 the task's own. `quorum task prune` archives it with the rest of the task
 directory.
+
+An [adopted session](#adopting-a-live-session) is the exception, and it is
+worth knowing before you rely on one. Quorum does not compose the prompt
+for an attached task — that is the point of adopting one — so **its
+notebook is written but never rendered into the session**. The notes are
+kept and `quorum task show <id>` prints them, but the session only learns
+what is in them if you send it (`quorum task nudge`, or paste what `task
+show` printed). An adopted session also runs as you rather than as
+`task-<id>`, so its notes are recorded with `sender: user`. The notebook is
+most useful on tasks quorum runs itself.
 
 ## The manager
 
