@@ -1341,6 +1341,41 @@ def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
     assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]
 
 
+def test_digest_says_only_that_a_handoff_exists(home: Path, clock):
+    """The body is for the dependent's prompt and `task show`; the manager
+    needs to know it is there, nothing more (#92)."""
+    store = TaskStore(home)
+    with_body = store.add(project="p", prompt="left notes", harness="t")
+    tasks.report(
+        home, with_body.id, "done", "shipped",
+        handoff="SECRET-BODY: changed x, not done y, check z first",
+    )
+    without = store.add(project="p", prompt="left nothing", harness="t")
+    tasks.report(home, without.id, "done", "shipped")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    marked = [line for line in digest.splitlines() if f"[done] {with_body.short_id}" in line]
+    plain = [line for line in digest.splitlines() if f"[done] {without.short_id}" in line]
+    assert marked and "handoff=true" in marked[0]
+    assert plain and "handoff=true" not in plain[0]
+    assert "SECRET-BODY" not in digest
+
+
+def test_the_manager_prompt_explains_the_handoff_mark(home: Path):
+    """Every other mark the digest can carry has a rule that says what it
+    means; `handoff=true` would otherwise be a token with no policy (#92)."""
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "`handoff=true`" in text
+    # unwrapped, so the assertions do not depend on where the lines break
+    rule = " ".join(text.split("`handoff=true`")[1].split("\n14.")[0].split())
+    # what it is, where the body actually goes, and that it asks for nothing
+    assert "every dependent gets it in its own prompt" in rule
+    assert "quorum task show <id>" in rule
+    assert "observation, not an instruction" in rule
+
+
 def test_a_tick_keeps_the_digest_it_reasoned_over(home: Path, clock, project: str):
     """The one file #82 adds: without it, "why did it launch that" is
     unanswerable an hour later — the digest was rendered and dropped."""

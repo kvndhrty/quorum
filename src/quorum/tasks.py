@@ -8,6 +8,8 @@ of *runs*. Everything durable lives under `tasks/<id>/`:
     runner.lock        pid of the active run (mtime doubles as a heartbeat)
     transcript.jsonl   the harness's stdout, one JSON line per line seen
     reports.jsonl      what the task said via `quorum task report`
+    handoff.md         what the task left for its dependents — the body
+                       given to `task report --handoff`, one per task
     runner.log         stderr/bootstrap output of detached runs
 
 Status is a *reported* string, not an enforced state machine: the harness
@@ -27,7 +29,12 @@ next run's prompt.
 A task may declare `depends_on` (`task add --after <id>`): tasks it must not
 start before. That is *not* a scheduler — the manager still decides every
 launch. `dependency_state` reads the list back for the digest, the views and
-the runner's one narrow refusal.
+the runner's one narrow refusal. What a dependent is told beyond the
+upstream's status and PR url is the *handoff*: a body the upstream gives
+its final report (`task report --status done --handoff <file|->`), stored
+whole in `handoff.md` (`write_handoff`, atomic, last write wins) and read
+back by `read_handoff` for the dependent's prompt (capped there), `task
+show` (in full) and the digest (existence only).
 
 `priority` and `held` are the user's two hands on the queue, and neither is
 a scheduler either: `priority` is an integer the digest renders and the
@@ -191,6 +198,10 @@ def transcript_path(home: Path, task_id: str) -> Path:
 
 def reports_path(home: Path, task_id: str) -> Path:
     return task_dir(home, task_id) / "reports.jsonl"
+
+
+def handoff_path(home: Path, task_id: str) -> Path:
+    return task_dir(home, task_id) / "handoff.md"
 
 
 def runner_lock_path(home: Path, task_id: str) -> Path:
@@ -512,6 +523,28 @@ def dependency_states(all_tasks: list[Task]) -> dict[str, dict[str, Any]]:
     return {t.id: dependency_state(t, by_id) for t in all_tasks if t.depends_on}
 
 
+def write_handoff(home: Path, task_id: str, text: str) -> Path:
+    """Store the task's handoff — one file, whole, atomically; a later write
+    replaces it. It describes the finished state, so it is not a log."""
+    path = handoff_path(home, task_id)
+    fsio.atomic_write_text(path, text)
+    return path
+
+
+def read_handoff(home: Path, task_id: str) -> str | None:
+    """The task's handoff, or None when it never wrote one. Fail-soft: this
+    is read while composing a dependent's prompt and while building the
+    digest, and an unreadable file must not take either down."""
+    try:
+        return handoff_path(home, task_id).read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def has_handoff(home: Path, task_id: str) -> bool:
+    return handoff_path(home, task_id).is_file()
+
+
 def report(
     home: Path,
     task_id: str,
@@ -520,20 +553,35 @@ def report(
     pr_url: str | None = None,
     sender: str | None = None,
     now: Any = None,
+    handoff: str | None = None,
 ) -> Task:
     """Record a progress report from the task itself (or a human on its behalf).
 
     Appends to reports.jsonl, updates the task's status (and pr_url when
     given), and mirrors the report onto the board so dashboards and the
     manager see it without polling every task directory's log.
+
+    `handoff` is the longer body meant for the tasks that depend on this
+    one: written to `handoff.md` *before* the status changes, so a
+    dependent that sees `done` always sees the handoff that came with it.
+    Any status may carry one (a `blocked` task can leave notes for whoever
+    picks it up); the preamble asks for it on the final report.
     """
     home = Path(home)
     store = TaskStore(home)
     task = store.resolve(task_id)
     at = fsio.iso(now or fsio.utc_now())
+    if handoff is not None:
+        write_handoff(home, task.id, handoff)
     fsio.append_jsonl(
         reports_path(home, task.id),
-        {"at": at, "status": status, "text": text, **({"pr_url": pr_url} if pr_url else {})},
+        {
+            "at": at,
+            "status": status,
+            "text": text,
+            **({"pr_url": pr_url} if pr_url else {}),
+            **({"handoff": True} if handoff is not None else {}),
+        },
     )
     updates: dict[str, Any] = {"status": status}
     if pr_url:
