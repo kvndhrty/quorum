@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import harness_config, make_repo
 from quorum import fsio, notes, tasks
 from quorum.actor import journal_path, notes_path, task_actor
 from quorum.agents.manager import build_digest
@@ -26,7 +27,7 @@ from quorum.config import load_config
 from quorum.projects import ProjectRegistry
 from quorum.runner import run_task
 from quorum.tasks import TaskStore
-from test_tasks import harness_config, make_repo, transcript_text
+from test_tasks import transcript_text
 
 runner = CliRunner()
 

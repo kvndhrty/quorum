@@ -9,13 +9,12 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+from conftest import harness_config, make_repo
 from quorum import fsio, prune, tasks, views
 from quorum.actor import journal_path
 from quorum.cli import app
@@ -24,9 +23,6 @@ from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.runner import run_task
 from quorum.tasks import TaskRun, TaskStore, inbox_name
-
-TESTS_BIN = Path(__file__).parent / "bin"
-FAKE = str(TESTS_BIN / "fake_harness.py")
 
 runner = CliRunner()
 
@@ -140,23 +136,9 @@ def test_history_over_a_real_fake_harness_run(home: Path, tmp_path: Path, monkey
     """The fake harness home end to end: a nudge sent before the run is
     delivered by it, the harness reports through the CLI, and the run record
     closes the list."""
-    repo = tmp_path / "proj"
-    repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
-    (repo / "README.md").write_text("hello")
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T",
-         "add", "."], check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T",
-         "commit", "-qm", "init"], check=True,
-    )
+    repo = make_repo(tmp_path)
     ProjectRegistry(home).add(repo, name="proj")
-    (home / "config.toml").write_text(
-        "[tasks]\ndefault_harness = \"fake\"\n"
-        f"[harness.fake]\nstart = [\"{sys.executable}\", \"{FAKE}\"]\n"
-    )
+    harness_config(home, resume=False)
     monkeypatch.setenv("FAKE_HARNESS_MODE", "report")
     monkeypatch.setenv("FAKE_HARNESS_PR_URL", "https://example.com/pr/9")
     task = TaskStore(home).add("proj", "x", "fake")

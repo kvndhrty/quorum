@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import make_repo, repo_git
 from quorum import export, fsio
 from quorum.cli import app
 from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore, inbox_name, runner_lock_path, task_dir, worktree_path
-from test_tasks import make_repo, repo_git
 
 runner = CliRunner()
 

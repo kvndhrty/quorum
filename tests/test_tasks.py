@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import git_out, harness_config, make_repo, repo_git
 from quorum import fsio, runner, tasks, usage
 from quorum.config import HarnessConfig, load_config
 from quorum.messages import MessageBus
@@ -24,51 +25,6 @@ from quorum.tasks import TaskStore, task_json_path
 
 TESTS_BIN = Path(__file__).parent / "bin"
 FAKE = str(TESTS_BIN / "fake_harness.py")
-
-
-def make_repo(tmp_path: Path, name: str = "proj") -> Path:
-    repo = tmp_path / name
-    repo.mkdir()
-    def git(*args):
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
-            check=True, capture_output=True,
-        )
-    git("init", "-q")
-    # Committing inside a worktree (the auto-commit safety net does) has no
-    # -c flags of its own, so the identity has to live in the repo config.
-    git("config", "user.email", "t@t")
-    git("config", "user.name", "T")
-    (repo / "README.md").write_text("hello")
-    git("add", ".")
-    git("commit", "-qm", "init")
-    return repo
-
-
-def repo_git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
-        check=True, capture_output=True,
-    )
-
-
-def git_out(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
-    ).stdout.strip()
-
-
-def harness_config(home: Path, extra: str = "", tasks_extra: str = "") -> None:
-    body = (
-        "[tasks]\n"
-        'default_harness = "fake"\n'
-        f"{tasks_extra}"
-        "[harness.fake]\n"
-        f'start = ["{sys.executable}", "{FAKE}"]\n'
-        f'resume = ["{sys.executable}", "{FAKE}", "--resumed", "{{session}}"]\n'
-        f"{extra}"
-    )
-    (home / "config.toml").write_text(body)
 
 
 @pytest.fixture
@@ -459,21 +415,72 @@ def test_auto_commit_never_touches_a_no_worktree_checkout(
     assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
 
 
-def test_auto_commit_is_a_no_op_on_a_clean_tree(tmp_path: Path):
-    """A harness that committed its own work gets no empty extra commit."""
-    repo = make_repo(tmp_path)
-    assert runner.auto_commit_workdir(repo) == ""
-    assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
+def _clean(repo: Path) -> None:
+    pass
 
 
-def test_auto_commit_failure_is_recorded_not_raised(home: Path, project: str, tmp_path: Path):
+def _untracked_directory(repo: Path) -> None:
+    gen = repo / "gen"
+    gen.mkdir()
+    for i in range(3):
+        (gen / f"f{i}.txt").write_text("x")
+
+
+def _detached(repo: Path) -> None:
+    repo_git(repo, "checkout", "--detach")
+    (repo / "x.txt").write_text("x")
+
+
+def _mid_merge(repo: Path) -> None:
+    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    (repo / "y.txt").write_text("y")
+
+
+def _not_a_repo(repo: Path) -> None:
+    shutil.rmtree(repo / ".git")
+
+
+@pytest.mark.parametrize(
+    ("setup", "note", "raises"),
+    [
+        # A harness that committed its own work gets no empty extra commit.
+        pytest.param(_clean, "", None, id="clean-tree"),
+        # An untracked directory is one porcelain line however many files it
+        # holds; the note counts the files actually committed.
+        pytest.param(_untracked_directory, "auto-committed 3 path(s)", None, id="untracked-dir"),
+        # Detached HEAD: the commit would belong to no branch and die with the
+        # worktree.
+        pytest.param(_detached, "", "detached", id="detached-head"),
+        # Merge in progress: add -A + commit would *conclude* the merge,
+        # conflict markers and all.
+        pytest.param(_mid_merge, "", "in progress", id="merge-in-progress"),
+        # Not a checkout at all: the net cannot even ask what changed.
+        pytest.param(_not_a_repo, "", "git status failed", id="not-a-repo"),
+    ],
+)
+def test_auto_commit_workdir_reads_the_tree_it_is_pointed_at(
+    tmp_path: Path, setup, note: str, raises: str | None
+):
+    """`auto_commit_workdir` on its own, over the tree states it commits in and
+    the ones it refuses. A refusal raises and leaves the tree dirty; the caller
+    turns it into a note (the test below)."""
+    repo = make_repo(tmp_path, setup.__name__.lstrip("_"))
+    setup(repo)
+
+    if raises:
+        with pytest.raises(RunnerError, match=raises):
+            runner.auto_commit_workdir(repo)
+        assert git_out(repo, "log", "-1", "--pretty=%s") in ("init", "")
+        return
+
+    assert runner.auto_commit_workdir(repo).startswith(note)
+    if not note:
+        assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
+
+
+def test_auto_commit_failure_is_recorded_not_raised(home: Path, project: str):
     """A net that cannot fire leaves a note and the dirty tree behind — never
     an exception that would cost the run its record."""
-    loose = tmp_path / "loose"
-    loose.mkdir()
-    with pytest.raises(RunnerError, match="git status failed"):
-        runner.auto_commit_workdir(loose)
-
     harness_config(home, tasks_extra="auto_commit = true\n")
     config = load_config(home)
     store = TaskStore(home)
@@ -531,23 +538,6 @@ def test_auto_commit_bypasses_hooks_and_signing(
     assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
 
 
-def test_auto_commit_declines_off_branch_and_in_progress_states(tmp_path: Path):
-    """Detached HEAD: the commit would belong to no branch and die with the
-    worktree. Merge in progress: add -A + commit would *conclude* the merge,
-    conflict markers and all. Both raise; the tree stays dirty and flagged."""
-    detached = make_repo(tmp_path, "detached")
-    repo_git(detached, "checkout", "--detach")
-    (detached / "x.txt").write_text("x")
-    with pytest.raises(RunnerError, match="detached"):
-        runner.auto_commit_workdir(detached)
-
-    merging = make_repo(tmp_path, "merging")
-    (merging / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
-    (merging / "y.txt").write_text("y")
-    with pytest.raises(RunnerError, match="in progress"):
-        runner.auto_commit_workdir(merging)
-
-
 def test_auto_commit_leaves_a_terminal_task_alone(home: Path, project: str, monkeypatch):
     """A harness that reported done owns its tree's final state: sweeping
     leftovers into a finished branch would re-flag the task as stranded and
@@ -584,17 +574,6 @@ def test_auto_commit_skips_sandboxed_runs_with_a_note(home: Path, project: str):
 
     assert "sandboxed" in note and note in transcript_text(home, task.id)
     assert "left.txt" in git_out(workdir, "status", "--porcelain")  # untouched
-
-
-def test_auto_commit_counts_paths_not_status_lines(tmp_path: Path):
-    """An untracked directory is one porcelain line however many files it
-    holds; the note must count the files actually committed."""
-    repo = make_repo(tmp_path, "many")
-    gen = repo / "gen"
-    gen.mkdir()
-    for i in range(3):
-        (gen / f"f{i}.txt").write_text("x")
-    assert runner.auto_commit_workdir(repo).startswith("auto-committed 3 path(s)")
 
 
 def test_auto_commit_ownership_check_survives_symlinked_home(

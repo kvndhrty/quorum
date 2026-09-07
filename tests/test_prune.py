@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import git_out, make_repo
 from quorum import fsio, prune, views
 from quorum.cli import app
 from quorum.messages import MessageBus
@@ -23,31 +24,6 @@ from quorum.projects import ProjectRegistry
 from quorum.tasks import TaskStore, inbox_name, runner_lock_path, worktree_path
 
 runner = CliRunner()
-
-
-def make_repo(tmp_path: Path, name: str = "proj") -> Path:
-    repo = tmp_path / name
-    repo.mkdir()
-
-    def git(*args):
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
-            check=True, capture_output=True,
-        )
-
-    git("init", "-q")
-    git("config", "user.email", "t@t")
-    git("config", "user.name", "T")
-    (repo / "README.md").write_text("hello")
-    git("add", ".")
-    git("commit", "-qm", "init")
-    return repo
-
-
-def git_out(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
-    ).stdout.strip()
 
 
 @pytest.fixture
@@ -134,35 +110,40 @@ def test_prune_is_reversible_by_moving_the_directory_back(home: Path):
     assert TaskStore(home).get(task.id).status == "done"
 
 
-def test_prune_refuses_a_task_with_a_live_runner(home: Path):
+def _live_runner(home: Path):
     task = finished(home)
     # pid 1 is always alive and is never this process (same-process locks are
     # treated as stale takeovers, which would defeat the test)
     fsio.atomic_write_json(runner_lock_path(home, task.id), {"pid": 1})
-
-    result = runner.invoke(app, ["task", "prune", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "holds its lock" in result.output
-    assert short_ids(home) == {task.short_id}
+    return task, "holds its lock"
 
 
-def test_prune_refuses_an_attached_task(home: Path):
+def _attached(home: Path):
     task = finished(home, attached=True)
-
-    result = runner.invoke(app, ["task", "prune", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert "attached" in result.output
-    assert short_ids(home) == {task.short_id}
+    return task, "attached"
 
 
-def test_prune_refuses_a_task_another_one_still_depends_on(home: Path):
+def _has_a_dependent(home: Path):
     upstream = finished(home, "the base")
     downstream = TaskStore(home).add("proj", "builds on it", "fake", depends_on=[upstream.id])
+    return upstream, f"{downstream.short_id} still depends on it"
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [_live_runner, _attached, _has_a_dependent],
+    ids=["live-runner", "attached", "has-a-dependent"],
+)
+def test_prune_refuses_and_says_why(home: Path, setup):
+    """The three refusals that no flag waives. Each one names its reason and
+    leaves the task where it was — a sweep that skipped something silently
+    would look like a successful prune."""
+    task, reason = setup(home)
 
     result = runner.invoke(app, ["task", "prune", "--yes"])
     assert result.exit_code == 0, result.output
-    assert f"{downstream.short_id} still depends on it" in result.output
-    assert upstream.short_id in short_ids(home)
+    assert reason in result.output
+    assert task.short_id in short_ids(home)
 
 
 def test_prune_archives_a_dependency_when_its_dependent_goes_too(home: Path):

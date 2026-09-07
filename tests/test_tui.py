@@ -4,7 +4,6 @@ rebuild reset the reader's cursor, with nothing to catch either)."""
 
 from __future__ import annotations
 
-import asyncio
 import gzip
 import os
 from pathlib import Path
@@ -31,21 +30,11 @@ def populate(home: Path) -> list[str]:
     return ids
 
 
-def drive(home: Path, script) -> None:
-    async def main() -> None:
-        app = QuorumTUI(home)
-        async with app.run_test(size=(110, 34)) as pilot:
-            await pilot.pause()
-            await script(app, pilot)
-
-    asyncio.run(main())
-
-
 def mode_text(app: QuorumTUI) -> str:
     return str(app.query_one("#logmode", Static).content)
 
 
-def test_mounts_populated_with_the_board_showing(home: Path):
+def test_mounts_populated_with_the_board_showing(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
@@ -54,10 +43,10 @@ def test_mounts_populated_with_the_board_showing(home: Path):
         assert mode_text(app).startswith("board")
         assert any("hello board" in line for line in app._log_lines)
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_arrowing_through_tasks_never_swaps_the_board(home: Path):
+def test_arrowing_through_tasks_never_swaps_the_board(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
@@ -66,10 +55,10 @@ def test_arrowing_through_tasks_never_swaps_the_board(home: Path):
         assert app.selected_task is None
         assert mode_text(app).startswith("board")
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_enter_selects_a_task_and_escape_returns_to_the_board(home: Path):
+def test_enter_selects_a_task_and_escape_returns_to_the_board(home: Path, tui):
     ids = populate(home)
 
     async def script(app, pilot):
@@ -82,10 +71,10 @@ def test_enter_selects_a_task_and_escape_returns_to_the_board(home: Path):
         assert app.selected_task is None
         assert mode_text(app).startswith("board")
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_refresh_preserves_the_cursor_row(home: Path):
+def test_refresh_preserves_the_cursor_row(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
@@ -96,10 +85,10 @@ def test_refresh_preserves_the_cursor_row(home: Path):
         await pilot.pause()
         assert table.cursor_row == 2
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_nudge_lands_in_the_selected_tasks_inbox(home: Path):
+def test_nudge_lands_in_the_selected_tasks_inbox(home: Path, tui):
     ids = populate(home)
 
     async def script(app, pilot):
@@ -112,10 +101,10 @@ def test_nudge_lands_in_the_selected_tasks_inbox(home: Path):
         await pilot.pause()
         assert MessageBus(home).pending(inbox_name(ids[0]))
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_task_table_shows_waiting_on_dependencies(home: Path):
+def test_task_table_shows_waiting_on_dependencies(home: Path, tui):
     """A dependent task reads as waiting in the TUI too — a pure file read,
     same as every other cell here (#31)."""
     store = TaskStore(home)
@@ -127,10 +116,10 @@ def test_task_table_shows_waiting_on_dependencies(home: Path):
         cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
         assert any(f"waiting-on {upstream.short_id}" in c for c in cells)
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path):
+def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path, tui):
     ids = populate(home)
 
     async def script(app, pilot):
@@ -143,10 +132,10 @@ def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path):
         assert app.selected_task == ids[0]
         assert not MessageBus(home).pending(inbox_name(ids[0]))
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path):
+def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
@@ -161,10 +150,10 @@ def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path):
         assert [c.message.payload["text"] for c in claimed] == ["start the oldest queued task"]
         assert claimed[0].message.type == "directive"
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_run_launches_a_detached_run_for_the_selected_task(home: Path, monkeypatch):
+def test_run_launches_a_detached_run_for_the_selected_task(home: Path, monkeypatch, tui):
     ids = populate(home)
     launched: list[str] = []
     monkeypatch.setattr(
@@ -177,10 +166,10 @@ def test_run_launches_a_detached_run_for_the_selected_task(home: Path, monkeypat
         await pilot.pause()
         assert launched == [ids[0]]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_run_refuses_while_the_runner_is_alive(home: Path, monkeypatch):
+def test_run_refuses_while_the_runner_is_alive(home: Path, monkeypatch, tui):
     ids = populate(home)
     # pid 1 is alive and never us — the repo's idiom for a "live" runner
     runner_lock_path(home, ids[0]).parent.mkdir(parents=True, exist_ok=True)
@@ -201,10 +190,10 @@ def test_run_refuses_while_the_runner_is_alive(home: Path, monkeypatch):
         await pilot.pause()
         assert launched == [ids[0]]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_run_refuses_an_attached_task(home: Path, monkeypatch):
+def test_run_refuses_an_attached_task(home: Path, monkeypatch, tui):
     ids = populate(home)
     TaskStore(home).update(ids[0], attached=True)
     launched: list[str] = []
@@ -222,10 +211,10 @@ def test_run_refuses_an_attached_task(home: Path, monkeypatch):
         await pilot.pause()
         assert launched == [ids[0]]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
+def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch, tui):
     """The runner's budget gate, surfaced as a notice instead of a silent
     failure in runner.log; a cheaper last run lifts it."""
     ids = populate(home)
@@ -248,10 +237,10 @@ def test_run_refuses_a_task_gated_by_its_budget(home: Path, monkeypatch):
         await pilot.pause()
         assert launched == [ids[0]]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_a_gated_task_says_so_in_the_table(home: Path):
+def test_a_gated_task_says_so_in_the_table(home: Path, tui):
     """`s` refuses a gated task (above); the table has to say so first, or
     the reader learns of the gate only from the refusal."""
     ids = populate(home)
@@ -272,10 +261,10 @@ def test_a_gated_task_says_so_in_the_table(home: Path):
         assert "$!" in spent(app, 1) and "GATED" not in spent(app, 1)
         assert spent(app, 2) == ""  # nothing reported, nothing to mark
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_cancel_confirms_first_and_only_then_cancels(home: Path):
+def test_cancel_confirms_first_and_only_then_cancels(home: Path, tui):
     ids = populate(home)
 
     async def script(app, pilot):
@@ -291,10 +280,10 @@ def test_cancel_confirms_first_and_only_then_cancels(home: Path):
         await pilot.pause()
         assert TaskStore(home).get(ids[0]).status == "cancelled"
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_write_keys_act_on_the_highlighted_row_not_the_last_one_opened(home: Path):
+def test_write_keys_act_on_the_highlighted_row_not_the_last_one_opened(home: Path, tui):
     """`enter` opens a transcript for reading; it does not arm the write keys
     for the rest of the session. Arrow to another row and `c` cancels *that*
     row — the one the reader is pointing at."""
@@ -315,11 +304,11 @@ def test_write_keys_act_on_the_highlighted_row_not_the_last_one_opened(home: Pat
         assert TaskStore(home).get(ids[1]).status == "cancelled"
         assert TaskStore(home).get(ids[0]).status != "cancelled"
 
-    drive(home, script)
+    tui(home, script)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through a read-only directory")
-def test_a_write_that_cannot_write_notifies_instead_of_crashing(home: Path):
+def test_a_write_that_cannot_write_notifies_instead_of_crashing(home: Path, tui):
     """QUORUM_HOME turning unwritable is a notification, never a traceback —
     the dashboard is the thing you are watching when the machine misbehaves,
     so it is the last thing that may die of it."""
@@ -350,10 +339,10 @@ def test_a_write_that_cannot_write_notifies_instead_of_crashing(home: Path):
         assert not MessageBus(home).pending(inbox_name(ids[0]))
         assert [n.severity for n in app._notifications] == ["error", "error", "error"]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_typing_in_the_box_never_fires_the_bindings(home: Path):
+def test_typing_in_the_box_never_fires_the_bindings(home: Path, tui):
     """`c` cancels a task — but only as a keystroke on the table, never while
     the reader is halfway through a word in the input box."""
     ids = populate(home)
@@ -367,10 +356,10 @@ def test_typing_in_the_box_never_fires_the_bindings(home: Path):
         assert TaskStore(home).get(ids[0]).status != "cancelled"
         assert len(app.screen_stack) == 1  # no confirmation modal was pushed
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
+def test_a_perpetual_task_is_badged_in_the_task_table(home: Path, tui):
     """`∞` is how "40 runs and counting" reads as working rather than stuck."""
     store = TaskStore(home)
     store.add("proj-a", "watch CI", "fake", perpetual=True)
@@ -381,10 +370,10 @@ def test_a_perpetual_task_is_badged_in_the_task_table(home: Path):
         statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
         assert statuses[0].endswith("∞") and "∞" not in statuses[1]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path):
+def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path, tui):
     """`✔` distinguishes "done and delivered" from "done and waiting on a
     human" — read off task.json, since the TUI never probes a forge."""
     store = TaskStore(home)
@@ -401,10 +390,10 @@ def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path):
         assert statuses[1].endswith("⊘")
         assert "✔" not in statuses[2] and "⊘" not in statuses[2]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_the_issue_a_task_came_from_is_shown_in_the_task_table(home: Path):
+def test_the_issue_a_task_came_from_is_shown_in_the_task_table(home: Path, tui):
     """Short form here (`#62`), the full url in `quorum task show` — one
     renderer (tasks.issue_ref) behind both."""
     store = TaskStore(home)
@@ -416,10 +405,10 @@ def test_the_issue_a_task_came_from_is_shown_in_the_task_table(home: Path):
         issues = [str(table.get_row_at(i)[6]) for i in range(table.row_count)]
         assert issues[0] == "#62" and issues[1] == "—"
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_selecting_an_agent_shows_its_notebook(home: Path):
+def test_selecting_an_agent_shows_its_notebook(home: Path, tui):
     """The notebook is read-only here, like everything else in the TUI: a
     file reader, working with the supervisor stopped."""
     from quorum import notes
@@ -439,7 +428,7 @@ def test_selecting_an_agent_shows_its_notebook(home: Path):
         assert app.selected_agent is None
         assert mode_text(app).startswith("board")
 
-    drive(home, script)
+    tui(home, script)
 
 
 def attention_rows(app) -> list[str]:
@@ -450,7 +439,7 @@ def attention_rows(app) -> list[str]:
     ]
 
 
-def test_a_acks_the_highlighted_attention_line(home: Path):
+def test_a_acks_the_highlighted_attention_line(home: Path, tui):
     """The banner is a time window, so `a` is how a handled escalation leaves
     it: the list gives `a` something highlighted to act on, and the ack is an
     archive — the message is gone from the topic, not from the history."""
@@ -473,10 +462,10 @@ def test_a_acks_the_highlighted_attention_line(home: Path):
         archive = list((home / "messages" / "archive").glob("*.jsonl.gz"))
         assert archive and second.id in gzip.open(archive[0], "rt").read()
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_escape_closes_the_attention_list_without_acking(home: Path):
+def test_escape_closes_the_attention_list_without_acking(home: Path, tui):
     populate(home)
     MessageBus(home).post("manager", "attention", "escalation", text="left alone")
 
@@ -490,10 +479,10 @@ def test_escape_closes_the_attention_list_without_acking(home: Path):
         ]
         assert not app.screen.query("#attention-list")
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_a_with_an_empty_attention_topic_says_so(home: Path):
+def test_a_with_an_empty_attention_topic_says_so(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
@@ -502,11 +491,11 @@ def test_a_with_an_empty_attention_topic_says_so(home: Path):
         assert not app.screen.query("#attention-list")
         assert [str(n.message) for n in app._notifications] == ["nothing on #attention"]
 
-    drive(home, script)
+    tui(home, script)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through a read-only directory")
-def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path):
+def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path, tui):
     """The `_write` rule covers `a` too: an unwritable home is a notification,
     and the escalation stays on the board where it can still be seen."""
     populate(home)
@@ -528,10 +517,10 @@ def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path):
         ]
         assert [n.severity for n in app._notifications] == ["error"]
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
+def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path, tui):
     """The attention list is a snapshot: the janitor, a second `board ack` or
     another `board ack` can archive the line between the render and the keystroke.
     That failure arrives as the KeyError board resolution raises, not as an
@@ -551,10 +540,10 @@ def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
         assert [n.severity for n in app._notifications] == ["error"]
         assert MessageBus(home).read_topic("attention") == []
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path):
+def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path, tui):
     """`t` is the detail pane's second tab: the task's life, oldest first,
     rendered by the same rows `quorum task history` prints. Pressed again it
     returns to the transcript; the choice sticks when another task is opened."""
@@ -581,10 +570,10 @@ def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path):
         await pilot.pause()
         assert mode_text(app).startswith("board")
 
-    drive(home, script)
+    tui(home, script)
 
 
-def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
+def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch, tui):
     """Building a history reads every agent's journal and the message
     archive, which is far too much work for the two-second tick. So the tab
     is rebuilt when `t` opens it, when `r` is pressed, when a write goes
@@ -637,8 +626,10 @@ def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
         assert builds[-1] == ids[0] and len(builds) == 4
         assert any("guidance from" in line and "steer left" in line for line in app._log_lines)
 
+    tui(home, script)
 
-def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
+
+def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path, tui):
     """The TUI and `task log` read one renderer, so what a
     person sees is the same wherever they look."""
     ids = populate(home)
@@ -656,4 +647,4 @@ def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
         assert any("🔧 Bash  uv run pytest -q" in line for line in app._log_lines)
         assert not any('"tool_use"' in line for line in app._log_lines)
 
-    drive(home, script)
+    tui(home, script)

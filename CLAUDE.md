@@ -625,8 +625,18 @@ announcements through `load_state()/save_state()`, raising is safe.
 
 ### Testing idioms
 
-`tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME` in `tmp_path`, exported via
-`$QUORUM_HOME`) and `clock` (a `FakeClock` passed as `AgentContext(now=...)`).
+`tests/conftest.py` is where a shared fixture or helper belongs — test modules import
+from it by name (`from conftest import make_repo`), so a second copy of one of these
+in a test file is a bug to fix rather than a style choice. Fixtures: `home` (scaffolded
+`QUORUM_HOME` in `tmp_path`, exported via `$QUORUM_HOME`), `clock` (a `FakeClock` passed
+as `AgentContext(now=...)`), `path_without_gh` (a PATH holding only real git, so a fake
+`gh` installed by `install_gh` is provably the one under test) and `tui` (mounts the
+Textual dashboard and awaits `script(app, pilot)` against it; several scripts in one
+call share the app, so a test that would otherwise mount twice pays the startup once).
+Helpers: `make_repo` (a git repo with one commit and a committer identity in its own
+config, which committing inside a worktree needs), `repo_git` / `git_out` (loud and
+quiet git in a repo), and `harness_table` / `harness_config` (the `[harness.*]` TOML for
+the fake harness, and a whole config.toml defaulting to it).
 `tests/bin/fake_harness.py` is a fake coding harness (echoes argv/prompt, emits a
 `session_id`; `report` mode calls `python -m quorum task report`; `manager_act` /
 `manager_flood` modes act like a manager — each `[harness.*]` table pins its mode via
@@ -636,6 +646,16 @@ manager tests build real git repos and run the loop for real; when a test needs 
 takeover treats as stale.
 `test_sandbox.py` injects a fake `nono_py` via `sys.modules`; `test_nono_integration.py`
 exercises real kernel enforcement.
+
+Two rules about what a test is allowed to depend on. Prose in `docs/` and in the
+packaged prompts is **not** a contract: assert the marker, the command or the
+placeholder a rule teaches (`test_manager.rule_mentioning` finds a numbered rule by its
+list-item boundary, not by its number; `test_cli` checks that every `quorum <verb>` in a
+packaged prompt names a real command), and keep exact wording only where a user greps
+for it, such as a CLI error message. And a family of tests that differ only in their
+inputs — a config in, a status and a substring out — is one `@pytest.mark.parametrize`
+with `pytest.param(..., id=...)` per case; tests whose setups differ materially stay
+apart.
 
 Docs are part of the deliverable here: a change to the file layout, message protocol,
 task/run lifecycle, or sandbox modes should update `docs/architecture.md` (and the
