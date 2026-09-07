@@ -57,22 +57,12 @@ worktree = true           # each task runs in its own git worktree
 #[harness.custom]
 #start = ["/path/to/your-agent", "--prompt", "{prompt}"]
 
-# Optional small-completion LLM for plugin agents (ctx.llm.complete()).
-# Any binary that takes a prompt and prints text; the manager does not
-# use this — it runs a full harness (above).
-#[llm]
-#backend = "cli"
-#executable = "claude"
-#args = ["-p"]
-#input = "stdin"          # "stdin" | "argv" ({prompt} placeholder in args)
-#timeout_seconds = 120
-
 # The manager checks on everything every 5 minutes, driven by the same
 # harness. Its policy is a prompt you can edit: prompts/manager.md
 [agents.manager]
 type = "manager"
 schedule = "every 5m"
-auto_pause = false        # keep trying while the LLM service is down
+auto_pause = false        # keep trying while the model service is down
 
 [quorum]
 retention_days = 30       # board messages older than this are archived

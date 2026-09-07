@@ -4,7 +4,7 @@ Nothing here deletes a task. Pruning *moves* `tasks/<id>/` to
 `tasks/.archive/<id>/` — the same "archive, never delete" pattern the message
 bus uses, and reversible with one `mv`. The archive directory is dot-prefixed
 on purpose: `TaskStore.list` (and therefore `quorum status`, `task list`, the
-TUI, the web dashboard, the manager digest — every reader in the codebase)
+TUI, the manager digest — every reader in the codebase)
 already skips dot-entries, so an archived task leaves every view with no code
 change anywhere else.
 

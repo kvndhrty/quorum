@@ -77,7 +77,7 @@ def build_life(home: Path) -> tasks.Task:
     # claimed but has not acked yet
     MessageBus(home, now=lambda: at(10)).send("user", inbox_name(task.id), text="try harder")
     later = MessageBus(home, now=lambda: at(10, 30))
-    later.send("user@web", inbox_name(task.id), text="mid-flight")
+    later.send("user@tui", inbox_name(task.id), text="mid-flight")
     claimed = list(later.claim(inbox_name(task.id)))
     assert len(claimed) == 2
     claimed[0].reject()  # "try harder" back to new/; "mid-flight" stays in cur/
@@ -123,7 +123,7 @@ def test_every_kind_of_entry_appears_once_and_in_order(home: Path):
         "auto-committed 2 path(s) as abc123"
     )
     assert text[10] == "guidance from user (waiting): try harder"
-    assert text[11] == "guidance from user@web (claimed): mid-flight"
+    assert text[11] == "guidance from user@tui (claimed): mid-flight"
     assert text[12] == "reported done: shipped · https://github.com/o/r/pull/7"
     assert text[13] == "pr state observed: merged · https://github.com/o/r/pull/7"
     # the raw fields ride along for scripts

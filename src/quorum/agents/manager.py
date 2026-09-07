@@ -15,7 +15,7 @@ worked and never loops on one that didn't.
 There is deliberately **no deterministic fallback**: without a working
 harness the tick raises, crash isolation records the failure, and — because
 the manager's config sets `auto_pause = false` — the schedule keeps firing,
-so the first tick after the LLM service returns reads the situation from
+so the first tick after the model service returns reads the situation from
 files and reinvokes whatever needs reinvoking. Dead runners keep the wake
 condition true precisely so that recovery is automatic.
 """
@@ -469,7 +469,7 @@ def build_digest(
     # only part of the digest a *previous* you wrote deliberately for this
     # run, and it must not compete for room with per-task output that grows
     # with the number of live tasks.
-    lines += notes.digest_section(home, "manager", now=now) + [""]
+    lines += notes.agent_notebook(home, "manager").render(now=now) + [""]
     # Resolved once: without gh (or with [ci].enabled = false) no task is
     # probed at all.
     ci_budget = CI_MAX_PROBES if ci.available(home) else 0

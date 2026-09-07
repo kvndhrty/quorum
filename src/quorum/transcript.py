@@ -9,8 +9,8 @@ asks of it ("what did it try, what came back, why did it stop") take `jq`.
 
 This module answers them without changing the record. It is a **pure reader**:
 nothing here writes, and the rendering is never cached — `task tail`, `task
-log`, `manager log`, the TUI's transcript pane and the web dashboard all call
-`render()` on entries they read themselves, so the three surfaces agree by
+log`, `manager log` and the TUI's transcript pane all call
+`render()` on entries they read themselves, so the surfaces agree by
 construction rather than by convention.
 
 Three properties it is built around, the same shape `usage.py` has:

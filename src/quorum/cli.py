@@ -199,6 +199,69 @@ def _actor_guard(
     fsio.append_jsonl(journal, entry)
 
 
+def _agent_notebook(home: Path, name: str):
+    """An agent's notebook, with the owner name validated first.
+
+    `--agent` becomes a path component under `state/agents/`, so it is held
+    to the agent-name rules on the read side as much as the write side; the
+    error is the CLI's, not a traceback.
+    """
+    from .notes import NotebookError, agent_notebook, check_owner
+
+    try:
+        check_owner(name)
+    except NotebookError as e:
+        raise _fail(str(e)) from None
+    return agent_notebook(home, name)
+
+
+def _notebook_write(
+    home: Path,
+    book,
+    action: str,
+    *,
+    journal_target: str,
+    arg: str,
+    retire: bool = False,
+    ttl: int = 0,
+    target_status: str | None = None,
+    always_journal: bool = False,
+) -> dict:
+    """The body shared by `manager remember|forget` and `task remember|forget`.
+
+    One `may_write` decision, made by the notebook itself so
+    `Notebook.writers` is the only fence; one journal line either way —
+    `<action>.refused` when the actor may not write (an agent reaching for
+    someone else's memory is exactly what the next digest should show),
+    `<action>` when it may, so a refusal costs one slot of the run's action
+    cap and no more; and the refusal wording comes from the notebook, which
+    is what keeps the four commands from drifting apart.
+
+    `retire` picks the write: append `arg` as a note, or retire the note
+    `arg` names. Returns the note either way.
+    """
+    from .notes import NotebookError
+
+    actor = current_actor()
+    if not book.may_write(actor):
+        _actor_guard(
+            home, f"{action}.refused", target=journal_target,
+            target_status=target_status, args=arg, always_journal=always_journal,
+        )
+        raise _fail(f"action refused: {book.refusal(actor)}")
+    _actor_guard(
+        home, action, target=journal_target, target_status=target_status,
+        args=arg, always_journal=always_journal,
+    )
+    run_id = os.environ.get(ACTOR_RUN_ENV, "")
+    try:
+        if retire:
+            return book.forget(arg, sender=actor, run_id=run_id)
+        return book.remember(arg, sender=actor, run_id=run_id, ttl_days=ttl or None)
+    except NotebookError as e:
+        raise _fail(str(e)) from None
+
+
 def _confirm(yes: bool, what: str) -> None:
     """Interactive-only guard for destructive commands: prompts on a TTY,
     passes through everywhere else (scripts and harness-driven agents keep
@@ -724,7 +787,7 @@ def usage_cmd(
 #
 # Columns that are empty on every row are dropped, so a home with no PRs,
 # flags or reported usage does not grow blank headers. Cells are built from
-# the same `views.*_rows` dicts the TUI, web app and `--json` read, so the
+# the same `views.*_rows` dicts the TUI and `--json` read, so the
 # CLI renders and never re-derives.
 
 PLAIN_TABLE_WIDTH = 4096  # off-terminal render width: wide enough that no cell is cut
@@ -1600,16 +1663,22 @@ def task_show(
     # The notebook, exactly as the runner renders it into the task's prompt
     # (header line included, so what you read here is what the harness
     # reads). The digest never carries it: the manager reads reports.
-    kept = notes_mod.task_section(target, task.id)
+    book = notes_mod.task_notebook(target, task.id)
+    standing = book.active()
+    kept = book.render_notes(standing, unscanned=book.unscanned_bytes())
     if kept:
         typer.echo("notebook:")
-        for line in kept[1:]:
+        for line in kept:
             typer.echo(f"  {line}")
-    else:
-        typer.echo(
-            f'  notebook: (empty — `quorum task remember {task.short_id} "…"` keeps state '
+    if not standing:
+        # A notebook can render lines and still hold no live note — the file
+        # has outgrown its read window — so the hint hangs off the notes, not
+        # off the rendering.
+        empty = (
+            f'(empty — `quorum task remember {task.short_id} "…"` keeps state '
             "between its runs)"
         )
+        typer.echo(f"  {empty}" if kept else f"  notebook: {empty}")
     handoff = read_handoff(target, task.id)
     if handoff is not None:
         # In full: dependents see it capped in their prompt, and this is
@@ -1932,6 +2001,10 @@ def task_remember(
     """Write a standing note into a task's notebook; every future run of the
     task reads it — resumed or fresh.
 
+    An attached task is the exception: an adopted session does not go through
+    the runner, so nothing renders its notebook into the session and
+    `quorum task show` is the read path.
+
     The notebook (`tasks/<id>/notes.jsonl`) is the task's memory between
     runs: what is done, what is left, what was tried and failed. The task's
     own harness writes it (tagged `task-<id>` by the runner), and so may the
@@ -1943,31 +2016,25 @@ def task_remember(
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    book = notes_mod.task_notebook(target, task.id)
-    actor = current_actor()
-    if not book.may_write(actor):
-        # journal the refusal too (for a tagged agent): reaching for a task's
-        # memory is exactly the kind of thing its next digest should show
-        _actor_guard(
-            target, "task.remember.refused", target=task.short_id, target_status=task.status,
-            args=text[:80],
-        )
-        raise _fail(
-            f"action refused: {actor} may not write to task {task.short_id}'s notebook — "
-            f"guide it with `quorum task nudge {task.short_id}` instead"
-        )
-    _actor_guard(
-        target, "task.remember", target=task.short_id, target_status=task.status, args=text[:80]
+    entry = _notebook_write(
+        target, notes_mod.task_notebook(target, task.id), "task.remember",
+        journal_target=task.short_id, target_status=task.status, arg=text[:80], ttl=ttl,
     )
-    try:
-        entry = book.remember(
-            text, sender=actor, run_id=os.environ.get(ACTOR_RUN_ENV, ""), ttl_days=ttl or None
+    for_days = f", for {ttl}d" if ttl else ""
+    if task.attached:
+        # An adopted session does not go through the runner, so nothing
+        # composes a prompt for it and the note is never rendered into the
+        # session. It is kept, and `task show` is the read path.
+        typer.secho(
+            f"remembered ({notes_mod.short_id(entry['id'])}) — task {task.short_id} is "
+            f"attached, so `quorum task show {task.short_id}` is where it is read; an "
+            "adopted session is not handed its notebook" + for_days,
+            fg="green",
         )
-    except notes_mod.NotebookError as e:
-        raise _fail(str(e)) from None
+        return
     typer.secho(
         f"remembered ({notes_mod.short_id(entry['id'])}) — every future run of task "
-        f"{task.short_id} reads it" + (f", for {ttl}d" if ttl else ""),
+        f"{task.short_id} reads it" + for_days,
         fg="green",
     )
 
@@ -1981,21 +2048,10 @@ def task_forget(task_id: str, note_id: str, home: Path | None = _HOME_OPT) -> No
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
-    book = notes_mod.task_notebook(target, task.id)
-    actor = current_actor()
-    if not book.may_write(actor):
-        _actor_guard(
-            target, "task.forget.refused", target=task.short_id, target_status=task.status,
-            args=note_id,
-        )
-        raise _fail(f"action refused: {actor} may not write to task {task.short_id}'s notebook")
-    _actor_guard(
-        target, "task.forget", target=task.short_id, target_status=task.status, args=note_id
+    note = _notebook_write(
+        target, notes_mod.task_notebook(target, task.id), "task.forget",
+        journal_target=task.short_id, target_status=task.status, arg=note_id, retire=True,
     )
-    try:
-        note = book.forget(note_id, sender=actor, run_id=os.environ.get(ACTOR_RUN_ENV, ""))
-    except notes_mod.NotebookError as e:
-        raise _fail(str(e)) from None
     typer.echo(f"forgot ({notes_mod.short_id(note['id'])}) {note.get('text', '')[:60]}")
 
 
@@ -2401,7 +2457,7 @@ def board_ack(
 ) -> None:
     """Say "I have seen this one": archive a single board message.
 
-    The banner (`quorum status`, the TUI header, the web header) is a time
+    The banner (`quorum status`, the TUI header) is a time
     window over #attention, not a read-state — so an escalation you have
     already handled sits there for a week. Acking archives that one message
     into `messages/archive/YYYY-MM.jsonl.gz`, which drops it from every view
@@ -2439,7 +2495,7 @@ def board_ack(
         return
     _actor_guard(home_path, "board.ack", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
     # archive the path resolution already handed us: resolving a second time
-    # could miss (the janitor, another `board ack`, the web panel) and raise
+    # could miss (the janitor, another `board ack`, the TUI) and raise
     # where a tidy line belongs, and archiving a gone file is a no-op anyway
     bus.archive_board_message(path)
     typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
@@ -2721,28 +2777,7 @@ def integration_install(
         typer.echo(note)
 
 
-# -- dashboards ------------------------------------------------------------
-
-
-@app.command()
-def web(
-    port: int = typer.Option(8787, "--port"),
-    home: Path | None = _HOME_OPT,
-) -> None:
-    r"""Serve the local web dashboard on 127.0.0.1 (requires the \[web] extra)."""
-    target = get_home(home)
-    try:
-        import uvicorn
-
-        from .web.app import create_app
-    except ImportError:
-        raise _fail(
-            "the web dashboard needs the [web] extra: "
-            "uv tool install 'quorum-orchestrator[web]' "
-            "(or pip install 'quorum-orchestrator[web]')"
-        ) from None
-    typer.echo(f"dashboard: http://127.0.0.1:{port}")
-    uvicorn.run(create_app(target), host="127.0.0.1", port=port, log_level="warning")
+# -- dashboard -------------------------------------------------------------
 
 
 @app.command()
@@ -2765,7 +2800,7 @@ def tui(home: Path | None = _HOME_OPT) -> None:
 # readers over `state/<agent>/`: the digest snapshot a run was given, its
 # transcript, the actions the CLI journaled for it, and the ledger line
 # saying how it ended. Rendering is `transcript.py`'s, the same one the TUI
-# and the web dashboard use.
+# uses.
 
 
 def _resolve_run(home: Path, name: str, ref: str) -> str:
@@ -3163,24 +3198,10 @@ def manager_remember(
     from . import notes as notes_mod
 
     target = get_home(home)
-    actor = current_actor()
-    if not notes_mod.may_write(actor, agent):
-        # journal the refusal too: an agent reaching for someone else's
-        # notebook is exactly the kind of thing the next digest should show
-        _actor_guard(target, "remember.refused", target=agent, args=text, always_journal=True)
-        raise _fail(
-            f"action refused: {actor} may not write to {agent}'s notebook — "
-            "report to it with `quorum task report`, or reach it on the board "
-            "with `quorum board post attention`"
-        )
-    _actor_guard(target, "remember", args=text, always_journal=True)
-    try:
-        entry = notes_mod.remember(
-            target, text, owner=agent, sender=actor,
-            run_id=os.environ.get(ACTOR_RUN_ENV, ""), ttl_days=ttl or None,
-        )
-    except notes_mod.NotebookError as e:
-        raise _fail(str(e)) from None
+    entry = _notebook_write(
+        target, _agent_notebook(target, agent), "remember",
+        journal_target=agent, arg=text, ttl=ttl, always_journal=True,
+    )
     typer.secho(
         f"remembered ({notes_mod.short_id(entry['id'])}) — every future {agent} run reads it"
         + (f", for {ttl}d" if ttl else ""),
@@ -3199,18 +3220,10 @@ def manager_forget(
     from . import notes as notes_mod
 
     target = get_home(home)
-    actor = current_actor()
-    if not notes_mod.may_write(actor, agent):
-        _actor_guard(target, "forget.refused", target=agent, args=note_id, always_journal=True)
-        raise _fail(f"action refused: {actor} may not write to {agent}'s notebook")
-    _actor_guard(target, "forget", target=note_id, always_journal=True)
-    try:
-        note = notes_mod.forget(
-            target, note_id, owner=agent, sender=actor,
-            run_id=os.environ.get(ACTOR_RUN_ENV, ""),
-        )
-    except notes_mod.NotebookError as e:
-        raise _fail(str(e)) from None
+    note = _notebook_write(
+        target, _agent_notebook(target, agent), "forget",
+        journal_target=agent, arg=note_id, retire=True, always_journal=True,
+    )
     typer.echo(f"forgot ({notes_mod.short_id(note['id'])}) {note.get('text', '')[:60]}")
 
 
@@ -3220,16 +3233,7 @@ def manager_notes(
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Print the notebook exactly as the digest renders it for that agent."""
-    from . import notes as notes_mod
-
-    # reading is validated like writing: `--agent` is a path component under
-    # state/agents/, so `../../whatever` must not read outside QUORUM_HOME
-    try:
-        notes_mod.check_owner(agent)
-        section = notes_mod.digest_section(get_home(home), owner=agent)
-    except notes_mod.NotebookError as e:
-        raise _fail(str(e)) from None
-    for line in section:
+    for line in _agent_notebook(get_home(home), agent).render():
         typer.echo(line)
 
 

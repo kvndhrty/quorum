@@ -1,7 +1,7 @@
 """Terminal dashboard (Textual). A file reader of QUORUM_HOME, refreshed on a
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
-web dashboard make: `n` sends guidance into a task's inbox, `m` sends a
+CLI makes: `n` sends guidance into a task's inbox, `m` sends a
 directive to the manager's inbox (`quorum manager tell`), `s` launches a
 detached run, `c` cancels a task — the one destructive binding, so it confirms
 first — and `a` acks an escalation off the #attention banner
@@ -57,7 +57,6 @@ FAILED = object()
 
 #: how many escalations the `a` list shows — deeper than the banner's own
 #: summary, because every line in it is one the reader may want to ack.
-#: Shared with the web dashboard's Attention panel, which acks the same way.
 ATTENTION_LIST_LIMIT = views.ATTENTION_LIST_LIMIT
 
 
@@ -471,7 +470,7 @@ class QuorumTUI(App):
 
         Every row the dashboard offers is a *snapshot*, so the thing a write
         names can also be gone by the time the key is pressed — an escalation
-        the janitor, another `board ack` or the web panel archived out of band.
+        the janitor or another `board ack` archived out of band.
         That surfaces as the KeyError/ValueError board resolution raises, not
         as OSError, and it is the same class of disappointment: say so and keep
         the view up."""
@@ -746,8 +745,8 @@ class QuorumTUI(App):
         return [views.history_line(row) for row in views.task_history(self.home, task)]
 
     def _task_log_lines(self, task_id: str) -> list[str]:
-        # the same renderer `quorum task tail` and the web dashboard use, so
-        # the three surfaces cannot drift into three readings of one file
+        # the same renderer `quorum task tail` uses, so the surfaces cannot
+        # drift into two readings of one file
         lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
         reports = read_reports(self.home, task_id, limit=8)
         if reports:

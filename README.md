@@ -26,9 +26,9 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 │             through `quorum task report` and reading guidance   │
 │             from `quorum task inbox`                            │
 └──────────────────── all state in ~/.quorum ─────────────────────┘
-        ▲                    ▲                    ▲
-   quorum status        quorum tui           quorum web
-   quorum manager tell  (steer with `n`)     (localhost only)
+        ▲                    ▲
+   quorum status        quorum tui
+   quorum manager tell  (steer with `n`)
 ```
 
 ## Install
@@ -37,11 +37,10 @@ Needs Python 3.11+.
 
 ```bash
 uv tool install quorum-orchestrator              # includes the TUI dashboard
-uv tool install "quorum-orchestrator[web]"       # + the localhost web dashboard
 uvx --from quorum-orchestrator quorum --help     # zero-install trial run
 ```
 
-(or `pip install "quorum-orchestrator[web]"` if you don't use uv.)
+(or `pip install quorum-orchestrator` if you don't use uv.)
 
 The PyPI distribution is `quorum-orchestrator`; the command it installs is
 plain `quorum` (and the import name is `quorum` too).
@@ -86,15 +85,9 @@ quorum manager tell "the api task is urgent; park everything else"
 quorum manager journal       # what the manager did, and why
 quorum tui                   # dashboard; select a task, press n to steer
                              # (m tells the manager, s runs, c cancels)
-quorum web                   # http://127.0.0.1:8787
 ```
 
 ## What it looks like
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-dark.png">
-  <img alt="quorum web dashboard" src="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-light.png">
-</picture>
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
 
@@ -117,7 +110,7 @@ gets corrected.
   steer it; none of the surveyed tools hand the session to a supervisor.
 - **The supervisor is the same harness, reading a file digest.** Among the
   open-source tools surveyed, "supervision" meant keystroke automation —
-  daemons pressing enter, blind auto-confirmation. An actual LLM supervisor
+  daemons pressing enter, blind auto-confirmation. An actual model-driven supervisor
   showed up only in hosted commercial products (Factory's Mission Control,
   Devin's coordinator), where the inputs and the decisions stay in someone
   else's cloud. Quorum runs that pattern on your disk, and every input and
@@ -134,8 +127,8 @@ background runs? Because the same wave made sessions externally
 addressable — hooks, streaming protocols, control-plane APIs — and an
 outside layer can still own what a single vendor's cloud cannot: one queue
 over every harness, on your own disk, under a supervision policy you edit.
-No daemonization framework, no database, and no open ports beyond the
-opt-in localhost-only dashboard. The survey's ranked implications became
+No daemonization framework, no database, and no open ports at all. The
+survey's ranked implications became
 the project roadmap:
 [issue #23](https://github.com/kvndhrty/quorum/issues/23).
 
@@ -178,15 +171,15 @@ and the per-harness adapters under
 - **Guidance is a message, not a keystroke.** Your nudges and the manager's
   pokes travel the same file-based inbox; the next run starts with them in
   its prompt, and a cooperative harness picks them up mid-run.
-- **Failure is loud and recovery is automatic.** If your LLM service goes
+- **Failure is loud and recovery is automatic.** If your model service goes
   down, every harness-driven tick fails visibly — and keeps being scheduled,
   so the first tick after service returns reads the world from files and
   relaunches whatever died. No degraded fallback mode to babysit.
 - **All state is files** under `QUORUM_HOME` (default `~/.quorum`): task
   records, transcripts, a message board, inboxes — written with atomic
-  tmp+rename. The TUI and web dashboard read those files and work even when
-  the supervisor is down; what they write (a nudge, a directive, a run, a
-  cancel) is the same call the CLI makes. Copy the directory and your whole
+  tmp+rename. The TUI reads those files and works even when the supervisor
+  is down; what it writes (a nudge, a directive, a run, a cancel) is the
+  same call the CLI makes. Copy the directory and your whole
   setup moves.
 
 ## Supervision policy is a prompt
@@ -198,9 +191,7 @@ merged into the template at its `{local}` slot, so your policy rides along
 while `quorum init` keeps upgrading the default underneath it. Edit
 `manager.md` itself only when you mean to fork the whole thing (an edited
 template is never upgraded again; `quorum prompt diff manager` shows what
-you are missing), and delete it to restore the default. (An optional `[llm]`
-section separately gives *plugin* agents a small-completion client — the
-manager and tasks run your full harness directly.)
+you are missing), and delete it to restore the default.
 
 ## Optional sandbox
 

@@ -744,6 +744,25 @@ def check_dials(home: Path, config: Config) -> list[Check]:
     return checks
 
 
+def check_surfaces() -> Check:
+    """How much quorum exposes, as one informational line: never ✓, never ✗.
+
+    Issue #102 asks that the size of the exposed surface stay visible, because
+    a command, an option or a config key costs a reader something whether or
+    not they use it. The counting is `surfaces.py`'s, the same module
+    `scripts/surfaces.py` prints its tables from, so the two cannot report
+    different numbers. Growth is not a fault, so this is `na`: it is a number
+    to look at next time, not something to fix.
+    """
+    from . import surfaces
+
+    try:
+        line = surfaces.summary_line()
+    except Exception as e:  # pragma: no cover - counting reads only the code
+        return na("surfaces", f"surfaces: not counted ({e})", "")
+    return na("surfaces", f"surfaces: {line}", "inventory: uv run python scripts/surfaces.py")
+
+
 # -- the one active probe ----------------------------------------------------
 
 
@@ -1020,6 +1039,7 @@ def run_checks(
     checks.append(check_stale_claims(home))
     checks += check_heartbeats(home, config)
     checks += check_dials(home, config)
+    checks.append(check_surfaces())
     if smoke is not None:
         checks += smoke_checks(home, config, smoke, smoke_timeout)
     return checks

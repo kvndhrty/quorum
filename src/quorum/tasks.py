@@ -162,7 +162,7 @@ class Task(BaseModel):
     # `PR_STATES`, and when it was observed. Quorum's **one** materialized
     # probe result — written only from the manager tick's digest build
     # (`record_pr_state`), never by a view, so `quorum status` / `task list`
-    # / the TUI / the web dashboard can badge a merged task while staying
+    # / the TUI can badge a merged task while staying
     # pure file readers. It is an observation and never a status: `done` is
     # the harness's word, merged is the forge's, and quorum never turns one
     # into the other. None means nothing was ever observed — no gh, no PR,
@@ -397,7 +397,7 @@ def issue_ref(issue_url: str | None) -> str:
     """`#62` for an issue url, `""` when there is none.
 
     The one renderer of the short form, shared by the CLI listing, `task
-    show`, the TUI, the web dashboard and the manager digest — the url on
+    show`, the TUI and the manager digest — the url on
     the record is the truth, and every surface abbreviates it the same way.
     An url whose tail is not a number renders whole rather than being
     guessed at.
@@ -596,7 +596,7 @@ def report(
 
 def nudge(home: Path, task: Task, text: str, sender: str = "user"):
     """Queue guidance for a task — the single write path shared by the CLI,
-    TUI, and web. When the task lives in a herdr pane, also ring the pane's
+    and the TUI. When the task lives in a herdr pane, also ring the pane's
     doorbell; the payload stays in the inbox (exactly-once delivery), the
     doorbell only says something is waiting."""
     msg = MessageBus(home).send(sender, inbox_name(task.id), type="guidance", text=text)

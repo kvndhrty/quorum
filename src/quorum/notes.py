@@ -14,7 +14,7 @@ Two properties define it, and both are structural rather than polite:
   topic, so no task report, prompt agent or chatty babysitter can post into
   it and crowd the manager's own notes out; and not the journal, so an
   action-heavy run cannot age a standing fact out of the window.
-- **Its own digest budget.** `render_section` bounds the notebook with
+- **Its own digest budget.** `Notebook.render_notes` bounds the notebook with
   `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing else in the digest
   spends. Ten noisy tasks with long report tails cannot shrink it.
 
@@ -32,9 +32,9 @@ and fresh session alike — under its own budget, and deliberately *not* into
 the digest (the manager reads reports; the notebook is the task's own). The
 two differ only in what `Notebook` carries: where the file is, who besides
 the owner may write (the manager may write a task's), and the command names
-the rendering teaches. The module-level functions are the manager-shaped
-face over `agent_notebook`, kept so the manager notebook behaves exactly as
-it did before tasks had one.
+the rendering teaches. `agent_notebook` and `task_notebook` are the only
+two entry points: a caller builds the notebook it means and calls its
+methods.
 """
 
 from __future__ import annotations
@@ -83,23 +83,16 @@ class NotebookError(Exception):
     """A refused or unresolvable notebook operation; the CLI renders it."""
 
 
+def _nbytes(line: str) -> int:
+    """The line's cost in the rendering, in UTF-8 bytes plus its newline."""
+    return len(line.encode("utf-8")) + 1
+
+
 def short_id(note_id: str) -> str:
     """The handle `remember` prints and `forget` accepts: the ULID's random
     tail, for the same reason `Task.short_id` is (the head is a shared
     timestamp)."""
     return note_id[-6:].lower()
-
-
-def may_write(actor_name: str, owner: str) -> bool:
-    """Who may write into `owner`'s notebook: that agent itself, or a human.
-
-    Everyone else — a task run (tagged `task-<id>` by the runner), another
-    agent — is refused. Tasks reach the manager through `task report` and
-    the board; letting them write into its memory would recreate the
-    write-side crowding the separate file exists to prevent. A task's own
-    notebook is `task_notebook`, with its own `Notebook.may_write`.
-    """
-    return actor_name == "user" or actor_name == owner
 
 
 def check_owner(owner: str) -> None:
@@ -122,7 +115,9 @@ class Notebook:
     """One notebook: where it lives, whose it is, and how it is rendered.
 
     `owner` is the actor name that may write it (an agent name, or a task's
-    `task-<id>`); `writers` are the others allowed besides the owner and an
+    `task-<id>`); `owner_label` is how that owner is named in an error, which
+    is not the same string for a task (`task-<full ulid>` is not what a
+    person typed); `writers` are the others allowed besides the owner and an
     untagged human — empty for an agent, the manager for a task. The rest
     is rendering: the section header, the budget the rendering is held to,
     the line an empty notebook shows (None: nothing at all — a task's prompt
@@ -133,6 +128,7 @@ class Notebook:
 
     path: Path
     owner: str
+    owner_label: str
     writers: frozenset[str]
     header: str
     max_entries: int
@@ -153,6 +149,12 @@ class Notebook:
         crowding each other's memory; the sandbox is the real fence."""
         return sender == "user" or sender == self.owner or sender in self.writers
 
+    def refusal(self, sender: str) -> str:
+        """Why `sender` was refused and what to do instead, in one place: the
+        methods below raise it and the CLI prints it, so the two cannot
+        drift apart."""
+        return f"{sender} may not write to {self.owner_label}'s notebook — {self.refusal_hint}"
+
     # -- reads ---------------------------------------------------------------
 
     def entries(self) -> list[dict]:
@@ -160,10 +162,21 @@ class Notebook:
         written by a future version — a missing id, an id that is not a
         string — is skipped rather than allowed to raise out of a digest
         build or a prompt composition, because a single bad line would
-        otherwise fail every run forever."""
+        otherwise fail every run forever.
+
+        The file itself is read the same way: a notes.jsonl that is a
+        directory, or unreadable, reads as an empty notebook. This is on the
+        path of every task run (`runner.compose_prompt`), so raising here
+        would fail the run before the harness starts — the same reason
+        `tasks.read_handoff` swallows OSError.
+        """
+        try:
+            raw = fsio.read_jsonl_tail(self.path, max_bytes=NOTES_SCAN_BYTES)
+        except OSError:
+            return []
         return [
             e
-            for e in fsio.read_jsonl_tail(self.path, max_bytes=NOTES_SCAN_BYTES)
+            for e in raw
             if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
         ]
 
@@ -230,9 +243,7 @@ class Notebook:
     ) -> dict:
         """Append a standing note. Raises on a refused sender."""
         if not self.may_write(sender):
-            raise NotebookError(
-                f"{sender} may not write to {self.owner}'s notebook — {self.refusal_hint}"
-            )
+            raise NotebookError(self.refusal(sender))
         text = text.strip()
         if not text:
             raise NotebookError("a note needs some text")
@@ -259,7 +270,7 @@ class Notebook:
     ) -> dict:
         """Retire a note by appending a tombstone; readers hide both lines."""
         if not self.may_write(sender):
-            raise NotebookError(f"{sender} may not write to {self.owner}'s notebook")
+            raise NotebookError(self.refusal(sender))
         note = self.resolve(handle, now=now)
         fsio.append_jsonl(
             self.path,
@@ -289,8 +300,8 @@ class Notebook:
 
         `unscanned` is the second, quieter way notes go missing: the file
         grew past `NOTES_SCAN_BYTES` and its oldest lines — permanent notes
-        included — were never read. Saying so is the point; the reader
-        decides what to do.
+        included — were never read. The rendering states the count and
+        nothing here acts on it.
 
         An empty notebook renders `empty_line` under the header, or nothing
         at all when the notebook has none (and nothing went unscanned).
@@ -310,8 +321,10 @@ class Notebook:
         kept = notes[-self.max_entries :]
         rendered = [describe(e, now) for e in kept]
         # Byte cap second: entries are dropped oldest-first, but the newest note
-        # always survives (truncated by `describe` if it has to be).
-        while len(rendered) > 1 and sum(len(line) + 1 for line in rendered) > self.max_bytes:
+        # always survives (truncated by `describe` if it has to be). Measured
+        # in UTF-8 bytes like `runner.clip_handoff`, so a notebook written in
+        # a non-Latin script gets the budget the name promises.
+        while len(rendered) > 1 and sum(_nbytes(line) for line in rendered) > self.max_bytes:
             rendered.pop(0)
         dropped = len(notes) - len(rendered)
         if dropped:
@@ -338,6 +351,7 @@ def agent_notebook(home: Path, owner: str = "manager") -> Notebook:
     return Notebook(
         path=notes_path(home, owner),
         owner=owner,
+        owner_label=owner,
         writers=frozenset(),
         header=SECTION_HEADER,
         max_entries=NOTES_MAX_ENTRIES,
@@ -351,13 +365,38 @@ def agent_notebook(home: Path, owner: str = "manager") -> Notebook:
     )
 
 
+def manager_writers(home: Path) -> frozenset[str]:
+    """The agent names that count as "the manager" for a task's notebook.
+
+    A task's notebook admits the manager as an extra writer, and the manager
+    is an agent named in config: `[agents.boss] type = "manager"` runs the
+    builtin under the name `boss`, and its harness is tagged
+    `QUORUM_ACTOR=boss`, so matching the literal string "manager" would
+    refuse a renamed manager every time. Config is read through
+    `try_load_config`, which returns None for a file quorum cannot parse;
+    that case falls back to the literal name rather than raising, because
+    this is read on the path of every task run. The literal name is always
+    included: it is the manager's default name and its historical state
+    directory.
+    """
+    from .config import try_load_config
+
+    names = {"manager"}
+    config = try_load_config(home)
+    if config is not None:
+        names |= {n for n, agent in config.agents.items() if agent.type == "manager"}
+    return frozenset(names)
+
+
 def task_notebook(home: Path, task_id: str) -> Notebook:
     """A task's notebook: `tasks/<id>/notes.jsonl`, owned by the task's actor
     identity (`task-<id>`), which the runner sets on the task's harness.
 
     The manager may write it too — a standing instruction for a task's next
     run is the natural complement to a one-shot `task nudge` — and so may a
-    human; any *other* task, and any prompt agent, is refused. It is
+    human; any *other* task, and any prompt agent, is refused. Which names
+    count as the manager comes from `manager_writers`, by configured type
+    rather than by the literal name. It is
     rendered into the task's own prompt on every run under
     `TASK_NOTES_MAX_ENTRIES` / `TASK_NOTES_MAX_BYTES` and printed by
     `quorum task show`; the digest never carries it.
@@ -368,7 +407,8 @@ def task_notebook(home: Path, task_id: str) -> Notebook:
     return Notebook(
         path=task_dir(home, task_id) / "notes.jsonl",
         owner=task_actor(task_id),
-        writers=frozenset({"manager"}),
+        owner_label=f"task {handle}",
+        writers=manager_writers(home),
         header=TASK_SECTION_HEADER,
         max_entries=TASK_NOTES_MAX_ENTRIES,
         max_bytes=TASK_NOTES_MAX_BYTES,
@@ -381,24 +421,6 @@ def task_notebook(home: Path, task_id: str) -> Notebook:
     )
 
 
-# -- the manager-shaped face -------------------------------------------------
-#
-# Everything below is `agent_notebook(home, owner)` with the arguments in the
-# order the digest, the views and `quorum manager remember|forget|notes`
-# always passed them. It is kept as a face rather than folded into callers so
-# the manager notebook's behaviour is exactly what it was before tasks had
-# one — `_entries` included, since a test or a plugin may reach for it.
-
-
-def _entries(home: Path, owner: str = "manager") -> list[dict]:
-    return agent_notebook(home, owner).entries()
-
-
-def unscanned_bytes(home: Path, owner: str = "manager") -> int:
-    """How much of `owner`'s notebook fell outside the `NOTES_SCAN_BYTES` tail."""
-    return agent_notebook(home, owner).unscanned_bytes()
-
-
 def expires_at(entry: dict) -> datetime | None:
     """When this note stops being true, or None when it never does."""
     ttl = entry.get("ttl_days")
@@ -408,48 +430,6 @@ def expires_at(entry: dict) -> datetime | None:
         return fsio.parse_iso(str(entry["ts"])) + timedelta(days=float(ttl))
     except (KeyError, ValueError):
         return None  # unparseable ttl: keep the note rather than lose it
-
-
-def active(home: Path, owner: str = "manager", now: datetime | None = None) -> list[dict]:
-    """Unretired, unexpired notes, oldest first — the notebook as it reads."""
-    return agent_notebook(home, owner).active(now=now)
-
-
-def resolve(
-    home: Path, handle: str, owner: str = "manager", now: datetime | None = None
-) -> dict:
-    """Find one note by full id, unique prefix, or unique suffix (what
-    `short_id` hands out) — the same handle rules as tasks."""
-    return agent_notebook(home, owner).resolve(handle, now=now)
-
-
-def remember(
-    home: Path,
-    text: str,
-    owner: str = "manager",
-    sender: str = "user",
-    run_id: str = "",
-    ttl_days: int | None = None,
-    now: datetime | None = None,
-) -> dict:
-    """Append a standing note to `owner`'s notebook. Raises on a refused sender."""
-    check_owner(owner)
-    return agent_notebook(home, owner).remember(
-        text, sender=sender, run_id=run_id, ttl_days=ttl_days, now=now
-    )
-
-
-def forget(
-    home: Path,
-    handle: str,
-    owner: str = "manager",
-    sender: str = "user",
-    run_id: str = "",
-    now: datetime | None = None,
-) -> dict:
-    """Retire a note by appending a tombstone; readers hide both lines."""
-    check_owner(owner)
-    return agent_notebook(home, owner).forget(handle, sender=sender, run_id=run_id, now=now)
 
 
 def describe(entry: dict, now: datetime | None = None) -> str:
@@ -470,28 +450,3 @@ def describe(entry: dict, now: datetime | None = None) -> str:
     note_id = entry.get("id")
     handle = short_id(note_id) if isinstance(note_id, str) else "??????"
     return f"- ({handle}) [{when}{ttl}] {entry.get('sender', '?')}: {text}"
-
-
-def render_section(
-    notes: list[dict], now: datetime | None = None, unscanned: int = 0
-) -> list[str]:
-    """The manager's notebook as digest lines, under the notebook's own caps
-    (`Notebook.render_notes` with the manager's header, budget and commands;
-    the path is not needed to render an already-loaded list, so any home
-    will do)."""
-    return agent_notebook(Path("."), "manager").render_notes(notes, now=now, unscanned=unscanned)
-
-
-def digest_section(
-    home: Path, owner: str = "manager", now: datetime | None = None
-) -> list[str]:
-    """`render_section` straight off the files — what the digest and
-    `quorum manager notes` both call."""
-    return agent_notebook(home, owner).render(now=now)
-
-
-def task_section(home: Path, task_id: str, now: datetime | None = None) -> list[str]:
-    """A task's notebook as prompt lines — what the runner puts in the
-    composed prompt and `quorum task show` prints. Empty when there is
-    nothing to say."""
-    return task_notebook(home, task_id).render(now=now)

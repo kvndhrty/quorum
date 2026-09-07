@@ -19,7 +19,6 @@ from .projects import ProjectRegistry
 
 if TYPE_CHECKING:
     from .config import Config
-    from .llm import LLMClient
 
 
 class AgentContext:
@@ -31,7 +30,6 @@ class AgentContext:
         config: Config | None = None,
         bus: MessageBus | None = None,
         projects: ProjectRegistry | None = None,
-        llm: LLMClient | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.home = Path(home)
@@ -41,26 +39,7 @@ class AgentContext:
         self.now = now or fsio.utc_now
         self.bus = bus or MessageBus(self.home, now=self.now)
         self.projects = projects or ProjectRegistry(self.home)
-        self._llm = llm
         self._state_path = self.home / "state" / "agents" / name / "state.json"
-
-    # -- LLM (optional) ---------------------------------------------------
-
-    @property
-    def llm(self) -> LLMClient:
-        """An LLMClient; when nothing is configured it is a disabled client
-        whose complete() always returns None. Agents must handle None."""
-        if self._llm is None:
-            from .llm import LLMClient
-
-            self._llm = LLMClient.from_config(
-                self.config.llm if self.config else None,
-                agent_settings=self.settings,
-                home=self.home,
-                sandbox_config=self.config.sandbox if self.config else None,
-                full_config=self.config,
-            )
-        return self._llm
 
     def prompt(self, template_name: str, **placeholders: str) -> str:
         """Render a prompt template from QUORUM_HOME/prompts/ (user-editable)."""

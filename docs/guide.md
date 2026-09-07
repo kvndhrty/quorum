@@ -54,7 +54,6 @@ itself; and the manager has its own inbox for your directives.
 
 ```bash
 uv tool install quorum-orchestrator              # `quorum` command + TUI dashboard
-uv tool install "quorum-orchestrator[web]"       # add the localhost web dashboard
 quorum init                    # scaffolds ~/.quorum and a starter config.toml
 quorum doctor                  # after editing config.toml: check it against
                                # reality (see "Checking your setup" below)
@@ -118,8 +117,8 @@ read it as relative spend, never as an invoice.
 Set `max_cost_per_run` or `max_tokens_per_run` and a run that reported more
 than that gets marked (`$!` in the views, `BUDGET-EXCEEDED` in the digest).
 The budget also gates the **next** run: while a task's *last* run is over
-budget, `quorum task run` refuses it (`$! GATED` in `task list`, the TUI and
-the dashboard, a `gated:` line in `task show`, and the TUI's `s` key says so
+budget, `quorum task run` refuses it (`$! GATED` in `task list` and the TUI,
+a `gated:` line in `task show`, and the TUI's `s` key says so
 if you try anyway) until you run it with
 `--force` or a run comes in under budget — a run that reports no usage
 counts as under, since silence is not spend. Quorum never kills a run in
@@ -306,8 +305,8 @@ quorum task add my-api --issue https://github.com/you/my-api/issues/62
 quorum task add my-api --issue 62 "start with the failing test in tests/auth"
 ```
 
-The issue URL is recorded on the task, so `quorum task list` and both
-dashboards show `#62`, `quorum task show` prints the full link, and the run
+The issue URL is recorded on the task, so `quorum task list` and the TUI
+show `#62`, `quorum task show` prints the full link, and the run
 preamble tells the harness which issue it is working from so it can
 reference it in the pull request. A prompt given as well (the third line
 above) is appended as extra instructions. A number resolves against the
@@ -435,7 +434,7 @@ on it would wait forever.
 
 What this *does*: while a dependency has not reached a terminal status, the
 dependent shows `waiting-on a3f2k9` in `quorum status`, `task list`,
-`task show`, the TUI and the dashboard; the manager's digest marks the same
+`task show` and the TUI; the manager's digest marks the same
 thing and its prompt tells it not to launch such a task; and `quorum task
 run` refuses it outright (`--force` if you disagree). Once every dependency
 is `done`, the task is an ordinary queued task and the manager picks it up
@@ -530,7 +529,7 @@ quorum task set-priority b7c1x4 -1     # push it to the back
 
 **Priority is an ordering hint the manager reads.** Higher goes first, `0`
 is the default, negative pushes work behind everything else. Nothing in
-quorum sorts by it: `task list`, the TUI and the dashboard stay in the order
+quorum sorts by it: `task list` and the TUI stay in the order
 tasks were created, and the number only reaches a decision through
 `prompts/manager.md`, which is told to prefer the higher priority among the
 tasks it could launch this tick. It shows up as `priority=5` on the
@@ -776,8 +775,7 @@ works with the supervisor stopped and still answers for a task you have
 pruned — the pruned task resolves out of `tasks/.archive` and its list ends
 with an `archived` row.
 
-The same list is a tab in the TUI (`t` on a task) and a block on the web
-dashboard's task page.
+The same list is a tab in the TUI (`t` on a task).
 
 ## The manager
 
@@ -824,8 +822,8 @@ when there is something to manage), the manager compiles a **digest**:
   (*What runs cost*, under [Setup](#setup) above); never a mid-run stop;
 - what the manager's **own** runs have cost, when its harness reports usage:
   supervision is not free, and in a busy home it is the steadiest recurring
-  bill. The same figure shows up next to the agent in `quorum status`, the
-  TUI and the web dashboard;
+  bill. The same figure shows up next to the agent in `quorum status` and
+  the TUI;
 - `perpetual=true` on any task queued with `--perpetual`
   ([above](#perpetual-tasks)), which the default prompt reads as "relaunch
   forever, never call it stuck, never cancel";
@@ -886,7 +884,7 @@ The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
 [architecture.md](architecture.md#the-manager).
 
-**When the LLM service is down, supervision halts loudly — and heals
+**When the model service is down, supervision halts loudly — and heals
 itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (visible in `quorum status` and on the board), but its schedule keeps firing
 (`auto_pause = false`), so the first tick after service returns reads the
@@ -896,7 +894,7 @@ You don't have to do anything.
 You do, however, get told. Individual failures go to the **system** board,
 which nothing nags you about — but after five consecutive failed ticks the
 supervisor posts `agent.failing` to the **attention** board, the banner
-`quorum status`, the TUI and the web dashboard all show. An agent that is
+`quorum status` and the TUI both show. An agent that is
 never paused would otherwise fail all night in a channel nobody watches;
 this is the one failure quorum will interrupt you about. It is one post per
 outage, not per tick, and when the manager ticks again a matching
@@ -953,8 +951,8 @@ several, then `forget` the rest.
 The same file exists for every agent (`quorum manager remember --agent
 <name>`, stored under `state/agents/<name>/`), and a prompt agent sees its
 own notebook — and the same self-observation lines above it — wherever its
-template writes `{notes}`. Both dashboards show an
-agent's notebook when you select it. Every task has one too, read by the
+template writes `{notes}`. The TUI shows an agent's notebook when you select
+it. Every task has one too, read by the
 task itself rather than the manager — [What a task
 remembers](#what-a-task-remembers).
 
@@ -1161,8 +1159,8 @@ quorum task nudge a3f2k9 "use the middleware approach, not decorators"
 The **next run starts with the guidance in its prompt** (a "Guidance
 received" section), and a cooperative harness that checks
 `quorum task inbox --claim` mid-run sees it sooner. The TUI makes this
-fluid: select a task, press `n`, type, enter. The web dashboard has the same
-nudge box on each task. The manager takes direction the same way, through
+fluid: select a task, press `n`, type, enter. The manager takes direction
+the same way, through
 its own inbox — `quorum manager tell "prioritise the release tasks"`, or `m`
 in the TUI.
 
@@ -1306,7 +1304,7 @@ details and per-project variants:
   `/quorum-adopt <desc>`, backed by a plugin that watches idle events and
   injects guidance as a user turn.
 
-Adoption creates an **attached** task (`⚭` in every dashboard): its workdir
+Adoption creates an **attached** task (`⚭` in every view): its workdir
 is your own checkout, quorum never spawns runs for it (`task run` refuses,
 by design), and the manager treats it as human-driven — observing its git
 state and reports, nudging rather than relaunching, escalating to the
@@ -1433,15 +1431,14 @@ you can see what a tick was looking at.
 All views read the home directory and nothing else — they work whether or
 not the supervisor is running, including over SSH, and never hold locks.
 What they *write* is a short list of steering affordances (nudge a task,
-tell the manager, run, cancel, and in the browser a few more), each one the
-same call the CLI makes.
+tell the manager, run, cancel, hold, set a priority, ack an escalation),
+each one the same call the CLI makes.
 
 Escalations are surfaced everywhere: recent posts on the `attention` topic
-(the manager's ask-a-human channel) show up as a warning line in `status`,
-in the TUI banner, and as a badge in the web header, so a manager asking
-for you is never silent. The banner is a seven-day window with no
-read-state, so an escalation you have already handled would otherwise sit
-there for the rest of the week. Say you have seen it:
+(the manager's ask-a-human channel) show up as a warning line in `status`
+and in the TUI banner, so a manager asking for you is never silent. The
+banner is a seven-day window with no read-state, so an escalation you have
+already handled would otherwise sit there for the rest of the week. Say you have seen it:
 
 ```bash
 quorum board read attention              # each line starts with its short id
@@ -1456,7 +1453,7 @@ on carrying no read-state at all. Ids resolve like task ids — a full id, a
 unique prefix, or the short suffix `board read` prints — and an unknown or
 ambiguous one is refused rather than guessed at. `--topic <name>` narrows the
 search when two boards hand out the same short id. The same ack is a keystroke
-in the TUI (`a`) and a button in the browser; `--all` is the sledgehammer
+in the TUI (`a`); `--all` is the sledgehammer
 described under [Cleaning up](#cleaning-up) — there the argument *is* the
 topic, so `--all` and `--topic` together are refused rather than one of them
 quietly ignored.
@@ -1514,23 +1511,6 @@ quietly ignored.
   dashboard has no task form.
 
   ![quorum terminal dashboard](images/tui.png)
-
-- `quorum web` — the same files, a different set of affordances, at
-  `http://127.0.0.1:8787` (`[web]` extra). Localhost only, no exposed
-  ports. It nudges tasks like the TUI does, and where the TUI stops it goes
-  on: pause/resume/run-now an agent, create a prompt agent with the "new
-  agent…" form, post to the board, and click a project's deadline to edit or
-  clear it — all without leaving the browser. Live escalations get their own
-  Attention panel at the top, one **Ack** button each, archiving that
-  message exactly as the CLI and the TUI do. A task's page shows its
-  transcript tail and, under it, its history — the `task history` list.
-  It has no run, cancel or manager directive; those live in the TUI and
-  the CLI.
-
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
-    <img alt="quorum web dashboard" src="images/web-light.png">
-  </picture>
 
 - `quorum board read [topic]` — the raw message stream (`--json` for
   scripting). Task lifecycle lands on the `tasks` topic; manager
@@ -1700,8 +1680,7 @@ This writes two plain files — `agents/standup.toml` (schedule, type,
 settings; hand-editable, and the one config location quorum itself may
 write) and `prompts/standup.md` (the prompt; edit it any time) — and pokes a
 running supervisor, which schedules the agent within seconds. No restart,
-and config.toml is never touched. The web dashboard's "new agent…" form does
-exactly the same thing.
+and config.toml is never touched.
 
 Each tick, a prompt agent renders its prompt and runs your harness over it,
 with the same authority and the same rails as the manager: every mutating
@@ -1872,8 +1851,12 @@ project's `.git`, and your `task_write` extras — nothing else. Readable:
 the interpreter's tree, the harness executable (resolved through `PATH`),
 nono's own system-read baseline (loader, system libraries — nothing can exec
 without them), and `task_read`. Network stays open, since a coding harness
-is assumed to need its API. The same flag also confines plugin agents'
-`[llm]` subprocess calls.
+is assumed to need its API.
+
+Mode 2 is the opposite: `quorum up --self-sandbox` blocks the network unless
+your profile file grants it, and it applies to the supervisor and every child
+it spawns — including the manager's harness. Run the manager under mode 2
+only with a `profile_file` whose `network` list is non-empty.
 
 **Fail-closed, all modes:** if sandboxing was requested and nono-py is
 missing or unsupported, the run does not happen unsandboxed — it fails loud.
@@ -1889,7 +1872,7 @@ plugin: a class with a synchronous `tick()`, dropped into
 
 A complete, tested example ships in the repo:
 [examples/steward.py](../examples/steward.py), a rule-based file organizer
-with undo, LLM-optional classification, and bounded retries. Copy it into
+with undo and bounded retries. Copy it into
 `~/.quorum/plugins/` and add:
 
 ```toml
@@ -1961,25 +1944,17 @@ Test it immediately: `quorum agent run-once wordcount`.
 | `ctx.bus.claim(name)` | consume your own inbox (call `.ack()` per message) |
 | `ctx.bus.read_after_cursor(topic, cursor)` | follow a board topic incrementally |
 | `ctx.projects.list()` / `.get(slug)` | registered projects, marker-merged |
-| `ctx.llm.complete(prompt)` | completion or `None` — always handle `None` |
 | `ctx.prompt(name, **placeholders)` | render a template from `prompts/` |
 | `ctx.load_state()` / `ctx.save_state(d)` | your private JSON state |
-| `ctx.log_action(type, text, **data)` | feed the dashboards' activity log |
+| `ctx.log_action(type, text, **data)` | feed the views' activity log |
 | `ctx.now()` | injectable clock |
 
-`ctx.llm` needs an optional `[llm]` table in config.toml (the manager does
-*not* use this — it runs a full harness); without one, `complete()` returns
-`None`:
-
-```toml
-[llm]
-backend = "cli"
-executable = "claude"
-args = ["-p"]
-input = "stdin"           # "stdin" | "argv" (use "{prompt}" in args)
-timeout_seconds = 120
-max_prompt_chars = 24000
-```
+There is no separate small-completion client: a plugin agent that wants a
+model call runs a harness, the same way the manager does. Give the agent a
+`harness` setting naming one of your `[harness.*]` tables and call
+`quorum.agents.harness_run.run_agent_harness(self.ctx, prompt)`; the run is
+synchronous, its output is streamed to `state/agents/<name>/transcript.jsonl`,
+and the per-run action cap applies as it does to any other agent run.
 
 **Testing** (see `tests/test_example_steward.py` for the full pattern):
 

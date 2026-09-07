@@ -14,16 +14,6 @@ from .actor import TASK_ACTOR_PREFIX, is_task_actor
 from .home import CONFIG_NAME
 
 
-class LLMConfig(BaseModel):
-    backend: Literal["cli", "proxy"] = "cli"
-    executable: str = ""
-    args: list[str] = Field(default_factory=list)
-    input: Literal["stdin", "argv"] = "stdin"
-    timeout_seconds: float = 120.0
-    max_prompt_chars: int = 24000
-    env: dict[str, str] = Field(default_factory=dict)
-
-
 class SandboxConfig(BaseModel):
     use_nono: bool = False
     profile: str = ""
@@ -185,9 +175,9 @@ class AgentConfig(BaseModel):
     schedule: str = "every 1h"
     enabled: bool = True
     # False: repeated failures never pause the schedule — the agent keeps
-    # retrying so it self-recovers when an external dependency (the LLM
-    # service, for the manager) comes back. Failures still land in the
-    # heartbeat and on the board.
+    # retrying so it self-recovers when an external dependency (the model
+    # service behind the manager's harness) comes back. Failures still land
+    # in the heartbeat and on the board.
     auto_pause: bool = True
     settings: dict = Field(default_factory=dict)
 
@@ -240,7 +230,6 @@ def parse_schedule(schedule: str) -> dict:
 
 class Config(BaseModel):
     quorum: QuorumSection = Field(default_factory=QuorumSection)
-    llm: LLMConfig | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
     herdr: HerdrConfig | None = None
@@ -361,8 +350,8 @@ def create_agent(
     prompt_text: str | None = None,
 ) -> AgentConfig:
     """Create a file-defined agent: agents/<name>.toml plus, when given,
-    prompts/<name>.md. Shared by `quorum agent create` and the web dashboard;
-    callers send the `agent.reload` poke themselves."""
+    prompts/<name>.md. Used by `quorum agent create`; callers send the
+    `agent.reload` poke themselves."""
     from . import fsio
 
     validate_agent_name(name)

@@ -3,7 +3,7 @@ board message on the listed topics (default: `attention`).
 
 The `attention` topic is the one channel meant to reach a person — the
 manager escalates there, the supervisor posts `agent.failing` there — and
-the banners (`quorum status`, the TUI, the web header) only show it to
+the banners (`quorum status`, the TUI) only show it to
 someone who is already looking. This module is what makes the board reach
 out: a *consumer* of the board in the documented pattern (a private cursor
 per topic in `state/notify.json`, the last filename processed; the board

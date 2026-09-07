@@ -8,8 +8,8 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    background with `quorum up --detach` (the same `start_new_session`
    pattern task runs use; stdout/stderr land in `logs/supervisor.log`, and
    `quorum down` SIGTERMs the pid recorded in `supervisor.lock`, then polls
-   the lock's release). No cron, no systemd, no root, no ports (the web
-   dashboard is opt-in and binds to localhost). Task runs are ordinary
+   the lock's release). No cron, no systemd, no root, and no open ports at
+   all — quorum has no server and nothing listens. Task runs are ordinary
    detached child processes.
 2. **Everything is a plain file.** All state lives under one directory,
    `QUORUM_HOME`, as JSON/JSONL/TOML/Markdown. `ls` and `cat` are debuggers;
@@ -22,7 +22,7 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    passively. Supervision itself, however, is deliberately *not*
    degradable: the manager **is** a harness run, and without a working
    harness its tick raises — visibly, every tick — while `auto_pause =
-   false` keeps the schedule firing so the first tick after the LLM
+   false` keeps the schedule firing so the first tick after the model
    service returns reads the situation from files and reinvokes whatever
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
@@ -58,7 +58,7 @@ manager ──(its harness runs `quorum task run --detach`)──► detached ru
                                ├─ git worktree in worktrees/<id>/
                                └─ harness subprocess (stdout → transcript.jsonl)
 
-quorum web / quorum tui / quorum status ──► read QUORUM_HOME's files
+quorum tui / quorum status ────────────► read QUORUM_HOME's files
                                      (writes: thin shared bus/store calls)
 quorum doctor ──────────────────────────► pure reader + one opt-in probe (--smoke)
 ```
@@ -80,8 +80,8 @@ Resolution: `--home` flag > `$QUORUM_HOME` > `./quorum-home` (if it exists) >
 ```
 config.toml                       user-owned; quorum never rewrites it
 agents/<name>.toml                file-defined agents (the one config location
-                                  quorum may write: `agent create` and the web
-                                  dashboard; merges over [agents.*], file wins)
+                                  quorum may write, by `agent create`; merges
+                                  over [agents.*], file wins)
 supervisor.lock                   pid + start time + the version of quorum that
                                   started it; mtime = liveness heartbeat
 projects/<slug>.json              canonical project records (machine-owned JSON)
@@ -398,7 +398,7 @@ transcript. So capture is one more look at each parsed event
   tail is labelled "recent runs", never presented as all-time) and report the window
   alongside the figure: `views.agent_rows` carries `usage` (`last` / `total`
   / `runs` / `window`) and a rendered `usage_text`, which `quorum status`,
-  the TUI's agent table and the web agent row show when it is known. The
+  and the TUI's agent table show when it is known. The
   manager digest opens with the same figure for the manager itself — the one
   recurring cost nothing else in the digest accounts for, and in a live home
   usually the largest.
@@ -429,9 +429,8 @@ transcript. So capture is one more look at each parsed event
   at a turn boundary), and a detached run past budget finishes its turn
   and is gated afterwards. The gate never sets status, never cancels, and
   never touches the views' `$!` mark (`budget_gated` on `task_rows` is the
-  same read, rendered — as `$! GATED` in `task list`, the TUI's spend column
-  and the web dashboard alike, so nobody learns of the gate from a refused
-  launch).
+  same read, rendered — as `$! GATED` in `task list` and the TUI's spend
+  column, so nobody learns of the gate from a refused launch).
   usually the largest. `usage.agent_runs` reads the outcomes back over the
   same bounded tail, separately from `agent_usage` (which stays `None` when
   no run in the window reported spend, and a timed-out run never does).
@@ -567,7 +566,7 @@ the work.
 where the task came from, not what happened to it, so it is not an
 observation and nothing re-probes it. Four readers share one renderer
 (`tasks.issue_ref`, `#62` from the url): the CLI listing's `issue` column
-(dropped whole on a home that uses none), the TUI and web tables, and the
+(dropped whole on a home that uses none), the TUI's table, and the
 digest's `issue=#62` mark on a task line. `quorum task show` prints the full
 url, and the run preamble's `{issue}` slot tells the harness which issue it
 is working from, to reference in its commits and PR — and not to touch the
@@ -702,8 +701,8 @@ substrate were wrong for a task that is not trying to finish:
   human when the same report repeats verbatim, when it reports `blocked`,
   or when spend climbs with nothing to show.
 
-Views badge it (`∞` in `quorum status`, `task list` and the TUI; a titled
-`∞` in the web row) so "still running after 40 runs" reads as working.
+Views badge it (`∞` in `quorum status`, `task list` and the TUI) so "still
+running after 40 runs" reads as working.
 
 Two consequences worth knowing before queuing one:
 
@@ -765,7 +764,7 @@ Cross-project chains work by construction, since ids are global.
   early is pure waste (it reviews a PR that does not exist yet), and the
   manager is the only caller that would ever do it by accident. It refuses
   the launch; it never cancels, re-queues or reorders anything.
-- **Views** (`quorum status` / `task list` / `task show`, TUI, web) render
+- **Views** (`quorum status` / `task list` / `task show`, TUI) render
   `waiting_on` / `dep_failed` / `dep_missing` / `dep_cycle` straight off
   `views.task_rows`. Nothing is materialized to disk for them (unlike the
   merged observation, [below](#the-merged-observation) — dependencies are
@@ -867,7 +866,7 @@ scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
   escalating with `board post attention` instead. The prompt is the fence
   here, not a check: `task release` is an ordinary CLI verb and a harness
   that ignores its instructions can call it, which is exactly the
-  convention-not-boundary line `notes.may_write` draws.
+  convention-not-boundary line `Notebook.may_write` draws.
 - **Every verb is an ordinary `TaskStore.update` behind `_actor_guard`**, so
   `task.hold` / `task.release` / `task.set-priority` are journaled and count
   against an agent's per-run action cap like anything else. The TUI's `h`
@@ -903,16 +902,20 @@ task, on the same substrate and under the same rules:
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to a
   one-shot nudge) and an untagged human; any other task and any prompt
-  agent is refused with a pointer to `task nudge`. The same honesty as the
+  agent is refused with a pointer to `task nudge`. "The manager" is read
+  from config by *type* (`notes.manager_writers`), so a manager configured
+  as `[agents.boss] type = "manager"` — tagged `QUORUM_ACTOR=boss` — is
+  admitted; a config quorum cannot parse falls back to the literal name
+  rather than raising, because this is read on every task run. The same honesty as the
   manager's fence applies: it reads `QUORUM_ACTOR`, which any process that
   can run the CLI can set, so it is a **convention against accidental
   crowding, not a security boundary** — the sandbox is. The manager's
   notebook now refuses a task run, which is a change: before the task actor
   tag existed the runner stripped the launcher's tag and set nothing in its
-  place, so a task harness ran as `user` and `notes.may_write` admitted it —
+  place, so a task harness ran as `user` and the fence admitted it —
   a task could write into the manager's notebook. Tagging it `task-<id>`
   closes that; a task reaches the manager with `quorum task report` and the
-  board, as the fence always intended.
+  board.
 - **Reader.** `runner.compose_prompt` renders the notebook into every
   composed prompt — a resumed session and a fresh one alike, because the
   fresh one is the run that needs it — after the task body and the
@@ -925,7 +928,7 @@ task, on the same substrate and under the same rules:
   teaches the command. `quorum task show` prints the same rendering. The
   digest deliberately does not: the manager reads reports, and the
   notebook is the task's own.
-- **Attached tasks are the exception, and it is a real one.** An adopted
+- **Attached tasks are the exception.** An adopted
   session (*Attached tasks* below) does not go through the runner, so
   nothing composes a prompt for it and **its notebook is never rendered
   into the session**; `quorum task show <id>` is the read path there, for
@@ -986,7 +989,7 @@ prints as a user turn via the SDK. Either way the digest renders attached
 tasks in their own section (never as `runner=dead`-launchable), and
 guidance flows through the ordinary task inbox: the stop/idle hook claims
 pending messages and continues the session with them, so `task nudge` —
-from the CLI, manager, TUI, or web — reaches the human's live session at
+from the CLI, the manager, or the TUI — reaches the human's live session at
 its next stop. Delivery consumes the guidance, so continuation can't loop,
 and the maildir claim keeps the delivery point race-free against a future
 headless run after detach.
@@ -1016,8 +1019,8 @@ follow the bus's rule: **archive, never delete.**
 - A pruned task's `tasks/<id>/` directory is *moved* to `tasks/.archive/<id>/`
   by one `os.rename`. The name is dot-prefixed on purpose: `TaskStore.list`
   already skips dot-entries (`fsio.is_tmp`), and every reader in the codebase
-  — `quorum status`, `task list`, the TUI, the web dashboard, the manager
-  digest, `doctor` — goes through it, so an archived task leaves all of them
+  — `quorum status`, `task list`, the TUI, the manager digest, `doctor` —
+  goes through it, so an archived task leaves all of them
   with no code change anywhere. Restoring one is `mv` in the other direction.
 - Cleared board and inbox messages go into the same
   `messages/archive/YYYY-MM.jsonl.gz` the janitor writes, keeping their
@@ -1243,16 +1246,19 @@ It is a **separate buffer** on both sides, and that is the whole design:
 
 - *Write side.* Not a board topic, so no reporting task or chatty agent
   posts into it in the ordinary course of things. Only the notebook's own
-  agent and an untagged human may write (`notes.may_write`); a call tagged
-  as a task or another agent is refused with a pointer to `task report` and
-  `board post attention`. Be honest about what that fence is: `may_write`
-  reads `QUORUM_ACTOR` from the environment, and any process that can run
-  the quorum CLI can set it. The runner stripping the actor tag from task
-  runs, and this check, are **conventions that keep honest callers out of
-  each other's memory** — they stop accidental crowding, not a harness that
-  decides to impersonate the manager. The real boundary around a notebook
-  is the filesystem the run is given (`sandbox.py`), not this check.
-- *Read side.* `notes.digest_section` renders the notebook **before** the
+  agent and an untagged human may write (`Notebook.may_write`); a call
+  tagged as a task or another agent is refused with a pointer to
+  `task report` and `board post attention`. Be honest about what that fence
+  is: `may_write` reads `QUORUM_ACTOR` from the environment, and any process
+  that can run the quorum CLI can set it. The check is a **convention that
+  keeps honest callers out of each other's memory** — it stops accidental
+  crowding, not a harness that decides to impersonate the manager. The real
+  boundary around a notebook is the filesystem the run is given
+  (`sandbox.py`), not this check. The runner does not protect the manager's
+  notebook by stripping the actor tag: it strips the launcher's tag and then
+  sets the task's own (`task-<id>`, see *Task notebooks* above), and that is
+  the name the check reads.
+- *Read side.* `Notebook.render` renders the notebook **before** the
   task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
   else in the digest spends. Ten live tasks with long report tails cannot
   shrink it. Over the cap the newest notes are kept and the digest says how
@@ -1266,7 +1272,7 @@ Nothing is compacted or summarized in Python: expiry is the only automatic
 retirement (`ttl_days`), and consolidation — one superseding note, then
 `forget` the ones it replaced — is policy in `prompts/manager.md`. Readers
 are pure file readers (`quorum manager notes`, `views.agent_detail` →
-the TUI's agent pane and the web agent detail), and a prompt agent's
+the TUI's agent pane), and a prompt agent's
 template gets the same rendering wherever it writes `{notes}`. A task has
 the same notebook at `tasks/<id>/notes.jsonl`, rendered into its own
 prompt rather than the digest — *The task notebook* under *Tasks and the
@@ -1476,8 +1482,8 @@ So there is exactly one materialized probe result. When `build_digest`'s
 probe returns a state in `tasks.PR_STATES` (`open` / `merged` / `closed`),
 `tasks.record_pr_state` writes it — with `pr_state_at` — onto
 `tasks/<id>/task.json`. Every reader then gets it for free off the file:
-`quorum status` / `task list` / `task show`, the TUI and the web dashboard
-badge `✔` merged and `⊘` closed-unmerged straight out of
+`quorum status` / `task list` / `task show` and the TUI badge `✔` merged
+and `⊘` closed-unmerged straight out of
 `views.task_rows`, and `views.py` still never acquires a `gh` subprocess.
 
 This is a deliberate revision of the rule this section used to state
@@ -1534,8 +1540,8 @@ human intervention. Every other supervisor announcement — tick errors,
 auto-pause — lands on `system`, which no banner reads; a normally-pausing
 agent at least *stops*, but the manager keeps firing, so a *sustained*
 streak escalates on its own: at `MAX_CONSECUTIVE_FAILURES` the supervisor
-posts one `agent.failing` to `attention` (the banner `quorum status`, the
-TUI and the web header all read). Recovery is announced on `system`, not
+posts one `agent.failing` to `attention` (the banner `quorum status` and
+the TUI both read). Recovery is announced on `system`, not
 `attention`. See [Messaging protocol](#messaging-protocol) for the dedupe.
 
 ### Prompt agents
@@ -1557,7 +1563,7 @@ template that writes neither sees neither — including the shipped
 `babysitter.md`, which keeps its policy in prompt text and asks for no
 notebook. Prompt
 agents are usually file-defined (`agents/<name>.toml`, created by
-`quorum agent create` or the web dashboard, hot-added via `agent.reload`)
+`quorum agent create`, hot-added via `agent.reload`)
 but a `[agents.<name>]` table in config.toml works identically.
 
 Quorum packages one worked example, `default_prompts/babysitter.md` — the
@@ -1623,7 +1629,7 @@ One `Message` schema serves two channels:
 - **Acknowledgement** is that per-message path aimed at the attention banner.
   `views.attention_summary` is a seven-day window over the `attention` topic,
   so without an ack an escalation the human has already handled sits in
-  `quorum status`, the TUI header and the web header for a week; acking
+  `quorum status` and the TUI header for a week; acking
   archives that one message, which drops it from every view (they are all
   pure readers of the live topic) while the history keeps it with its
   original `created_at`. `resolve_board_message` accepts a full message id, a
@@ -1631,13 +1637,12 @@ One `Message` schema serves two channels:
   `TaskStore.resolve` already taught — and raises `KeyError`/`ValueError` for
   unknown and ambiguous, because a silently-wrong ack archives someone else's
   escalation. `board read` prints that short id so there is something to type.
-  The affordance repeats in both dashboards as one shared bus call and no
-  view-local write logic: the TUI's `a` opens the attention list and acks the
-  highlighted line through `_write` (an unwritable home notifies, it never
-  takes the dashboard down), and the web dashboard's per-escalation **Ack**
-  button posts to `/api/board/{topic}/ack/{message_id}`. Both lists carry
-  `views.ATTENTION_LIST_LIMIT` entries rather than the banner's handful:
-  every line one of them renders is one the reader may want to ack, so a
+  The affordance is one shared bus call in the TUI with no view-local write
+  logic: `a` opens the attention list and acks the highlighted line through
+  `_write` (an unwritable home notifies, it never takes the dashboard down).
+  That list carries `views.ATTENTION_LIST_LIMIT` entries rather than the
+  banner's handful: every line it renders is one the reader may want to
+  ack, so a
   count the list cannot reach would be an escalation nobody can dismiss
   from that surface.
 
@@ -1745,8 +1750,8 @@ outbox-spool-plus-router implementation with no agent code changes.
 ## Views and their write affordances
 
 `views.py` assembles the read model out of files alone — no locks, no
-network, no supervisor required — and `quorum status`, the TUI and the web
-app are all readers of that one model, which is why they never disagree.
+network, no supervisor required — and `quorum status` and the TUI are both
+readers of that one model, which is why they never disagree.
 
 The CLI's listings (`quorum status`, `task list`, `agent list`, `project
 list`) render that model as Rich tables (rich is already typer's dependency)
@@ -1775,8 +1780,8 @@ show`; a report is folded to one line and clipped at `REPORT_MAX_CHARS`.
 `_print_table(width=80)` is the test seam: an 80-column render must have
 exactly one line per row.
 
-The reads are pure; the writes are deliberately not absent. Both dashboards
-carry a small set of *write affordances*, and the rule is that each is a
+The reads are pure; the writes are deliberately not absent. The TUI
+carries a small set of *write affordances*, and the rule is that each is a
 thin call into the same code path the CLI uses — a `MessageBus` send, a
 `TaskStore.update`, `runner.launch_detached`, `config.create_agent` — never
 write logic that lives in a view:
@@ -1805,10 +1810,8 @@ write logic that lives in a view:
   which turns an `OSError` into an error notification: an unwritable
   QUORUM_HOME is exactly when a reader needs the dashboard most, so no
   keystroke may take it down.
-- **Web** (`web/app.py`): the same task nudge, plus board posts, project
-  deadline/notes edits, agent create and pause/resume/run-now/reload.
 
-Neither view holds a lock, spawns an agent tick, or writes state of its own
+No view holds a lock, spawns an agent tick, or writes state of its own
 invention; a dashboard that vanishes mid-keystroke leaves nothing behind but
 the message it already queued. This revises the earlier "the views are pure
 readers whose one write affordance is nudging a task" stance (issue #11) —
@@ -1824,9 +1827,8 @@ was written, `at_text` that stamp as a surface prints it, `kind` one of
 `queued`, `action`, `guidance`, `run.started`, `report`, `run.ended`,
 `pr_state`, `archived`, and `text` the rest of the line every surface
 prints (`views.history_line`: `[at_text] text`), with the kind's raw fields
-beside it for `--json`. `quorum task history`, the TUI's `t` tab and the web task
-page (`history` on `/api/tasks/{id}`) all render the same rows, so they
-cannot disagree. The sources, and what each contributes:
+beside it for `--json`. `quorum task history` and the TUI's `t` tab render
+the same rows, so they cannot disagree. The sources, and what each contributes:
 
 | file | rows |
 | --- | --- |
@@ -1861,8 +1863,7 @@ Even bounded it is too expensive for a polling loop: on a home with four
 agents' journals at the byte budget and a year of archives it takes about
 four tenths of a second. So the TUI's tab is a snapshot, not a follower —
 rebuilt on `t`, on `r`, on opening a different task and after any write the
-dashboard itself made, and reused on the two-second tick. The web page
-builds it once per request for one task, which is the same bound.
+dashboard itself made, and reused on the two-second tick.
 
 And it outlives pruning: `quorum task history` resolves a handle
 out of `tasks/.archive/` (`prune.resolve_archived`, the same
@@ -1879,8 +1880,8 @@ of nested `tool_use` payloads and echoed tool output, and answering "what did
 it try, what came back, why did it stop" took `jq`. `transcript.py` renders
 those files as a narrative, and it is the *only* renderer — `quorum task tail`
 / `task log`, `quorum manager log` / `manager tail`, `agent log` / `agent
-tail`, the TUI's transcript pane and the web dashboard's task detail all call
-it, so the surfaces cannot drift into different readings of one file.
+tail` and the TUI's transcript pane all call it, so the surfaces cannot
+drift into different readings of one file.
 
 What it renders: the run's start (session id, working directory), assistant
 text in full, one line per tool call with its first argument trimmed, each
@@ -1936,23 +1937,20 @@ Two files in a project directory are quorum's by convention, both read-only:
 the `.quorum.toml` marker above, and `.quorum/task-preamble.local.md`, which
 fills the task preamble's `{project}` slot (see [Prompts](#prompts)).
 
-## LLM layer
+## Model calls
 
-`LLMBackend` is a one-method protocol: prompt in, completion out. The `cli`
-backend shells out to any configured executable; `[llm].input` selects stdin
-piping or argv substitution. `LLMClient.complete()` never raises — `None`
-means "no LLM today" and every caller has a deterministic fallback. Prompts
-come from user-editable templates in `prompts/` (`quorum.prompts`). Note the
-LLM layer is for *plugin agents'* small completions; neither task harnesses
-nor the manager's harness go through it — both are invoked directly as
-subprocesses via the `[harness.*]` templates.
+There is one way to reach a model: a `[harness.<name>]` argv template, run as
+a subprocess. Task runs go through `quorum.runner`; the manager and prompt
+agents go through `agents/harness_run.run_agent_harness`, and a plugin agent
+that wants a model call uses the same function — it takes the agent's
+`AgentContext`, resolves the agent's harness, and returns the run id after
+streaming the harness output to the agent's transcript.
 
-### Design seam: managed auth proxy
-
-`[llm].backend = "proxy"` is reserved: a supervisor-managed localhost proxy
-injecting API credentials so subprocesses never see raw keys — most likely
-over nono-py's `start_proxy`. Everything goes through `LLMBackend`, so no
-other module may assume the `cli` backend.
+There used to be a second way: a `[llm]` table and an `LLMClient` for plugin
+agents' small completions, with a `proxy` backend reserved for a
+supervisor-managed credential proxy. Nothing in shipped code called it, so it
+was removed. A leftover `[llm]` table in config.toml is an unknown table and
+pydantic ignores it.
 
 ## Sandbox (optional)
 
@@ -1969,7 +1967,7 @@ nono-py, always lazily:
    quorum package dir — derived at runtime from `sys`/`sysconfig`) is granted
    read; nono's `system_read_*` policy groups supply the loader/libc baseline
    without which no child can exec at all.
-3. **Per-task / per-LLM-call**: `[sandbox].use_nono = true`. Each task run
+3. **Per-task**: `[sandbox].use_nono = true`. Each task run
    applies `build_task_capabilities` to itself (runner process + harness
    children): write on `QUORUM_HOME`, the worktree, the project's `.git`,
    and `[sandbox].task_write` extras (harness state dirs like `~/.claude`);
@@ -1983,10 +1981,14 @@ quorum functional), a non-empty `network` list keeps mode 2's network open,
 and an unreadable profile raises `SandboxUnavailable` — never a narrower
 sandbox than the user asked for. The same file works verbatim with the nono
 binary in mode 1.
-   Plugin agents' LLM subprocess calls go through `sandboxed_exec` with the
-   narrower `build_capabilities` set (network blocked unless `[llm]` is
-   configured; stdin prompts staged as ULID-named files under
-   `state/llm/` since `sandboxed_exec` cannot pipe stdin).
+
+Mode 2's network rule is worth stating plainly: `build_capabilities` blocks
+the network unless the profile file grants it. Mode 2 applies to the
+supervisor process and therefore to every child it spawns, so under
+`quorum up --self-sandbox` the manager's harness has no network either, and
+a harness-driven manager needs a `profile_file` whose `network` list is
+non-empty. Blocking by default is what keeps the mode fail-closed: opening
+the network is the user's explicit act, not an inference quorum makes.
 
 The asymmetry is the design: a sandboxed quorum can *see* the machine, but
 the only durable marks it can leave are `QUORUM_HOME`, the worktrees, and
@@ -2064,8 +2066,8 @@ half of the seeding logic `quorum init` acts on.
 ## Testing strategy
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME`), `clock`
-(injectable `FakeClock`), and `fake_llm`. Three purpose-built fake CLIs live
-in `tests/bin/`: `fake_llm.py` (canned completions), `fake_gh.py` (a GitHub
+(injectable `FakeClock`). Two purpose-built fake CLIs live
+in `tests/bin/`: `fake_gh.py` (a GitHub
 CLI installed onto a PATH stripped down to real git, so the CI probe's
 no-gh / no-auth / no-PR / garbage / hung branches are all reachable — and
 so a developer's real `gh` can never reach the network from a test), and

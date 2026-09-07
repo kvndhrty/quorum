@@ -13,8 +13,8 @@ according to user rules. To use it: copy this file into
     rules = [{ match = "*.pdf", dest = "~/papers/inbox" }]
 
 It demonstrates the whole plugin contract: settings, idempotent ticks with
-state-based dedupe, board posts, `log_action`, LLM-with-deterministic-
-fallback, and bounded retries. Test it with `quorum agent run-once steward`.
+state-based dedupe, board posts, `log_action`, and bounded retries. Test it
+with `quorum agent run-once steward`.
 
 Safe by default: with apply=false (the default) it only posts proposals to
 the board. With apply=true it moves files — never deletes, never overwrites
@@ -30,10 +30,8 @@ propose-then-apply workflow actually acts on the backlog.
 A move that fails is retried a bounded number of times and reported twice at
 most — once when it first fails and once when the steward gives up.
 
-Files matching no rule are left alone. If an LLM is configured, unmatched
-files can be classified against the rule destinations (the reply must
-exactly name a destination, otherwise the file is skipped); without one they
-are reported once and left in place.
+Files matching no rule are left alone: reported on the board once, then
+recorded as unmatched so they are not reported again.
 """
 
 from __future__ import annotations
@@ -45,16 +43,6 @@ from pathlib import Path
 
 from quorum import fsio
 from quorum.agent import Agent
-
-CLASSIFY_PROMPT = """\
-You are a file steward organizing a user's directory. Choose the best
-destination for this file, or SKIP if none clearly fits.
-
-File: {filename}
-
-Allowed destinations (reply with exactly one line, verbatim, or SKIP):
-{destinations}
-"""
 
 # A move can fail for a reason that clears on its own (a full disk, a
 # destination on a volume that is briefly unmounted), so retrying is worth it —
@@ -88,10 +76,6 @@ class Steward(Agent):
                 if self._settled(record, mtime, apply):
                     continue
                 dest = self._match(entry, rules)
-                via_llm = False
-                if dest is None and rules:
-                    dest = self._classify(entry, rules)
-                    via_llm = dest is not None
                 if dest is None:
                     if record is None:
                         self.ctx.bus.post(
@@ -110,7 +94,7 @@ class Steward(Agent):
                     text = f"moved {entry.name} -> {moved_to}"
                     self.ctx.bus.post(
                         self.name, "steward", "steward.moved", text=text,
-                        payload={"src": str(entry), "dest": str(moved_to), "via_llm": via_llm},
+                        payload={"src": str(entry), "dest": str(moved_to)},
                     )
                     self.ctx.log_action("steward.moved", text)
                     seen.pop(key, None)
@@ -118,7 +102,7 @@ class Steward(Agent):
                     text = f"proposal: move {entry.name} -> {dest} (set apply=true or move it yourself)"
                     self.ctx.bus.post(
                         self.name, "steward", "steward.proposal", text=text,
-                        payload={"src": str(entry), "dest": str(dest), "via_llm": via_llm},
+                        payload={"src": str(entry), "dest": str(dest)},
                     )
                     self.ctx.log_action("steward.proposal", text)
                     seen[key] = {"mtime": mtime, "action": "proposed"}
@@ -132,9 +116,9 @@ class Steward(Agent):
 
         A proposal only settles a file while apply is off; once apply is on the
         proposal is unfinished business and the file must be reconsidered. An
-        unmatched file settles either way — no rule matched it, and re-asking the
-        classifier every tick would burn an LLM call per junk file per hour. A
-        failed move settles only once its retry budget is spent.
+        unmatched file settles either way — no rule matched it, and the rules
+        cannot have changed without the file changing too. A failed move
+        settles only once its retry budget is spent.
         """
         if record is None or record["mtime"] != mtime:
             return False
@@ -173,19 +157,6 @@ class Steward(Agent):
             if pattern and fnmatch.fnmatch(entry.name, pattern):
                 return Path(rule["dest"]).expanduser()
         return None
-
-    def _classify(self, entry: Path, rules: list[dict]) -> Path | None:
-        if not self.ctx.llm.enabled:
-            return None
-        destinations = sorted({str(Path(r["dest"]).expanduser()) for r in rules if r.get("dest")})
-        prompt = CLASSIFY_PROMPT.format(
-            filename=entry.name, destinations="\n".join(destinations)
-        )
-        answer = self.ctx.llm.complete(prompt)
-        if answer is None:
-            return None
-        answer = answer.strip().splitlines()[0].strip()
-        return Path(answer) if answer in destinations else None
 
     def _move(self, src: Path, dest_dir: Path) -> Path:
         """Move one file, raising OSError on failure so the caller can decide

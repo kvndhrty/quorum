@@ -269,7 +269,7 @@ class Supervisor:
         `auto_pause = false` (the manager) is exempt from the pause, so it
         would fail all night with nothing but system chatter to show for it.
         This is therefore the single failure path that reaches `attention` —
-        the banner `quorum status`, the TUI and the web header read
+        the banner `quorum status` and the TUI read
         (`views.attention_summary`). It posts once per *streak*, not per
         tick: the `escalated_at` heartbeat stamp is the dedupe, and every
         success path — a scheduled tick, `quorum agent run-once`, `quorum

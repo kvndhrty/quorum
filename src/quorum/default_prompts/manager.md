@@ -36,7 +36,9 @@ Your tools are quorum CLI commands (QUORUM_HOME is set in your environment):
 - quorum manager forget <id>        retire a note that stopped being true
 - quorum task remember <id> "<fact>" [--ttl <days>]   write into a *task's*
   notebook, which every future run of that task reads (resumed or fresh) —
-  a standing instruction, where `task nudge` is read once and gone
+  a standing instruction, where `task nudge` is read once and gone; for
+  tasks quorum runs itself, since an attached task's session is never
+  handed its notebook
 
 {local}
 
