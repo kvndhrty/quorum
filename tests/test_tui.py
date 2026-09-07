@@ -13,6 +13,7 @@ import pytest
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input, Static
 
+from quorum import fsio, tasks
 from quorum.messages import MessageBus
 from quorum.tasks import TaskStore, inbox_name, runner_lock_path
 from quorum.tui.app import QuorumTUI
@@ -714,5 +715,24 @@ def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
         await pilot.pause()
         assert builds[-1] == ids[0] and len(builds) == 4
         assert any("guidance from" in line and "steer left" in line for line in app._log_lines)
+
+
+def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
+    """The TUI, `task tail` and the web dashboard read one renderer, so what a
+    person sees is the same wherever they look."""
+    ids = populate(home)
+    fsio.append_jsonl(tasks.transcript_path(home, ids[0]), {
+        "at": "2026-09-01T10:00:00Z",
+        "event": {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "uv run pytest -q"}}]}},
+    })
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.selected_task == ids[0]
+        assert any("🔧 Bash  uv run pytest -q" in line for line in app._log_lines)
+        assert not any('"tool_use"' in line for line in app._log_lines)
 
     drive(home, script)

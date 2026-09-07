@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from . import fsio, usage
 from . import home as home_mod
 from . import prompts as prompts_mod
 from . import prune as prune_mod
+from . import transcript as transcript_mod
 from .actor import (
     ACTOR_CAP_ENV,
     ACTOR_RUN_ENV,
@@ -635,6 +637,67 @@ def status(
         typer.echo("no projects registered — `quorum project add <dir>`")
 
 
+class UsageBy(StrEnum):
+    project = "project"
+    harness = "harness"
+    week = "week"
+    agent = "agent"
+
+
+@app.command("usage")
+def usage_cmd(
+    by: UsageBy = typer.Option(
+        UsageBy.project, "--by", case_sensitive=False, help="Group rows by this dimension."
+    ),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Only tasks queued (or agent runs made) in the last 7d / 36h / 2w / 90m.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Usage and delivery statistics by project, harness, week or agent:
+    tasks, runs, reruns, cost and tokens as the harness reported them, and
+    — where the manager observed a PR — queue-to-run, queue-to-done,
+    done-to-merged medians and the share merged. A pure reader over the
+    home; the supervisor need not be running."""
+    from . import stats
+
+    target = get_home(home)
+    try:
+        window = stats.parse_since(since) if since is not None else None
+        payload = stats.report(target, by=by.value, since=window)
+    except ValueError as e:
+        raise _fail(str(e)) from None
+    if json_out:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    what = "agent runs" if by is UsageBy.agent else "tasks queued"
+    scope = f"{what} since {payload['cutoff']} ({since.strip()})" if window else "all time"
+    typer.echo(f"usage by {by.value}, {scope}")
+    if not payload["rows"]:
+        typer.echo("nothing recorded" + (" in that window" if window else ""))
+        return
+    rows = list(payload["rows"])
+    if len(rows) > 1 and payload["total"]:
+        rows.append(payload["total"])
+    if by is UsageBy.agent:
+        _print_table(_agent_usage_table(rows))
+        typer.echo(
+            "cost/tokens: the harness's own figures, summed over the runs that reported them\n"
+            "reported: runs that reported any usage, when not all did; duration: the median run"
+        )
+        return
+    _print_table(_task_usage_table(by.value, rows))
+    typer.echo(
+        "cost/tokens: the harness's own figures, summed over the runs that reported them\n"
+        "reported: tasks the cost covers (or, with no cost, that reported anything)\n"
+        "queue→run / queue→done / done→merged: medians\n"
+        "merged: over the PRs the manager observed — none observed, no figure"
+    )
+
+
 # -- tables ----------------------------------------------------------------
 #
 # Every listing (`status`, `task list`, `agent list`, `project list`) is a
@@ -884,6 +947,112 @@ def _project_cells(p: dict) -> dict[str, str]:
 def _project_table(rows: list[dict]) -> Table:
     return _build_table(
         _PROJECT_COLUMNS, [_project_cells(p) for p in rows], keep=frozenset({"slug"})
+    )
+
+
+_NUM: dict[str, Any] = {"no_wrap": True, "justify": "right"}
+# `quorum usage`: one row per value of the `--by` dimension. Numeric columns
+# are right-aligned; the delivery columns are dropped by `_build_table` when
+# no task in the listing has the observation behind them.
+_USAGE_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("tasks", _NUM),
+    ("reported", _NUM),
+    ("runs", _NUM),
+    ("reruns", _NUM),
+    ("cost", _NUM),
+    ("tokens", _NUM),
+    ("done", _NUM),
+    ("merged", _NUM),
+    ("queue→run", _NUM),
+    ("queue→done", _NUM),
+    ("done→merged", _NUM),
+]
+_AGENT_USAGE_COLUMNS: list[tuple[str, dict[str, Any]]] = [
+    ("agent", _NO_WRAP),
+    ("runs", _NUM),
+    ("reported", _NUM),
+    ("raised", _NUM),
+    ("timeout", _NUM),
+    ("unknown", _NUM),
+    ("cost", _NUM),
+    ("tokens", _NUM),
+    ("duration", _NUM),
+]
+
+
+def _count(n: int) -> str:
+    return str(n) if n else ""
+
+
+def _spend_cells(spent: dict | None) -> dict[str, str]:
+    """`cost` and `tokens` off a `usage.total`: empty, never `$0.00`, when
+    the harness reported no figure for that field."""
+    cost = usage.number((spent or {}).get("cost_usd"))
+    tokens = usage.number((spent or {}).get("total_tokens"))
+    return {
+        "cost": usage.format_cost(cost) if cost else "",
+        "tokens": usage.format_tokens(tokens) if tokens else "",
+    }
+
+
+def _task_usage_cells(by: str, r: dict) -> dict[str, str]:
+    from . import stats
+
+    merged = ""
+    if r["observed"]:
+        merged = f"{r['merged']}/{r['observed']} ({round(100 * r['share_merged'])}%)"
+    spend = _spend_cells(r["usage"])
+    # How many tasks the figures beside it cover — the cost's own coverage
+    # wherever a cost is shown, since a row mixing a costing harness with a
+    # tokens-only one has fewer tasks behind its `$` than behind its tokens,
+    # and the cost is the number a reader takes for the whole row.
+    reported = r["tasks_with_cost"] if spend["cost"] else r["tasks_with_usage"]
+    return {
+        by: r["key"],
+        "tasks": str(r["tasks"]),
+        # Only when it differs: a column of `5/5` says nothing.
+        "reported": f"{reported}/{r['tasks']}" if reported != r["tasks"] else "",
+        "runs": str(r["runs"]),
+        "reruns": _count(r["reruns"]),
+        **spend,
+        "done": _count(r["done"]),
+        "merged": merged,
+        "queue→run": stats.describe_summary(r["queue_to_run"]),
+        "queue→done": stats.describe_summary(r["queue_to_done"]),
+        "done→merged": stats.describe_summary(r["done_to_merged"]),
+    }
+
+
+def _task_usage_table(by: str, rows: list[dict]) -> Table:
+    return _build_table(
+        [(by, _NO_WRAP), *_USAGE_COLUMNS],
+        [_task_usage_cells(by, r) for r in rows],
+        keep=frozenset({by, "tasks", "runs", "cost", "tokens"}),
+    )
+
+
+def _agent_usage_cells(r: dict) -> dict[str, str]:
+    reported = r["runs_with_usage"]
+    return {
+        "agent": r["key"],
+        "runs": str(r["runs"]),
+        "reported": f"{reported}/{r['runs']}" if reported != r["runs"] else "",
+        "raised": _count(r["outcomes"]["raised"]),
+        "timeout": _count(r["outcomes"]["timeout"]),
+        # A ledger line written before outcomes existed (#59): `?` elsewhere.
+        "unknown": _count(r["outcomes"]["unknown"]),
+        **_spend_cells(r["usage"]),
+        "duration": (
+            usage.format_duration(r["duration"]["median_seconds"]) if r["duration"] else ""
+        ),
+    }
+
+
+def _agent_usage_table(rows: list[dict]) -> Table:
+    return _build_table(
+        _AGENT_USAGE_COLUMNS,
+        [_agent_usage_cells(r) for r in rows],
+        keep=frozenset({"agent", "runs", "cost", "tokens"}),
     )
 
 
@@ -1524,41 +1693,80 @@ def task_run(
         raise typer.Exit(1)
 
 
+_RAW_OPT = typer.Option(
+    False, "--raw", help="Print the transcript's own JSON lines instead of the narrative."
+)
+_VERBOSE_OPT = typer.Option(
+    False, "-v", "--verbose", help="Unfold reasoning, full tool arguments and full results."
+)
+
+
+def _echo(lines: list[str]) -> None:
+    for line in lines:
+        typer.echo(line)
+
+
+def _tail_file(path: Path, render, seen: int) -> int:
+    """Print whatever a jsonl file grew by since `seen` entries; returns the
+    new count. The unit is entries, not bytes: a partially written line is
+    dropped by the reader and picked up on the next pass."""
+    entries = fsio.read_jsonl(path)
+    _echo(render(entries[seen:]))
+    return len(entries)
+
+
+def _follow(path: Path, render, seen: int) -> None:
+    """Keep printing new entries until Ctrl-C."""
+    try:
+        while True:
+            time.sleep(1.0)
+            seen = _tail_file(path, render, seen)
+    except KeyboardInterrupt:
+        pass
+
+
 @task_app.command("tail")
 def task_tail(
     task_id: str,
-    lines: int = typer.Option(25, "-n", "--lines", help="Transcript lines to show."),
+    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
     follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
+    raw: bool = _RAW_OPT,
+    verbose: bool = _VERBOSE_OPT,
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Print the tail of a task's harness transcript."""
+    """Print the tail of a task's harness transcript, as a narrative."""
     from .tasks import transcript_path
 
     target = get_home(home)
     task = _resolve_task(target, task_id)
     path = transcript_path(target, task.id)
+
+    def render(entries: list) -> list[str]:
+        return transcript_mod.render(entries, verbose=verbose, raw=raw)
+
     entries = fsio.read_jsonl(path)
-    for entry in entries[-lines:]:
-        typer.echo(_render_transcript_entry(entry))
-    if not follow:
+    _echo(render(entries[-lines:]))
+    if follow:
+        _follow(path, render, len(entries))
+
+
+@task_app.command("log")
+def task_log(
+    task_id: str,
+    raw: bool = _RAW_OPT,
+    verbose: bool = _VERBOSE_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Render a task's whole transcript — `task tail` over every entry."""
+    from .tasks import transcript_path
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    entries = fsio.read_jsonl(transcript_path(target, task.id))
+    if not entries:
+        typer.echo(f"task {task.short_id} has no transcript yet")
         return
-    seen = len(entries)
-    try:
-        while True:
-            time.sleep(1.0)
-            entries = fsio.read_jsonl(path)
-            for entry in entries[seen:]:
-                typer.echo(_render_transcript_entry(entry))
-            seen = len(entries)
-    except KeyboardInterrupt:
-        pass
-
-
-def _render_transcript_entry(entry: dict) -> str:
-    at = str(entry.get("at", "")).replace("T", " ").rstrip("Z")
-    if "line" in entry:
-        return f"[{at}] {entry['line']}"
-    return f"[{at}] {json.dumps(entry.get('event'), ensure_ascii=False)}"
+    _echo(transcript_mod.render(entries, verbose=verbose, raw=raw))
 
 
 @task_app.command("report", rich_help_panel="Harness protocol")
@@ -1910,6 +2118,61 @@ def task_prune(
         archived += 1
     typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")
 
+
+@task_app.command("export")
+def task_export(
+    task_id: str,
+    out: Path | None = typer.Option(
+        None, "--out", help="Archive path (default: ./quorum-task-<short-id>.tar.gz; never inside the home)."
+    ),
+    with_worktree_diff: bool = typer.Option(
+        False, "--with-worktree-diff",
+        help="Add worktree.diff: the task's worktree against the branch it forked from.",
+    ),
+    redact: bool = typer.Option(
+        False, "--redact",
+        help="Replace every tool result in the transcript with a marker; keep the assistant's "
+             "text and its tool calls.",
+    ),
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Pack one task into a tar.gz for sharing or a bug report.
+
+    The archive holds `tasks/<id>/` whole (record, reports, transcript,
+    runner log, any subdirectory), the task's inbox — waiting, claimed and
+    already-delivered guidance — and, with --with-worktree-diff, a patch of
+    the worktree against its base. Nothing from the project directory, and
+    nothing is written but the archive. A task that ran in your own checkout
+    (--no-worktree, adopted) is refused the diff.
+    """
+    from . import export as export_mod
+
+    target = get_home(home)
+    task = _resolve_task(target, task_id)
+    destination = out if out is not None else export_mod.default_output(task)
+    refused = export_mod.output_refusal(destination, target)
+    if refused:
+        raise _fail(refused)
+    try:
+        entries, redaction = export_mod.plan(
+            target, task, with_worktree_diff=with_worktree_diff, redact=redact
+        )
+        names = export_mod.write_archive(destination, task, entries)
+    except export_mod.ExportError as e:
+        raise _fail(f"cannot export task {task.short_id}: {e}") from None
+    except OSError as e:
+        raise _fail(f"cannot write {destination}: {e}") from None
+    typer.secho(f"exported task {task.short_id} to {destination} ({len(names)} entries)", fg="green")
+    for name in names:
+        typer.echo(f"  {name}")
+    if redaction is not None:
+        note = f"redacted {redaction.results} tool result(s)"
+        if redaction.lines_kept:
+            note += (
+                f"; {redaction.lines_kept} plain-text line(s) kept verbatim — "
+                "no structure to redact"
+            )
+        typer.secho(note, fg="yellow")
 
 
 # -- board -----------------------------------------------------------------
@@ -2358,6 +2621,90 @@ def tui(home: Path | None = _HOME_OPT) -> None:
     QuorumTUI(target).run()
 
 
+# -- reading a run ---------------------------------------------------------
+# `manager log`, `manager tail` and their `agent` twins are one pair of
+# readers over `state/<agent>/`: the digest snapshot a run was given, its
+# transcript, the actions the CLI journaled for it, and the ledger line
+# saying how it ended. Rendering is `transcript.py`'s, the same one the TUI
+# and the web dashboard use.
+
+
+def _resolve_run(home: Path, name: str, ref: str) -> str:
+    """A run id from a full id, a unique prefix, or a unique suffix.
+
+    The same grammar `TaskStore.resolve` gives task ids, for the same reason:
+    what a person has in front of them is the tail of a ULID off another
+    line of output.
+    """
+    ids = transcript_mod.run_ids(home, name, limit=0)
+    ref = ref.strip().upper()
+    matches = [r for r in ids if r == ref] or [
+        r for r in ids if r.startswith(ref) or r.endswith(ref)
+    ]
+    if not matches:
+        raise _fail(f"no {name} run matching {ref!r} (see `quorum {name} log --last 5`)")
+    if len(matches) > 1:
+        raise _fail(f"{ref!r} matches {len(matches)} {name} runs: " + ", ".join(matches))
+    return matches[0]
+
+
+def _check_agent_name(name: str) -> None:
+    """`state/agents/<name>/` is a path, so a name from the outside is a path
+    component — held to the same rule `notes.check_owner` holds an owner to,
+    with the manager's historical spot the one exemption."""
+    from .config import ConfigError, validate_agent_name
+
+    if name == "manager":
+        return
+    try:
+        validate_agent_name(name)
+    except ConfigError as e:
+        raise _fail(str(e)) from None
+
+
+def _run_log(
+    home: Path | None, name: str, last: int, run: str | None, verbose: bool, raw: bool
+) -> None:
+    _check_agent_name(name)
+    target = get_home(home)
+    if run:
+        ids = [_resolve_run(target, name, run)]
+    else:
+        ids = transcript_mod.run_ids(target, name, limit=max(last, 1))
+    if not ids:
+        typer.echo(f"no {name} runs recorded yet")
+        return
+    for i, run_id in enumerate(ids):
+        if i:
+            typer.echo("")
+        _echo(transcript_mod.render_run(target, name, run_id, verbose=verbose, raw=raw))
+
+
+def _run_tail(
+    home: Path | None, name: str, lines: int, follow: bool, verbose: bool, raw: bool
+) -> None:
+    from .actor import transcript_path
+
+    _check_agent_name(name)
+    target = get_home(home)
+    path = transcript_path(target, name)
+
+    def render(entries: list) -> list[str]:
+        return transcript_mod.render(entries, verbose=verbose, raw=raw)
+
+    entries = fsio.read_jsonl(path)
+    if not entries and not follow:
+        typer.echo(f"{name} has written no transcript yet")
+        return
+    _echo(render(entries[-lines:]))
+    if follow:
+        _follow(path, render, len(entries))
+
+
+_LAST_OPT = typer.Option(1, "--last", help="How many recent runs to render (newest last).")
+_RUN_OPT = typer.Option(None, "--run", help="One run, by id, unique prefix, or unique suffix.")
+
+
 # -- agents ----------------------------------------------------------------
 
 
@@ -2434,6 +2781,32 @@ def agent_run_once(
     # end the streak, not leave the agent reading as broken.
     write_heartbeat(target, name, **success_heartbeat_fields(started, ended))
     typer.secho(f"{name}: tick complete", fg="green")
+
+
+@agent_app.command("log")
+def agent_log(
+    name: str,
+    last: int = _LAST_OPT,
+    run: str | None = _RUN_OPT,
+    verbose: bool = _VERBOSE_OPT,
+    raw: bool = _RAW_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Render an agent's run end to end: what it saw, said, did, and cost."""
+    _run_log(home, name, last, run, verbose, raw)
+
+
+@agent_app.command("tail")
+def agent_tail(
+    name: str,
+    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
+    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
+    verbose: bool = _VERBOSE_OPT,
+    raw: bool = _RAW_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Follow an agent's transcript as it runs."""
+    _run_tail(home, name, lines, follow, verbose, raw)
 
 
 def _agent_command(home: Path | None, name: str, command: str, note: str) -> None:
@@ -2739,6 +3112,31 @@ def manager_journal(
         if e.get("args"):
             line += f"  {e['args']}"
         typer.echo(line)
+
+
+@manager_app.command("log")
+def manager_log(
+    last: int = _LAST_OPT,
+    run: str | None = _RUN_OPT,
+    verbose: bool = _VERBOSE_OPT,
+    raw: bool = _RAW_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Render one manager tick end to end: the digest it saw, what it said,
+    the actions it took (with their then-vs-now outcome), and what it cost."""
+    _run_log(home, "manager", last, run, verbose, raw)
+
+
+@manager_app.command("tail")
+def manager_tail(
+    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
+    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
+    verbose: bool = _VERBOSE_OPT,
+    raw: bool = _RAW_OPT,
+    home: Path | None = _HOME_OPT,
+) -> None:
+    """Follow the manager's transcript as its tick runs."""
+    _run_tail(home, "manager", lines, follow, verbose, raw)
 
 
 def _parse_window(text: str) -> timedelta:
