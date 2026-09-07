@@ -18,6 +18,10 @@ ACTOR_RUN_ENV = "QUORUM_ACTOR_RUN"
 ACTOR_CAP_ENV = "QUORUM_ACTOR_CAP"
 
 DEFAULT_MAX_ACTIONS_PER_RUN = 20
+# Seconds one agent harness run may take before `run_agent_harness` kills
+# it (agents/harness_run.py). Kept next to the action cap because the two
+# are the per-run [agents.<name>.settings] dials `dials.py` lists.
+DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
 # A task run is tagged too, as `task-<id>` — the same string as its inbox
 # name (`tasks.inbox_name`), so one identity names a task everywhere the bus
@@ -59,6 +63,26 @@ def notes_path(home: Path, name: str = "manager") -> Path:
     if name == "manager":
         return Path(home) / "state" / "manager" / "notes.jsonl"
     return Path(home) / "state" / "agents" / name / "notes.jsonl"
+
+
+def runs_dir(home: Path, name: str = "manager") -> Path:
+    """Where an agent keeps a snapshot of what each run was given (same split
+    as `journal_path`).
+
+    The one thing a tick used to leave no trace of: the digest it reasoned
+    over was rendered, sent to the harness and dropped, so "why did it launch
+    that" was unanswerable an hour later. One file per run, bounded twice —
+    head-truncated on write, and only the newest `SNAPSHOT_KEEP` kept — so
+    this is an observability artifact of the journal's class, never state
+    anything reads back to decide something.
+    """
+    if name == "manager":
+        return Path(home) / "state" / "manager" / "runs"
+    return Path(home) / "state" / "agents" / name / "runs"
+
+
+def run_snapshot_path(home: Path, name: str, run_id: str) -> Path:
+    return runs_dir(home, name) / f"{run_id}.md"
 
 
 def usage_path(home: Path, name: str = "manager") -> Path:

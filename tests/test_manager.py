@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from quorum import fsio, notes, runner, tasks
-from quorum.actor import notes_path, usage_path
+from quorum.actor import notes_path, run_snapshot_path, runs_dir, usage_path
 from quorum.agent import AgentContext
 from quorum.agents import manager
 from quorum.agents.manager import (
@@ -1339,3 +1339,65 @@ def test_the_hold_rule_covers_the_relaunch_rules_too(home: Path):
     # rule 12: the perpetual loop
     perpetual = text.split("relaunch it with `task run --detach` whenever its runner is dead")[1]
     assert "unless it" in perpetual.split(";")[0] and "held=true" in perpetual.split(";")[0]
+
+
+def test_digest_says_only_that_a_handoff_exists(home: Path, clock):
+    """The body is for the dependent's prompt and `task show`; the manager
+    needs to know it is there, nothing more (#92)."""
+    store = TaskStore(home)
+    with_body = store.add(project="p", prompt="left notes", harness="t")
+    tasks.report(
+        home, with_body.id, "done", "shipped",
+        handoff="SECRET-BODY: changed x, not done y, check z first",
+    )
+    without = store.add(project="p", prompt="left nothing", harness="t")
+    tasks.report(home, without.id, "done", "shipped")
+
+    digest = build_digest(home, store.list(), clock(), directives=[])
+    marked = [line for line in digest.splitlines() if f"[done] {with_body.short_id}" in line]
+    plain = [line for line in digest.splitlines() if f"[done] {without.short_id}" in line]
+    assert marked and "handoff=true" in marked[0]
+    assert plain and "handoff=true" not in plain[0]
+    assert "SECRET-BODY" not in digest
+
+
+def test_the_manager_prompt_explains_the_handoff_mark(home: Path):
+    """Every other mark the digest can carry has a rule that says what it
+    means; `handoff=true` would otherwise be a token with no policy (#92)."""
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "`handoff=true`" in text
+    # unwrapped, so the assertions do not depend on where the lines break
+    rule = " ".join(text.split("`handoff=true`")[1].split("\n14.")[0].split())
+    # what it is, where the body actually goes, and that it asks for nothing
+    assert "every dependent gets it in its own prompt" in rule
+    assert "quorum task show <id>" in rule
+    assert "observation, not an instruction" in rule
+
+
+def test_a_tick_keeps_the_digest_it_reasoned_over(home: Path, clock, project: str):
+    """The one file #82 adds: without it, "why did it launch that" is
+    unanswerable an hour later — the digest was rendered and dropped."""
+    from quorum import transcript
+
+    write_config(home, "manager_act")
+    task = TaskStore(home).add(project, "tidy up the docs", "tasktool")
+
+    make_manager(home, clock).tick()
+
+    run_id = {e["run"] for e in fsio.read_jsonl(journal_path(home))}.pop()
+    snapshot = run_snapshot_path(home, "manager", run_id).read_text()
+    assert snapshot.startswith("# Situation digest")
+    assert f"- [queued] {task.short_id}" in snapshot
+    # the digest, not the whole prompt: the constitution above it is static
+    assert "You are the manager" not in snapshot
+    assert [p.name for p in runs_dir(home, "manager").glob("*.md")] == [f"{run_id}.md"]
+
+    # and the four files read back as one tick
+    out = "\n".join(transcript.render_run(home, "manager", run_id))
+    assert f"=== manager run {run_id}" in out
+    assert f"- [queued] {task.short_id}" in out              # what it saw
+    assert f"ACT| task run {task.short_id}" in out           # what it said
+    assert f"task.run -> {task.short_id}" in out             # what it did
+    assert "ok · " in out                                     # how it ended

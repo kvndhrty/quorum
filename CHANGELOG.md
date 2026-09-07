@@ -14,6 +14,36 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- The trust dials in one place (#85): a guide section, "Loosening the rails
+  as trust is earned", tables every setting that records how far a home
+  currently trusts its models — the launch cap, `max_actions_per_run`,
+  `run_timeout_seconds`, the per-run budget, the stall watchdog, the
+  manager's cadence, who launches, who decomposes, who merges — with where
+  it lives, its default and the condition for moving it, facing a list of
+  what does not move (the invariants). `dials.py` is the registry behind
+  it: `quorum doctor` ends with each dial's current value as an
+  informational `–` line (`dial.*` in `--json`, never a ✗), and a test
+  fails when a numeric `[tasks]`/`[agents]` option with a default has no
+  row in the table. `docs/architecture.md` and `CLAUDE.md` link to the
+  section as the place a change to either list is argued.
+- Readable logs: one narrative renderer (`quorum.transcript`) behind
+  `quorum task tail` and a new `task log`, so a run reads as what it tried
+  and what came back rather than as a few hundred JSON events — assistant
+  text in full, one line per tool call with its first argument, results
+  collapsed to a size or an exit code, reasoning and noise events folded
+  (`-v` unfolds all of it, `--raw` prints the old output byte for byte, an
+  unrecognized event prints as its raw line rather than raising). The TUI's
+  transcript pane and the web dashboard's task detail render through the
+  same function, so the three surfaces cannot disagree, and the per-harness
+  event shapes now live in one place — `manager.loop_signal` and the
+  runner's session-id capture read it too.
+  `quorum manager log [--last N | --run <id>]` reads one *tick* end to end:
+  the digest it was given, what it said, the actions the CLI journaled for
+  it with their then-vs-now outcome, and what the run cost. That first part
+  needed the one new file, `state/manager/runs/<run>.md` — bounded like the
+  journal tail (newest fifty per agent, head-truncated) and read by nothing
+  that decides anything. `manager tail -f` follows a live tick; `agent log`
+  / `agent tail` do the same for a prompt agent. (#82)
 - Notification hook: a `[notify]` table holds an argv template
   (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
   no shell) that the supervisor runs once for every new message on the
@@ -218,6 +248,56 @@ minute it is posted.
   adopted (attached) task is the exception: quorum does not compose its
   prompt, so its notebook is written but never rendered into the session —
   `task show` is the read path there. (#90)
+- Handoffs: `quorum task report <id> --status done --handoff <file|->`
+  stores a body for the tasks that depend on this one — what changed,
+  what is not done, what to check first — whole and atomically at
+  `tasks/<id>/handoff.md` (one per task, a later `--handoff` replaces it,
+  an empty one is refused). A dependent's prompt gains a `## Handoff from
+  <id>` section per upstream that left one, cut at 8 KiB per dependency
+  with a note on what was dropped; `task show` prints it in full and adds
+  a `dependents:` line listing the tasks waiting on this one; the digest
+  says only `handoff=true`. The task preamble tells a task with
+  dependents to leave one. Quorum never writes or summarizes a handoff
+  itself. (#92)
+- Task history: `quorum task history <id>` prints one list, oldest first,
+  of everything that happened to a task — queued (issue, dependencies),
+  each run's start and end (exit code, reported cost, stopped by `task
+  stop`, stalled, fresh session, auto-commit), every report, guidance sent
+  to it and by whom (`(waiting)` / `(claimed)` until a run consumes it),
+  the PR state the manager's probe recorded, every agent action journaled
+  against it, and its archival by `task prune` — with `--json` for the raw
+  rows. Built in `views.py` as a pure reader over the files that already
+  record each fact (`task.json`, `reports.jsonl`, the inbox and message
+  archive, the agents' journals, `tasks/.archive`); nothing new is written.
+  It still answers for a pruned task, resolved out of the archive. The same
+  list is the TUI's `t` tab on a task and a block on the web task page; the
+  tab is a snapshot rather than a follower, since building it is too much
+  work for the two-second tick — `r` rebuilds it. (#95)
+- `quorum usage [--by project|harness|week|agent] [--since 7d] [--json]`:
+  the report that used to be a hand-written script over `task.json` files.
+  Rows of tasks, runs, reruns, cost and tokens (the harness's own figures,
+  summed with `usage.py`'s rules; a task that reported nothing is counted,
+  never estimated, and a harness that reports tokens but no cost gets an
+  empty cost cell), and — where the manager recorded a `pr_state` — the
+  delivery figures: median queue-to-first-run, queue-to-done,
+  done-to-merged and the share merged over the PRs it observed. A Rich
+  table on a terminal, plain text piped; a pure reader over `task.json`,
+  `reports.jsonl` and the agent ledgers, no cache. (#96)
+- Task export: `quorum task export <id> [--out <path>]
+  [--with-worktree-diff] [--redact]` packs one task into a `.tar.gz` for
+  sharing or a bug report — `tasks/<id>/` whole (record, reports,
+  transcript, runner log, any subdirectory; never `runner.lock`), the
+  task's inbox (waiting, claimed, and already-delivered guidance read back
+  out of `messages/archive/`), an `export.json` manifest, and optionally
+  `worktree.diff`, the worktree against the branch it forked from with
+  untracked files included. Nothing from the project directory: the diff
+  is refused for a `--no-worktree` or adopted task. Read-only apart from
+  the archive, which defaults to the current directory and is refused
+  inside the home or over an existing file; an ambiguous id is refused
+  like everywhere else. `--redact` replaces every tool result in the
+  archived transcript with a marker (claude and codex shapes), keeping
+  assistant text and tool calls, and says how many plain-text lines it
+  could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
 - `quorum manager remember` from inside a task run is now refused. The

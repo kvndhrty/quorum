@@ -726,6 +726,32 @@ def check_heartbeats(home: Path, config: Config) -> list[Check]:
     return checks
 
 
+def check_dials(home: Path, config: Config) -> list[Check]:
+    """The trust dials (dials.py) as informational lines: never ✓, never ✗.
+
+    A home's trust posture — how many tasks run at once, how many actions a
+    run gets, whether spend is budgeted, how often the manager wakes, who
+    launches / decomposes / merges — belongs next to its health, and none of
+    it is a fault: a dial at its cautious default and a dial someone loosened
+    on purpose are both `–`. The `fix` on the first line points at the guide
+    table that says what loosening each one buys and risks.
+    """
+    from . import dials
+
+    checks: list[Check] = []
+    for dial, value in dials.current(home, config):
+        checks.append(
+            na(
+                f"dial.{dial.key}",
+                f"dial {dial.label}: {value}",
+                f"dials explained: {dials.GUIDE_ANCHOR}"
+                if not checks
+                else "",
+            )
+        )
+    return checks
+
+
 # -- the one active probe ----------------------------------------------------
 
 
@@ -1001,6 +1027,7 @@ def run_checks(
     checks += check_runner_locks(home)
     checks.append(check_stale_claims(home))
     checks += check_heartbeats(home, config)
+    checks += check_dials(home, config)
     if smoke is not None:
         checks += smoke_checks(home, config, smoke, smoke_timeout)
     return checks

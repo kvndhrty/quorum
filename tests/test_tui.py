@@ -13,6 +13,7 @@ import pytest
 from textual.coordinate import Coordinate
 from textual.widgets import DataTable, Input, Static
 
+from quorum import fsio, tasks
 from quorum.messages import MessageBus
 from quorum.tasks import TaskStore, inbox_name, runner_lock_path
 from quorum.tui.app import QuorumTUI
@@ -628,5 +629,110 @@ def test_h_says_a_live_run_keeps_going(home: Path):
         assert TaskStore(home).get(ids[0]).held is True
         message = str(list(app._notifications)[-1].message)
         assert "live runner keeps going" in message and "task stop" in message
+
+    drive(home, script)
+
+
+def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path):
+    """`t` is the detail pane's second tab: the task's life, oldest first,
+    rendered by the same rows `quorum task history` prints. Pressed again it
+    returns to the transcript; the choice sticks when another task is opened."""
+    ids = populate(home)
+    from quorum import tasks
+
+    tasks.report(home, ids[1], status="executing", text="on it")
+
+    async def script(app, pilot):
+        await pilot.press("down", "t")
+        await pilot.pause()
+        assert app.selected_task == ids[1]
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — history")
+        assert any(line.endswith("queued on proj-a · harness fake") for line in app._log_lines)
+        assert any("reported executing: on it" in line for line in app._log_lines)
+        await pilot.press("t")
+        await pilot.pause()
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — transcript")
+        await pilot.press("t", "up", "enter")  # history on, then open another task
+        await pilot.pause()
+        assert app.selected_task == ids[0]
+        assert mode_text(app).startswith(f"task {ids[0][-6:].lower()} — history")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert mode_text(app).startswith("board")
+
+    drive(home, script)
+
+
+def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
+    """Building a history reads every agent's journal and the message
+    archive, which is far too much work for the two-second tick. So the tab
+    is rebuilt when `t` opens it, when `r` is pressed, when a write goes
+    through the dashboard and when a different task is opened — and the tick
+    reuses what it has."""
+    from quorum import tasks
+    from quorum.tui import app as tui_app
+
+    ids = populate(home)
+    builds: list[str] = []
+    real = tui_app.views.task_history
+    monkeypatch.setattr(
+        tui_app.views,
+        "task_history",
+        lambda h, task, **kw: (builds.append(task.id), real(h, task, **kw))[1],
+    )
+
+    async def script(app, pilot):
+        await pilot.press("down", "t")
+        await pilot.pause()
+        assert builds == [ids[1]]  # opening the tab built it once
+
+        # the interval tick is refresh_data; it must not rebuild
+        app.refresh_data()
+        app.refresh_data()
+        assert builds == [ids[1]]
+
+        # a report landing out of band is not picked up until asked for
+        tasks.report(home, ids[1], status="executing", text="on it")
+        app.refresh_data()
+        assert not any("reported executing: on it" in line for line in app._log_lines)
+
+        await pilot.press("r")
+        await pilot.pause()
+        assert builds == [ids[1], ids[1]]
+        assert any("reported executing: on it" in line for line in app._log_lines)
+
+        # opening another task rebuilds for that task, and only once
+        await pilot.press("up", "enter")
+        await pilot.pause()
+        app.refresh_data()
+        assert builds == [ids[1], ids[1], ids[0]]
+
+        # and a write from the dashboard drops the snapshot it invalidates
+        await pilot.press("n")
+        await pilot.pause()
+        app.query_one("#nudge", Input).value = "steer left"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert builds[-1] == ids[0] and len(builds) == 4
+        assert any("guidance from" in line and "steer left" in line for line in app._log_lines)
+
+
+def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
+    """The TUI, `task tail` and the web dashboard read one renderer, so what a
+    person sees is the same wherever they look."""
+    ids = populate(home)
+    fsio.append_jsonl(tasks.transcript_path(home, ids[0]), {
+        "at": "2026-09-01T10:00:00Z",
+        "event": {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "uv run pytest -q"}}]}},
+    })
+
+    async def script(app, pilot):
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.selected_task == ids[0]
+        assert any("🔧 Bash  uv run pytest -q" in line for line in app._log_lines)
+        assert not any('"tool_use"' in line for line in app._log_lines)
 
     drive(home, script)

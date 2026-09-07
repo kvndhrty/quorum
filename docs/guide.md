@@ -103,7 +103,9 @@ and quorum records whatever it sees on the run's entry in `task.json`. It
 then shows up wherever tasks do — `$0.42 · 11.0k tok` in the `usage` column
 of `quorum status` and `task list`, broken out by `quorum task show`, summed
 per task in the manager's digest. A harness that reports nothing is fully
-supported: you simply see nothing, never a misleading `$0.00`.
+supported: you simply see nothing, never a misleading `$0.00`. Across tasks — per project, harness or
+week — `quorum usage` totals the same figures
+([below](#what-it-cost-what-it-delivered)).
 
 **Quorum prices nothing.** The `$` figure is the harness CLI's own reported
 cost, copied as-is: claude's `total_cost_usd` on its `result` event, next to
@@ -225,12 +227,19 @@ home: /Users/you/.quorum
     is running last release's policy
       → run `quorum init`: it upgrades unedited seeds in place
   ✓ supervisor running (pid 40680, since 2026-08-31T23:40:50Z)
+  – dial concurrent launches: house rule in prompts/manager.local.md (not parsed)
+      → dials explained: docs/guide.md#loosening-the-rails-as-trust-is-earned
+  – dial actions per agent run: manager 20 (default)
+  – dial manager cadence: every 5m
 ```
 
-`✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
-something you switched off, never configured, or that could not answer
-(a `gh` that timed out is `–`, not a failure: offline says nothing about
-whether you are logged in). Only `✗` affects the exit code, so a `–` never
+`✓` is fine, `✗` is a problem, and `–` is everything that is neither. Most
+`–` lines mean there was nothing to check: something you switched off,
+never configured, or that could not answer (a `gh` that timed out is `–`,
+not a failure: offline says nothing about whether you are logged in). The
+`dial` lines are the other kind — they report a current setting rather
+than check it, and a cautious default and a value you loosened on purpose
+are both facts, not faults. Only `✗` affects the exit code, so a `–` never
 trains you to ignore the output — a freshly `init`ed home with no harness
 chosen yet says so in one `–` line and exits 0. Doctor **diagnoses and
 never repairs**: every `✗` names the fix, and applying it stays your call.
@@ -248,7 +257,11 @@ seed `quorum init` would upgrade / your own edit over a default that has
 since moved); and the state earlier runs left behind — a supervisor lock
 whose pid is gone or whose heartbeat stopped, an installed version newer
 than the running supervisor's, orphaned `runner.lock`s, inbox messages
-claimed and never acked, agents with a failure streak.
+claimed and never acked, agents with a failure streak. It ends with the
+current value of every trust dial (launch cap, action cap, budget, cadence,
+who launches, decomposes and merges), one `–` line each, so the posture
+described under [the trust dials](#loosening-the-rails-as-trust-is-earned)
+is read from the same command as the home's health; a dial is never a `✗`.
 
 **`--smoke` is the one thing doctor does actively**, and the only one that
 spends tokens: it runs your harness once, in a scratch directory, through
@@ -348,6 +361,8 @@ quorum task report <id> --status <word> "<note>"     # at every phase change
 quorum task inbox <id> --claim                       # check for guidance
 quorum task report <id> --status pr --pr-url <url> "<title>"
 quorum task report <id> --status done "<summary>"
+# with a handoff, when other tasks depend on this one:
+quorum task report <id> --status done --handoff <file|-> "<summary>"
 quorum task report <id> --status blocked "<what you need>"
 ```
 
@@ -456,6 +471,35 @@ Read the full record of any of them — reports, PR url, branch — with
 channel: reports, branch, runs, spend. That is the whole mechanism — the
 harness has the CLI and `QUORUM_HOME`, so nothing else is needed.
 
+**The handoff.** Status and PR url say whether the upstream finished; they
+do not say what it changed, what it left undone or what to check first. A
+task that has dependents can say so with its final report:
+
+```bash
+quorum task report a3f2k9 --status done --handoff handoff.md "PR #42"
+cat <<'EOF' | quorum task report a3f2k9 --status done --handoff - "PR #42"
+Added a token-bucket limiter in `api/limits.py`, wired into the public
+router only. Not done: the admin endpoints still have no limit, and the
+config knob is hard-coded to 100/min. Check first: the new tests in
+`tests/test_limits.py` mock the clock — if they flake, that is why.
+EOF
+```
+
+The body is stored whole as `tasks/a3f2k9/handoff.md` (written atomically,
+one file per task — a later `--handoff` replaces it, because it describes
+the finished state rather than logging progress; an empty one is refused).
+Every task that waits on `a3f2k9` then finds it in its prompt, under a
+`## Handoff from a3f2k9` heading inside the *Tasks this one depends on*
+block, cut at 8 KiB per dependency with a note saying how much was dropped.
+`quorum task show a3f2k9` prints it in full, and the manager's digest shows
+only `handoff=true` on the finished task's line — the body is for the
+dependent, not the manager.
+
+The task preamble asks for one: a task whose `quorum task show <id>` output
+has a `dependents:` line is told to leave a handoff with its `done` report,
+naming what changed, what is not done and what to look at first. Quorum
+never writes or summarizes one on a task's behalf.
+
 **The review-task recipe.** Queue both at once and let the manager sequence
 them:
 
@@ -530,9 +574,13 @@ at stays where it is.
 ```bash
 quorum task list                  # every task, one line each (cost too, when reported)
 quorum task show a3f2k9           # what/where/how it stands (--json: raw record)
-quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
+quorum task tail a3f2k9 -f        # live transcript, rendered as a story
+quorum task log a3f2k9            # the whole run, same rendering
 quorum status                     # tasks alongside agents and projects
 ```
+
+What `tail` and `log` print is described under "Reading a run and reading a
+tick" below.
 
 Each section is a table fitted to the terminal: the report and flags
 columns are the ones cut with `…` where the window runs out, so the id,
@@ -685,6 +733,52 @@ show` printed). An adopted session also runs as you rather than as
 `task-<id>`, so its notes are recorded with `sender: user`. The notebook is
 most useful on tasks quorum runs itself.
 
+### Watching: the life of a task
+
+A task's life is spread over several files — `task.json` holds its runs
+and the PR observation, `reports.jsonl` what it said, its inbox and the
+message archive the guidance it was sent, the manager's journal what was
+done to it. `task history` reads them all and prints one list, oldest
+first:
+
+```bash
+quorum task history a3f2k9
+```
+
+```
+task a3f2k9  (01M1…A3F2K9)  9 event(s), oldest first
+[2026-09-03 09:00:12] queued on my-api · harness claude · from #62
+[2026-09-03 09:00:40] manager: task.run — a3f2k9 (status then queued)
+[2026-09-03 09:00:41] run 1 started
+[2026-09-03 09:01:05] reported planning: reading the issue and the auth module
+[2026-09-03 09:14:30] guidance from user: use the existing retry helper
+[2026-09-03 09:31:02] reported pr: Add rate limiting · https://github.com/you/my-api/pull/71
+[2026-09-03 09:31:04] reported done: opened #71
+[2026-09-03 09:31:09] run 1 ended · exit 0 · $4.12 · 1.8M tok
+[2026-09-03 11:00:03] pr state observed: merged · https://github.com/you/my-api/pull/71
+```
+
+Every kind of event a task can have is a row: queued (with the issue and
+the tasks it waited on), each run's start and end — exit code, what the
+harness said it cost, whether `task stop` ended it, whether the stall
+watchdog did, whether it was a fresh session, what auto-commit did — every
+report, guidance sent to it and by whom, the PR state the manager's probe
+recorded, everything the manager (or any agent) journaled against it, and
+its archival by `task prune`. `--json` gives the same rows with their raw
+fields (`kind`, `at`, and per kind the exit code, usage, sender, status,
+and so on) for scripts.
+
+Two things to know when reading it. Guidance is stamped when it was
+*sent*: delivery writes no time of its own, so a nudge shows where it was
+queued, and one the task has not consumed yet says `(waiting)` (`(claimed)`
+while a run is injecting it). And the whole list is read from files, so it
+works with the supervisor stopped and still answers for a task you have
+pruned — the pruned task resolves out of `tasks/.archive` and its list ends
+with an `archived` row.
+
+The same list is a tab in the TUI (`t` on a task) and a block on the web
+dashboard's task page.
+
 ## The manager
 
 Supervision in quorum is not a set of thresholds — it's your harness reading
@@ -761,8 +855,12 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
+quorum manager log                        # one tick end to end: saw, said, did, cost
 quorum manager notes                      # its notebook: what it remembers
 ```
+
+`journal` is the flat list of actions; `log` reads one whole tick, digest
+included — see [Watching](#watching-reading-a-run-and-reading-a-tick).
 
 A `tell` is normally read at the start of the next tick. If the manager's
 harness sets `inject = "stream-json"` (see [Harnesses](#harnesses)), a
@@ -859,6 +957,100 @@ template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it. Every task has one too, read by the
 task itself rather than the manager — [What a task
 remembers](#what-a-task-remembers).
+
+## Loosening the rails as trust is earned
+
+Quorum's constraints are of two kinds, and the difference matters when a
+better model arrives. Some encode distrust of the *environment*: rate
+limits, money, a laptop with no root and no open ports, a signal that must
+never be dropped silently. Those do not change with model capability, and
+they are listed under "What does not move" below. The rest are dials. Each
+one records how far you currently trust the model, and each should loosen
+as that trust is earned. A dial left at its cautious default forever costs
+throughput for nothing; an invariant loosened by mistake costs the property
+it protected. This table is every dial, where it lives, what an untouched
+home has, and the condition under which moving it is the right call.
+`quorum doctor` prints the current value of each one as a `–` line, so a
+home's trust posture is visible in the same place as its health.
+
+| dial | lives in | default | move it when |
+| --- | --- | --- | --- |
+| concurrent launches | `prompts/manager.local.md` house rule | none | rate-limit headroom, `overlaps=` rare |
+| actions per agent run (`max_actions_per_run`) | `[agents.<name>.settings]` | 20 | `cap.hit` on legitimate work |
+| seconds per agent run (`run_timeout_seconds`) | `[agents.<name>.settings]` | 300 | `TIMEOUT` on runs that progressed |
+| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account; before #43 (not built) |
+| stall watchdog (`run_stall_timeout_seconds`) | `[tasks]` | 0 (off) | a healthy run is silent for longer |
+| manager cadence | `[agents.manager]` `schedule` | `every 5m` (dogfood: `every 1h`) | events carry the facts (#83, not built) |
+| who launches | `prompts/manager.md` | the manager | tasks self-schedule (#83, not built) |
+| who decomposes | a person | a person | a spawn cap exists (#43, not built) |
+| merge gate | a person | a person | never removed; may move later |
+
+Row by row:
+
+- **Concurrent launches.** The packaged manager prompt sets no cap and
+  quorum counts nothing; a cap is a house rule in the manager's overlay
+  (the dogfood home says two). Raise it when the rate limit has headroom
+  and the digest rarely shows `overlaps=` marks.
+- **Actions per agent run.** Raise it when the journal shows `cap.hit` on
+  legitimate work rather than on a repeated intervention. A run that keeps
+  hitting the cap on the same action is the case the cap exists for.
+- **Seconds per agent run.** Raise it when the manager's self-observation
+  line shows `TIMEOUT` on runs that were making progress. A longer run also
+  spends more on a tick that has gone wrong.
+- **Per-run budget.** Set it on a metered account, and before task-spawned
+  tasks (#43, not built) exist. It flags a run and gates the next one; it
+  never stops a run in progress. Raise it as runs come in under it.
+- **Stall watchdog.** This one measures the harness, not trust: it counts
+  silence, not progress. Set it above the longest quiet step a healthy run
+  has (a full test suite, a cold build), and raise it when a healthy run
+  is silent for longer.
+- **Manager cadence.** The scaffold says `every 5m`; the dogfood home runs
+  `every 1h`. Slow it when events carry the facts (wake conditions, #83,
+  not built) and the tick is only a heartbeat. Every tick is one harness
+  run, so cadence is spend.
+- **Who launches.** Today every launch is a manager judgement made from the
+  digest, following `prompts/manager.md`. It moves when tasks can state
+  what they wait for and the supervisor fires them (#83, not built).
+- **Who decomposes.** Today a person queues every task with `task add`. It
+  moves when #43 lands with a spawn cap, and the cap is raised as spawned
+  work merges clean.
+- **Merge gate.** A person merges; quorum has no forge write path. This is
+  never removed. A review agent may later recommend a merge, and performing
+  one stays with a person.
+
+**What does not move.** These are the constraints the dials sit inside.
+They encode the environment, not the model, and a more capable model does
+not change what a laptop, a rate limit or a lost message is.
+
+- **No privileged infrastructure.** One ordinary process hosts the
+  scheduler, task runs are detached child processes, and there is no cron,
+  systemd, root or open port.
+- **All state is plain files** under `QUORUM_HOME`. No database, so `ls`
+  and `cat` remain the debugger and copying the directory remains the
+  migration.
+- **Fail loudly, recover automatically.** Views degrade to reading files.
+  Supervision does not degrade at all: without a working harness the
+  manager's tick raises every time and keeps firing until the service
+  returns. There is no reduced-capability supervisor.
+- **No decisions in Python.** Every launch, nudge, cancel and escalation is
+  the harness reading a digest and typing a command. A threshold in the
+  code is rendered into the digest, never acted on by the code.
+- **Observations are never rails.** `possible-loop`, `BUDGET-EXCEEDED`,
+  `CI-FAILING`, `overlaps=` and `waiting-on=` are data the manager judges.
+  The only rails are rate limits (the action cap, the budget gate) and the
+  substrate refusals that protect a checkout (`runner.lock`, an attached or
+  held task, unfinished dependencies), and none of them second-guesses a
+  decision.
+- **A dropped signal is a bug.** A report, a nudge, a directive or a board
+  message that goes missing is a defect, not acceptable degradation. The
+  notification hook is the one deliberate exception: it loses a message on
+  a crash rather than repeat it every fifteen seconds, and logs that it did.
+
+These two lists are where a change to either is argued: the design record
+([architecture.md](architecture.md)) and the contributor notes (`CLAUDE.md`)
+both point here. To loosen a dial, change the value where the table says it
+lives. To move an invariant, open an issue: that is a design change, and it
+updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 
 ## Prompt customization
 
@@ -1041,6 +1233,51 @@ quorum task inbox a3f2k9 --clear         # archive what's waiting, undelivered
 Both take `--dry-run`, and `--clear` only touches unclaimed mail — a message
 some run is already holding is left alone.
 
+## Sharing a run
+
+A task's life is spread over its directory, its inbox and the message
+archive. To hand one run to someone — a colleague, a bug report, an issue
+comment — pack it into one archive:
+
+```bash
+quorum task export a3f2k9                        # ./quorum-task-a3f2k9.tar.gz
+quorum task export a3f2k9 --out ~/Desktop/run.tgz
+quorum task export a3f2k9 --with-worktree-diff   # + a patch of the worktree
+quorum task export a3f2k9 --redact               # drop what the tools returned
+```
+
+The archive unpacks to `quorum-task-<short-id>/` holding the task record,
+its reports, the transcript, the runner log, and the guidance it received:
+what is still waiting (`inbox/new/`), what a run is holding (`inbox/cur/`)
+and what was already delivered (`inbox/delivered.jsonl`, read back out of
+the message archive). An `export.json` at the top says which task, when,
+and which options were on. Anything a task keeps next to its record —
+a notebook or artifacts directory, once those exist — rides along.
+
+**What it never contains.** Nothing from your project directory. The only
+code in an export is `worktree.diff`, and only with
+`--with-worktree-diff`: the task's own worktree against the branch it
+forked from, uncommitted and untracked files included. A task that ran in
+your checkout (`--no-worktree`, or one you adopted) is refused the diff
+outright, with a message, rather than exporting your checkout.
+
+**What it never does.** It is read-only apart from the archive itself,
+which goes to the current directory by default and is refused inside
+`~/.quorum` (an export sitting under `tasks/<id>/` would be swept into the
+next export of that task) and over a file that already exists. Nothing in
+the home changes, and `runner.lock` stays out of the archive — it is a pid
+on this machine, not part of the record.
+
+**`--redact`.** Transcripts carry what the tools *returned* — file
+contents, command output, whatever a `cat` of the wrong file showed the
+model. `--redact` replaces every tool result with a marker and keeps the
+rest: the assistant's text, its thinking, and each tool call with its
+arguments, so a reader can still follow what the run did. The transcript on
+disk is untouched. It understands the structured transcripts claude and
+codex emit; a harness that prints prose has nothing to redact, and the
+command tells you how many plain-text lines it kept verbatim, so read
+those before you share them.
+
 ## Adopting a live session
 
 Sometimes the work is already underway — you're deep in a problem inside an
@@ -1106,6 +1343,91 @@ with `quorum task inbox <id> --claim`. An optional `[herdr]` table in
 config.toml overrides the socket path (`socket = "..."`) or disables the
 integration (`enabled = false`).
 
+## Watching: reading a run and reading a tick
+
+A transcript is every event the harness emitted, one JSON object per line.
+It is the complete record and it is unreadable — a few hundred lines of
+nested tool payloads and echoed output for one run. `quorum task tail` and
+`quorum task log` render it as a story instead:
+
+```
+$ quorum task log 5yqg9f
+[03:14:08] ▶ run started (session 6a183734 · /Users/you/.quorum/worktrees/01M1JAAX…)
+[03:14:10] 💬 I'll start by reading the issue and orienting in the codebase.
+[03:14:12] 🔧 Bash  gh issue view 82 --comments
+[03:14:13]   ↳ 214 lines · 8.1 kB
+[03:16:41] 🔧 Edit  src/quorum/transcript.py  (+41 −0)
+[03:16:42]   ↳ 1 line · 31 B
+[03:24:11] ■ result: success · 148 turns · 24m13s · $13.79 · 20.2M tok
+```
+
+Assistant text is shown in full — it is the run's reasoning, and the reason
+to read a transcript at all. Each tool call is one line with its first
+argument; each result collapses to a size, an exit code, or an error's first
+line. Reasoning blocks and the events that carry no story (the harness's init
+banner, progress pings, an allowed rate-limit notice) are folded away.
+
+Two flags:
+
+- `-v` unfolds everything: reasoning, full tool arguments, full results, the
+  folded events, and the raw payload behind every line.
+- `--raw` prints the transcript's own JSON lines, exactly as earlier versions
+  of `task tail` did — for grepping and for piping into `jq`.
+
+`task tail` takes `-n` (how many entries) and `-f` (follow a live run);
+`task log` renders the whole file. An event quorum does not recognize prints
+as its raw line rather than disappearing, so a harness it has never seen is
+still readable, just less pretty.
+
+**Reading a manager tick.** The manager's transcript is the same stream, but
+the question is different: not "what did it type" but "why did it do that".
+`quorum manager log` answers it from the four files one tick leaves behind:
+
+```
+$ quorum manager log
+=== manager run 01M1JN0ZB0GZG6WKNG6FH8VKNR — 2026-09-03T03:20:05Z
+
+--- what it saw (01M1JN0ZB0GZG6WKNG6FH8VKNR.md)
+# Situation digest — 2026-09-03T03:15:00Z
+## Active tasks
+- [queued] 5yqg9f readable logs (#82)
+… (48 more lines; -v for all)
+
+--- what it said
+[03:15:02] 💬 5yqg9f is queued, nothing is running, and no dependency is
+           unfinished — launching it.
+[03:15:03] 🔧 Bash  quorum task run 5yqg9f --detach
+
+--- what it did
+[03:15:04] task.run -> 5yqg9f  [queued -> executing]
+
+--- how it ended
+ok · 1m12s · $0.31 · 84.0k tok
+```
+
+"What it saw" is the digest the tick was rendered from, kept per run under
+`state/manager/runs/<run>.md`. "What it did" is the CLI's own journal — the
+actions quorum recorded, not the model's account of them — each with what its
+target's status was then and is now. "How it ended" is the usage ledger line.
+
+```bash
+quorum manager log                # the most recent tick
+quorum manager log --last 5       # the last five, oldest first
+quorum manager log --run 3g785y   # one tick, by id / prefix / suffix
+quorum manager tail -f            # follow the tick that is running now
+quorum agent log babysitter       # the same for a prompt agent
+quorum agent tail babysitter -f
+```
+
+`-v` and `--raw` mean the same things here. A prompt agent has no digest, so
+what it saw is its rendered prompt.
+
+Snapshots are bounded: the newest fifty runs per agent, each head-truncated.
+An older tick still renders — its transcript, journal and ledger lines are
+where they were — with `(no snapshot kept for this run)` where the digest
+would be. Nothing reads a snapshot back to decide anything; it exists only so
+you can see what a tick was looking at.
+
 ## Dashboards
 
 All views read the home directory and nothing else — they work whether or
@@ -1156,6 +1478,7 @@ quietly ignored.
   | key | does |
   | --- | --- |
   | `enter` | open the highlighted task's transcript and reports |
+  | `t` | open the highlighted task's history (its life, oldest first); again for the transcript |
   | `esc` | back to the board feed (or cancel what you're typing) |
   | `n` | nudge the highlighted task — guidance into its inbox |
   | `m` | tell the manager — a directive for its next run, no task needed |
@@ -1164,6 +1487,16 @@ quietly ignored.
   | `a` | open the `#attention` list and ack the highlighted escalation |
   | `r` | refresh now |
   | `q` | quit |
+
+  `enter` and `t` are the two tabs of a task's detail — the transcript
+  tail and its history ([the life of a task](#watching-the-life-of-a-task))
+  — and the one you chose sticks as you open other tasks. The transcript
+  tail follows along on its own; the history tab is a snapshot, because
+  building it reads every agent's journal and the message archive and that
+  is too much work for the dashboard's two-second tick. It is rebuilt when
+  you press `t`, when you press `r`, when you open a different task, and
+  after anything you do from the dashboard itself (`n`, `s`, `c`, `h`,
+  `+`/`-`) — so press `r` to pick up a run's own progress.
 
   `n`, `s` and `c` act on the row you're pointing at, so you never have to
   open a task to act on it; while you're reading one task's transcript they
@@ -1189,8 +1522,10 @@ quietly ignored.
   agent…" form, post to the board, and click a project's deadline to edit or
   clear it — all without leaving the browser. Live escalations get their own
   Attention panel at the top, one **Ack** button each, archiving that
-  message exactly as the CLI and the TUI do. It has no run, cancel or
-  manager directive; those live in the TUI and the CLI.
+  message exactly as the CLI and the TUI do. A task's page shows its
+  transcript tail and, under it, its history — the `task history` list.
+  It has no run, cancel or manager directive; those live in the TUI and
+  the CLI.
 
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="images/web-dark.png">
@@ -1200,8 +1535,66 @@ quietly ignored.
 - `quorum board read [topic]` — the raw message stream (`--json` for
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
+- `quorum task history <id>` — one task's life, oldest first (`--json`
+  for scripting); see [the life of a task](#watching-the-life-of-a-task).
 - `quorum manager journal` — what the manager did and why.
+- `quorum manager log` — one tick end to end, digest included.
 - `quorum manager notes` — what it is carrying forward between runs.
+
+### What it cost, what it delivered
+
+`quorum status` shows spend one task or one agent at a time. The questions
+you ask after a week are aggregate — what did this project cost, is one
+harness cheaper than another per merged PR, how long from queue to merge,
+how many tasks needed a second run — and `quorum usage` answers them off
+the same files:
+
+```
+$ quorum usage --by harness --since 7d
+usage by harness, tasks queued since 2026-08-27T09:00:00Z (7d)
+harness       tasks  reported  runs  reruns    cost  tokens  done     merged  queue→run  queue→done  done→merged
+claude            4       3/4     5       1  $11.31   15.8M     4  2/3 (67%)      2h25m       2h50m          35m
+codex             3            3               6.2M     2  1/2 (50%)        40m       3h10m        1d02h
+total             7       3/7     8       1  $11.31   22.0M     6  3/5 (60%)      1h38m       2h52m          40m
+```
+
+- `--by project` (the default), `harness`, `week` (ISO week, by when the
+  task was queued) or `agent` (the manager and every prompt agent, off
+  their ledgers: runs, how many raised or timed out, spend, median run
+  time). `--since 7d` / `36h` / `2w` / `90m` keeps the tasks queued in that
+  window — a task belongs to the moment it was queued, so a window is a
+  set of tasks, never runs sliced mid-task — and for `--by agent` the runs
+  made in it. `--json` gives the rows with every figure unrounded (spans in
+  seconds, with the median, mean and count behind each).
+- **`$` is the harness CLI's own figure**, summed over runs exactly as in
+  `status` (*What runs cost*, under [Setup](#setup)): for a subscription
+  claude session it is the CLI's notional API-rate cost, not a bill, and
+  quorum prices nothing. A harness that reports tokens but no cost — codex
+  — gets a token figure and an empty cost cell; one that reports nothing
+  is still *counted* in `tasks` and `runs`. The `reported` column says how
+  many of the row's tasks the `$` figure covers, so `3/4` next to `$11.31`
+  means that cost is four tasks' worth of work and three tasks' worth of
+  reported spend — a row mixing claude with codex has fewer tasks behind
+  its `$` than behind its tokens, and this is where you see it. Where a
+  row has no cost at all the column falls back to how many tasks reported
+  anything; either way it is shown only when not every task is covered, so
+  a blank cell means the figures cover the whole row.
+- The delivery columns come only from what was recorded: `queue→run` is
+  queueing to the first run, `queue→done` queueing to the `done` report,
+  `done→merged` the `done` report to the manager tick that first saw the
+  PR merged ([Merged pull requests](#merged-pull-requests)) — so it is late
+  by up to one tick, never early, and a merge seen before the harness said
+  done reads as zero. Each is a median over the tasks that have the figure.
+  `merged` is `2/3 (67%)`: merged PRs over the PRs the manager *observed*
+  in any state, not over every done task — with no `gh`, `[ci]` off or a
+  supervisor that was never up while the PR was open there is no
+  observation, and no observation is not "not merged". Columns nothing
+  fills are dropped, so a home without a forge shows no delivery columns
+  at all rather than a column of zeros.
+- It is a pure reader — `task.json`, each task's `reports.jsonl` and the
+  agent ledgers — with no cache and no network, so it works with the
+  supervisor stopped and always reflects the files as they are now. An
+  archived task (`task prune`) leaves the figures the moment it is moved.
 
 ## Getting notified
 
@@ -1615,6 +2008,7 @@ def test_milestone(tmp_path):
   tasks/<id>/transcript.jsonl       the harness's stdout, line by line
   tasks/<id>/reports.jsonl          what the task reported
   tasks/<id>/notes.jsonl            its notebook (what it keeps between runs)
+  tasks/<id>/handoff.md             its handoff for dependents (`--handoff`)
   tasks/<id>/runner.lock            pid of a live run
   tasks/.archive/<id>/              pruned tasks (moved here whole, never deleted)
   worktrees/<id>/                   the task's git worktree
@@ -1630,6 +2024,9 @@ def test_milestone(tmp_path):
   state/manager/usage.jsonl         what each manager run cost and how it
                                     ended (agents get the same file under
                                     state/agents/<name>/)
+  state/manager/runs/<run>.md       the digest each tick was given, so
+                                    `manager log` can show what it saw
+                                    (newest fifty, head-truncated)
   state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
