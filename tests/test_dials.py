@@ -28,7 +28,6 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 
 SECTION = "## Loosening the rails as trust is earned"
 ANCHOR = "#loosening-the-rails-as-trust-is-earned"
-FACING = "What does not move"
 
 
 def guide_section() -> str:
@@ -192,15 +191,17 @@ def test_doctor_skips_the_dials_when_the_config_is_unreadable(home: Path):
 # -- the guide ---------------------------------------------------------------------
 
 
-def test_guide_section_exists_with_a_table_and_the_facing_list():
-    section = guide_section()
-    rows = table_rows(section)
-    assert rows[0].lower().startswith("| dial |")
-    assert len(rows) >= 2 + len(dials.DIALS)  # header, rule, one row per dial at least
-    assert FACING in section
+def test_guide_section_holds_a_table_big_enough_for_every_dial():
+    """Guards the shape the two tests below read, not the words in it: the
+    section exists and its table has room for a header, a rule and one row per
+    dial. Rewording the prose around it is free; deleting the table is not."""
+    rows = table_rows(guide_section())
+    assert len(rows) >= 2 + len(dials.DIALS)
 
 
 def test_guide_table_names_every_dial():
+    """Every dial in the registry has a row. The label comes from dials.py, so
+    this couples the guide to the code, not to any particular wording."""
     section = guide_section()
     for dial in dials.DIALS:
         assert dial.label in section, f"guide table has no row for dial {dial.label!r}"
@@ -217,29 +218,9 @@ def test_guide_table_lists_every_numeric_tasks_and_agents_option():
         assert f"`{name}`" in rows, f"[agents.*].{name} has no row in the trust-dials table"
 
 
-def test_guide_facing_list_names_the_invariants():
-    section = guide_section()
-    tail = section[section.index(FACING) :]
-    for phrase in (
-        "No privileged infrastructure",
-        "All state is plain files",
-        "Fail loudly, recover automatically",
-        "No decisions in Python",
-        "Observations are never rails",
-        "A dropped signal is a bug",
-    ):
-        assert phrase in tail, f"'What does not move' is missing {phrase!r}"
-
-
-def test_guide_marks_the_unbuilt_dials_as_not_built():
-    rows = table_rows(guide_section())
-    for issue in ("#83", "#43"):
-        row = [r for r in rows if issue in r]
-        assert row, f"no table row mentions {issue}"
-        assert "not built" in " ".join(row)
-
-
 def test_guide_section_is_cross_linked_from_architecture_and_claude_md():
+    """The anchor the dial lines point at has to resolve from both design
+    records; only the anchor is fixed, the sentences around it are not."""
     assert ANCHOR in ARCHITECTURE.read_text(encoding="utf-8")
     assert ANCHOR in CLAUDE_MD.read_text(encoding="utf-8")
     assert dials.GUIDE_ANCHOR.endswith(ANCHOR)

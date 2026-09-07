@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import install_gh
+from conftest import harness_table, install_gh, make_repo
 from quorum import fsio
 from quorum.cli import app
 
@@ -104,32 +104,14 @@ def test_run_once_rejects_an_unknown_agent(home: Path):
 
 
 def setup_task_env(home: Path, tmp_path: Path) -> str:
-    """A registered git project plus a fake-harness config; returns the slug."""
-    import subprocess
-    import sys
-
+    """A registered project plus a fake-harness table (no default harness yet,
+    which several tests here depend on); returns the slug."""
     from quorum.projects import ProjectRegistry
 
-    repo = tmp_path / "cliproj"
-    repo.mkdir()
-
-    def git(*args):
-        subprocess.run(
-            ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=T", *args],
-            check=True, capture_output=True,
-        )
-
-    git("init", "-q")
-    (repo / "f.txt").write_text("x")
-    git("add", ".")
-    git("commit", "-qm", "init")
+    repo = make_repo(tmp_path, "cliproj")
     ProjectRegistry(home).add(repo, name="cliproj")
-    fake = Path(__file__).parent / "bin" / "fake_harness.py"
     with open(home / "config.toml", "a", encoding="utf-8") as f:
-        f.write(
-            "\n[harness.fake]\n"
-            f'start = ["{sys.executable}", "{fake}"]\n'
-        )
+        f.write("\n" + harness_table(resume=False))
     return "cliproj"
 
 

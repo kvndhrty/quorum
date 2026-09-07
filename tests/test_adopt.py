@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from conftest import make_repo
 from quorum import fsio
 from quorum.agents.manager import build_digest
 from quorum.cli import app
@@ -22,7 +23,6 @@ from quorum.messages import MessageBus
 from quorum.projects import ProjectRegistry
 from quorum.runner import RunnerError, run_task
 from quorum.tasks import TaskStore, attached_state, inbox_name
-from test_tasks import make_repo
 
 runner = CliRunner()
 

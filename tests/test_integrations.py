@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_repo
 from quorum.messages import MessageBus
 from quorum.tasks import TaskStore, attached_state, inbox_name
-from test_tasks import make_repo
 
 INTEGRATIONS = Path(__file__).parent.parent / "integrations"
 DRIVER = Path(__file__).parent / "bin" / "opencode_plugin_driver.mjs"
