@@ -94,6 +94,10 @@ def test_parse_since_accepts_units_and_rejects_the_rest():
     for bad in ("", "7", "d", "0d", "-1d", "3x", "1.5d", "7 days"):
         with pytest.raises(ValueError, match="--since wants"):
             stats.parse_since(bad)
+    # a count a timedelta itself refuses is still a ValueError, not an
+    # OverflowError out of the constructor
+    with pytest.raises(ValueError, match="longer than any date"):
+        stats.parse_since("9" * 30 + "d")
 
 
 def test_by_project_counts_every_task_and_sums_only_what_was_reported(home: Path):
@@ -104,6 +108,9 @@ def test_by_project_counts_every_task_and_sums_only_what_was_reported(home: Path
 
     alpha = rows["alpha"]
     assert (alpha["tasks"], alpha["tasks_with_usage"], alpha["runs"], alpha["reruns"]) == (3, 3, 4, 1)
+    # all three reported something, but only the two claude tasks reported a
+    # cost: $4.50 covers two of the three, and the row says so
+    assert alpha["tasks_with_cost"] == 2
     # usage.total's reduction: a sum across the four runs, `runs` = runs that reported
     assert alpha["usage"]["cost_usd"] == pytest.approx(4.5)
     assert alpha["usage"]["total_tokens"] == 500 * 3 + 1200
@@ -119,6 +126,7 @@ def test_by_project_counts_every_task_and_sums_only_what_was_reported(home: Path
     beta = rows["beta"]
     # c2 reported nothing and never ran: counted, not estimated
     assert (beta["tasks"], beta["tasks_with_usage"], beta["runs"], beta["reruns"]) == (2, 1, 1, 0)
+    assert beta["tasks_with_cost"] == 1
     assert beta["usage"]["cost_usd"] == pytest.approx(1.5) and beta["usage"]["runs"] == 1
     assert beta["observed"] == 0 and beta["merged"] == 0 and beta["share_merged"] is None
     # w2 is done by a hand-edited status with no `done` report: done, no figure
@@ -139,6 +147,8 @@ def test_by_harness_gives_the_tokens_only_harness_tokens_and_no_cost(home: Path)
     assert "cost_usd" not in rows["codex"]["usage"]
     assert rows["codex"]["usage"]["total_tokens"] == 1200
     assert (rows["codex"]["tasks"], rows["codex"]["tasks_with_usage"]) == (2, 1)
+    # a harness that never reports a cost covers no task with one
+    assert rows["codex"]["tasks_with_cost"] == 0 and rows["claude"]["tasks_with_cost"] == 3
 
 
 def test_by_week_dates_a_task_by_when_it_was_queued(home: Path):
@@ -280,7 +290,8 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
     assert claude.split() == ["claude", "3", "4", "1", "$6.00", "2.0k", "3", "1/2", "(50%)", "10m", "1h30m", "30m"]
     # tokens but no cost: an empty cost cell, and the share over observed PRs only
     assert codex.split() == ["codex", "2", "1/2", "1", "1.2k", "1", "1/1", "(100%)", "5m", "30m", "0m"]
-    assert total.split()[:7] == ["total", "5", "4/5", "5", "1", "$6.00", "3.2k"]
+    # 3/5, not 4/5: the coverage of the $ figure, which the codex task is not in
+    assert total.split()[:7] == ["total", "5", "3/5", "5", "1", "$6.00", "3.2k"]
     assert "medians" in r.output and "harness's own figures" in r.output
 
     # no observation anywhere: the delivery columns are gone, not zero
@@ -294,6 +305,27 @@ def test_cli_table_is_plain_when_piped_and_drops_what_nothing_fills(home: Path):
     header = r.output.split("\n")[1].split()
     assert "merged" not in header and "done→merged" not in header and "queue→done" in header
 
+
+def test_cli_reported_column_says_what_the_cost_covers(home: Path):
+    build_home(home)
+    r = runner.invoke(app, ["usage", "--by", "project", "--home", str(home)])
+    assert r.exit_code == 0, r.output
+    lines = r.output.split("\n")
+    assert "reported" in lines[1].split()
+    alpha = next(line for line in lines if line.startswith("alpha "))
+    # alpha's three tasks all reported usage, but the codex one reported no
+    # cost: $4.50 is the cost of two of them, and the cell must not be blank
+    assert alpha.split()[:6] == ["alpha", "3", "2/3", "4", "1", "$4.50"]
+    # a group with no cost at all falls back to what reported anything
+    codex = next(
+        line
+        for line in runner.invoke(
+            app, ["usage", "--by", "harness", "--home", str(home)]
+        ).output.split("\n")
+        if line.startswith("codex ")
+    )
+    assert codex.split()[:3] == ["codex", "2", "1/2"]
+    assert "tasks the cost covers" in r.output
 
 def test_cli_by_agent_and_since_and_json(home: Path):
     usage.record_agent_run(home, "manager", "r1", CLAUDE_RUN, now=T0, outcome="ok", duration_seconds=12)
@@ -328,6 +360,10 @@ def test_cli_says_when_nothing_is_recorded(home: Path):
 def test_cli_rejects_a_bad_since_and_an_unknown_dimension(home: Path):
     r = runner.invoke(app, ["usage", "--since", "3x", "--home", str(home)])
     assert r.exit_code == 1 and "--since wants a positive count" in r.output
+    # a window no instant is that far along: the same rejection, not a traceback
+    r = runner.invoke(app, ["usage", "--since", "99999999d", "--home", str(home)])
+    assert r.exit_code == 1 and "--since window reaches before any date" in r.output
+    assert "Traceback" not in r.output
     r = runner.invoke(app, ["usage", "--by", "model", "--home", str(home)])
     assert r.exit_code != 0 and "project" in r.output
     r = runner.invoke(app, ["usage", "--by", "WEEK", "--home", str(home)])

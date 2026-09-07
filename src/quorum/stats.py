@@ -65,11 +65,20 @@ _UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
 
 def parse_since(text: str) -> timedelta:
     """`7d` / `36h` / `2w` / `90m` → a timedelta. ValueError for anything else
-    (including `0d`: an empty window is a typo, not a request)."""
+    (including `0d`: an empty window is a typo, not a request).
+
+    A count too large for a timedelta raises ValueError too, not the
+    OverflowError the constructor would: the caller rejects one bad `--since`
+    with one message, and a number nobody can type by accident is still a
+    typo.
+    """
     m = _SINCE.match(text or "")
     if not m or int(m.group(1)) <= 0:
         raise ValueError(f"--since wants a positive count with a unit, e.g. 7d, 36h, 2w: {text!r}")
-    return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
+    try:
+        return timedelta(**{_UNITS[m.group(2)]: int(m.group(1))})
+    except OverflowError:
+        raise ValueError(f"--since window is longer than any date can express: {text!r}") from None
 
 
 def _dt(value: Any) -> datetime | None:
@@ -160,10 +169,18 @@ def _task_row(key: str, group: Sequence[dict[str, Any]]) -> dict[str, Any]:
     spent = usage.total(u for f in group for u in f["run_usages"])
     observed = sum(1 for f in group if f["observed"])
     merged = sum(1 for f in group if f["merged"])
+    per_task = [usage.total(f["run_usages"]) for f in group]
     return {
         "key": key,
         "tasks": len(group),
-        "tasks_with_usage": sum(1 for f in group if usage.total(f["run_usages"]) is not None),
+        "tasks_with_usage": sum(1 for t in per_task if t is not None),
+        # How many tasks the `cost` figure covers, which is not how many
+        # reported *something*: a harness that reports tokens and no cost is
+        # in `tasks_with_usage` and not here. Without this a group mixing
+        # harnesses shows a cost over every task in it and no sign that it
+        # only covers some. A zero cost says nothing and is not coverage,
+        # the same reading `usage.describe` and the CLI's cost cell take.
+        "tasks_with_cost": sum(1 for t in per_task if usage.number((t or {}).get("cost_usd"))),
         "runs": sum(f["runs"] for f in group),
         # Every run after a task's first: what a relaunch or a resume cost in
         # attempts. An attached task has no runs and so no reruns.
@@ -265,7 +282,14 @@ def report(
         raise ValueError(f"--by wants one of {', '.join(DIMENSIONS)}: {by!r}")
     home = Path(home)
     moment = now() if callable(now) else (now or fsio.utc_now())
-    cutoff = moment - since if since is not None else None
+    try:
+        cutoff = moment - since if since is not None else None
+    except OverflowError:
+        # A window that reaches before year 1. `parse_since` catches the
+        # counts a timedelta itself refuses; this catches the ones it holds
+        # but no instant is that far along, and both reach the CLI as the
+        # same rejection.
+        raise ValueError(f"--since window reaches before any date: {since}") from None
     if by == "agent":
         rows, total = agent_rows(home, cutoff)
     else:

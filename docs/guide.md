@@ -1171,7 +1171,7 @@ usage by harness, tasks queued since 2026-08-27T09:00:00Z (7d)
 harness       tasks  reported  runs  reruns    cost  tokens  done     merged  queue→run  queue→done  done→merged
 claude            4       3/4     5       1  $11.31   15.8M     4  2/3 (67%)      2h25m       2h50m          35m
 codex             3            3               6.2M     2  1/2 (50%)        40m       3h10m        1d02h
-total             7       6/7     8       1  $11.31   22.0M     6  3/5 (60%)      1h38m       2h52m          40m
+total             7       3/7     8       1  $11.31   22.0M     6  3/5 (60%)      1h38m       2h52m          40m
 ```
 
 - `--by project` (the default), `harness`, `week` (ISO week, by when the
@@ -1187,10 +1187,14 @@ total             7       6/7     8       1  $11.31   22.0M     6  3/5 (60%)    
   claude session it is the CLI's notional API-rate cost, not a bill, and
   quorum prices nothing. A harness that reports tokens but no cost — codex
   — gets a token figure and an empty cost cell; one that reports nothing
-  is still *counted* in `tasks` and `runs`, and the `reported` column
-  (shown only when not every task reported) says how many tasks the cost
-  and token figures actually cover, so `$11.31` over three reporting tasks
-  is never read as the cost of four.
+  is still *counted* in `tasks` and `runs`. The `reported` column says how
+  many of the row's tasks the `$` figure covers, so `3/4` next to `$11.31`
+  means that cost is four tasks' worth of work and three tasks' worth of
+  reported spend — a row mixing claude with codex has fewer tasks behind
+  its `$` than behind its tokens, and this is where you see it. Where a
+  row has no cost at all the column falls back to how many tasks reported
+  anything; either way it is shown only when not every task is covered, so
+  a blank cell means the figures cover the whole row.
 - The delivery columns come only from what was recorded: `queue→run` is
   queueing to the first run, `queue→done` queueing to the `done` report,
   `done→merged` the `done` report to the manager tick that first saw the

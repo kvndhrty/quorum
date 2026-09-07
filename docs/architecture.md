@@ -418,10 +418,15 @@ the rules of theme #88:
   file, not the bounded tail the views take: a report may spend the read a
   tick may not). A task whose runs reported nothing is counted in `tasks`
   and `runs` and adds nothing to `cost` or `tokens`; `tasks_with_usage`
-  (the `reported` column, shown only when not every task reported) says
-  how many did, so a total over three reporting tasks out of ten is never
-  read as the cost of ten. A harness that reports tokens but no cost gets
-  a token figure and an empty cost cell. Nothing is estimated.
+  says how many reported anything and `tasks_with_cost` how many reported a
+  cost, so a total over three reporting tasks out of ten is never read as
+  the cost of ten. A harness that reports tokens but no cost gets a token
+  figure and an empty cost cell — which makes the two counts differ in any
+  group mixing harnesses, and is why the `reported` column renders
+  `tasks_with_cost` wherever a cost is shown and `tasks_with_usage` only
+  where there is none: the `$` is the figure a reader takes for the whole
+  row, so the column has to be the `$`'s own coverage. It is shown only
+  when the count differs from `tasks`. Nothing is estimated.
 - **Delivery figures come only from the merged observation.** `merged` is
   `pr_state == "merged"` on the record, and `share_merged` is measured over
   the tasks with *any* `pr_state` — the PRs the manager observed — never

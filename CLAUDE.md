@@ -211,7 +211,11 @@ so the record stays true.
   which `updated_at` does not hold) and the agent ledgers — no cache, no
   network. Spend is one `usage.total` over every run in a group (never a
   re-derived reduction); a task that reported nothing is counted, never
-  estimated, and `tasks_with_usage` says how many did. `share_merged` is
+  estimated, and `tasks_with_usage`/`tasks_with_cost` say how many
+  reported anything and how many reported a cost — the `reported` column
+  is the *cost's* coverage wherever a cost is shown, since a group mixing
+  a costing harness with a tokens-only one has fewer tasks behind its `$`
+  than behind its tokens. `share_merged` is
   over tasks with *any* `pr_state`, never over done tasks (absence is not
   "not merged"), and `done_to_merged` ends at `pr_state_at`, the tick that
   first saw the merge. `--since` and `week` both read `created_at`.

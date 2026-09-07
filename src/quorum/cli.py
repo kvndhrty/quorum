@@ -664,13 +664,11 @@ def usage_cmd(
     from . import stats
 
     target = get_home(home)
-    window = None
-    if since is not None:
-        try:
-            window = stats.parse_since(since)
-        except ValueError as e:
-            raise _fail(str(e)) from None
-    payload = stats.report(target, by=by.value, since=window)
+    try:
+        window = stats.parse_since(since) if since is not None else None
+        payload = stats.report(target, by=by.value, since=window)
+    except ValueError as e:
+        raise _fail(str(e)) from None
     if json_out:
         typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
         return
@@ -693,7 +691,7 @@ def usage_cmd(
     _print_table(_task_usage_table(by.value, rows))
     typer.echo(
         "cost/tokens: the harness's own figures, summed over the runs that reported them\n"
-        "reported: tasks that reported any usage, when not all did\n"
+        "reported: tasks the cost covers (or, with no cost, that reported anything)\n"
         "queue→run / queue→done / done→merged: medians\n"
         "merged: over the PRs the manager observed — none observed, no figure"
     )
@@ -999,10 +997,15 @@ def _spend_cells(spent: dict | None) -> dict[str, str]:
 def _task_usage_cells(by: str, r: dict) -> dict[str, str]:
     from . import stats
 
-    reported = r["tasks_with_usage"]
     merged = ""
     if r["observed"]:
         merged = f"{r['merged']}/{r['observed']} ({round(100 * r['share_merged'])}%)"
+    spend = _spend_cells(r["usage"])
+    # How many tasks the figures beside it cover — the cost's own coverage
+    # wherever a cost is shown, since a row mixing a costing harness with a
+    # tokens-only one has fewer tasks behind its `$` than behind its tokens,
+    # and the cost is the number a reader takes for the whole row.
+    reported = r["tasks_with_cost"] if spend["cost"] else r["tasks_with_usage"]
     return {
         by: r["key"],
         "tasks": str(r["tasks"]),
@@ -1010,7 +1013,7 @@ def _task_usage_cells(by: str, r: dict) -> dict[str, str]:
         "reported": f"{reported}/{r['tasks']}" if reported != r["tasks"] else "",
         "runs": str(r["runs"]),
         "reruns": _count(r["reruns"]),
-        **_spend_cells(r["usage"]),
+        **spend,
         "done": _count(r["done"]),
         "merged": merged,
         "queue→run": stats.describe_summary(r["queue_to_run"]),
