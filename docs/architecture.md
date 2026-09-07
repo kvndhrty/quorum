@@ -22,7 +22,7 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    passively. Supervision itself, however, is deliberately *not*
    degradable: the manager **is** a harness run, and without a working
    harness its tick raises — visibly, every tick — while `auto_pause =
-   false` keeps the schedule firing so the first tick after the LLM
+   false` keeps the schedule firing so the first tick after the model
    service returns reads the situation from files and reinvokes whatever
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
@@ -1915,23 +1915,20 @@ Two files in a project directory are quorum's by convention, both read-only:
 the `.quorum.toml` marker above, and `.quorum/task-preamble.local.md`, which
 fills the task preamble's `{project}` slot (see [Prompts](#prompts)).
 
-## LLM layer
+## Model calls
 
-`LLMBackend` is a one-method protocol: prompt in, completion out. The `cli`
-backend shells out to any configured executable; `[llm].input` selects stdin
-piping or argv substitution. `LLMClient.complete()` never raises — `None`
-means "no LLM today" and every caller has a deterministic fallback. Prompts
-come from user-editable templates in `prompts/` (`quorum.prompts`). Note the
-LLM layer is for *plugin agents'* small completions; neither task harnesses
-nor the manager's harness go through it — both are invoked directly as
-subprocesses via the `[harness.*]` templates.
+There is one way to reach a model: a `[harness.<name>]` argv template, run as
+a subprocess. Task runs go through `quorum.runner`; the manager and prompt
+agents go through `agents/harness_run.run_agent_harness`, and a plugin agent
+that wants a model call uses the same function — it takes the agent's
+`AgentContext`, resolves the agent's harness, and returns the run id after
+streaming the harness output to the agent's transcript.
 
-### Design seam: managed auth proxy
-
-`[llm].backend = "proxy"` is reserved: a supervisor-managed localhost proxy
-injecting API credentials so subprocesses never see raw keys — most likely
-over nono-py's `start_proxy`. Everything goes through `LLMBackend`, so no
-other module may assume the `cli` backend.
+There used to be a second way: a `[llm]` table and an `LLMClient` for plugin
+agents' small completions, with a `proxy` backend reserved for a
+supervisor-managed credential proxy. Nothing in shipped code called it, so it
+was removed. A leftover `[llm]` table in config.toml is an unknown table and
+pydantic ignores it.
 
 ## Sandbox (optional)
 
@@ -1948,7 +1945,7 @@ nono-py, always lazily:
    quorum package dir — derived at runtime from `sys`/`sysconfig`) is granted
    read; nono's `system_read_*` policy groups supply the loader/libc baseline
    without which no child can exec at all.
-3. **Per-task / per-LLM-call**: `[sandbox].use_nono = true`. Each task run
+3. **Per-task**: `[sandbox].use_nono = true`. Each task run
    applies `build_task_capabilities` to itself (runner process + harness
    children): write on `QUORUM_HOME`, the worktree, the project's `.git`,
    and `[sandbox].task_write` extras (harness state dirs like `~/.claude`);
@@ -1962,10 +1959,14 @@ quorum functional), a non-empty `network` list keeps mode 2's network open,
 and an unreadable profile raises `SandboxUnavailable` — never a narrower
 sandbox than the user asked for. The same file works verbatim with the nono
 binary in mode 1.
-   Plugin agents' LLM subprocess calls go through `sandboxed_exec` with the
-   narrower `build_capabilities` set (network blocked unless `[llm]` is
-   configured; stdin prompts staged as ULID-named files under
-   `state/llm/` since `sandboxed_exec` cannot pipe stdin).
+
+Mode 2's network rule is worth stating plainly: `build_capabilities` blocks
+the network unless the profile file grants it. Mode 2 applies to the
+supervisor process and therefore to every child it spawns, so under
+`quorum up --self-sandbox` the manager's harness has no network either, and
+a harness-driven manager needs a `profile_file` whose `network` list is
+non-empty. Blocking by default is what keeps the mode fail-closed: opening
+the network is the user's explicit act, not an inference quorum makes.
 
 The asymmetry is the design: a sandboxed quorum can *see* the machine, but
 the only durable marks it can leave are `QUORUM_HOME`, the worktrees, and
@@ -2043,8 +2044,8 @@ half of the seeding logic `quorum init` acts on.
 ## Testing strategy
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME`), `clock`
-(injectable `FakeClock`), and `fake_llm`. Three purpose-built fake CLIs live
-in `tests/bin/`: `fake_llm.py` (canned completions), `fake_gh.py` (a GitHub
+(injectable `FakeClock`). Two purpose-built fake CLIs live
+in `tests/bin/`: `fake_gh.py` (a GitHub
 CLI installed onto a PATH stripped down to real git, so the CI probe's
 no-gh / no-auth / no-PR / garbage / hung branches are all reachable — and
 so a developer's real `gh` can never reach the network from a test), and
