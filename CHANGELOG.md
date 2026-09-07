@@ -353,6 +353,29 @@ minute it is posted.
   lists the five properties that fence it — this is the case that note said
   to revisit for. (#57)
 
+### Removed
+- The `llm/` package and the `[llm]` config table. It provided plugin agents
+  with a small-completion client (`LLMClient.complete()`, a `cli` backend
+  shelling out to a configured executable, and a `proxy` backend that was a
+  raising stub); nothing in shipped code called it, and the sandbox's
+  `sandboxed_exec` leg — the `/bin/sh` stdin-staging hop and the
+  `state/llm/` staging directory — existed only to run it. `AgentContext.llm`
+  is gone with it. A plugin agent that wants a model call now runs a harness
+  itself: `quorum.agents.harness_run.run_agent_harness(ctx, prompt)`, the
+  same function the manager and prompt agents use, which resolves the
+  agent's `[harness.*]` table, applies the per-run action cap and streams
+  the run to the agent's transcript. The shipped `examples/steward.py` lost
+  its optional classification of unmatched files; it reports them on the
+  board and leaves them in place, as it already did without an LLM
+  configured.
+- `sandbox.build_capabilities` no longer opens the network for a configured
+  `[llm]` executable, and no longer grants that executable read access. It
+  now blocks the network unless `[sandbox].profile_file` lists a non-empty
+  `network`. This is the mode-2 capability set (`quorum up --self-sandbox`),
+  which applies to the supervisor and every child it spawns, so a
+  harness-driven manager under mode 2 needs that grant. Task runs are
+  unaffected: `build_task_capabilities` leaves the network open as before.
+
 ### Fixed
 - Notebook fixes from the review of the task-notebook change: a
   `tasks/<id>/notes.jsonl` that cannot be read at all — a directory, or a
@@ -397,6 +420,12 @@ minute it is posted.
   and the count now happen under the same lock the close check takes.
 
 ### Upgrading
+- A `[llm]` table left in config.toml is **ignored**, not rejected: the
+  config model does not forbid unknown tables, and that behaviour is
+  unchanged. Nothing reads the table, so delete it when convenient. If a
+  plugin agent of yours called `ctx.llm.complete()`, it will now raise
+  `AttributeError` — rewrite it against
+  `quorum.agents.harness_run.run_agent_harness`.
 - Prompt seeds are now recognized by `prompts/.seeded.json`, which the
   first `quorum init` on this version writes for every prompt copy that
   matches the packaged default. A copy that is an *older* unedited seed at

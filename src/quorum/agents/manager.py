@@ -15,7 +15,7 @@ worked and never loops on one that didn't.
 There is deliberately **no deterministic fallback**: without a working
 harness the tick raises, crash isolation records the failure, and — because
 the manager's config sets `auto_pause = false` — the schedule keeps firing,
-so the first tick after the LLM service returns reads the situation from
+so the first tick after the model service returns reads the situation from
 files and reinvokes whatever needs reinvoking. Dead runners keep the wake
 condition true precisely so that recovery is automatic.
 """
