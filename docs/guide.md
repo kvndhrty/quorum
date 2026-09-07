@@ -44,7 +44,7 @@ A harness block is an argv template with `{prompt}` and `{session}`
 substituted into it. Runs are unattended, so the harness needs permission to
 act without asking: one that stops for an interactive prompt stalls silently.
 The shipped blocks grant a scoped tool allowlist rather than a blanket bypass,
-covering file edits, git, `gh`, and quorum's own CLI, which is how the harness
+covering file edits, git and quorum's own CLI, which is how the harness
 reports progress. Full detail in [Harnesses](#harnesses).
 
 Then check the setup against reality:
@@ -62,7 +62,8 @@ quorum project add ~/work/my-api
 quorum project list
 ```
 
-The slug is the directory name unless you pass `--name`.
+The slug is a slugified form of the directory name, or of `--name` when you
+pass one.
 
 ### 3. Queue a task
 
@@ -132,7 +133,7 @@ quorum status
 supervisor: running (pid 4711, since 2026-08-30T22:10:04Z)
 
 agents:
-name       status  schedule  last run              usage
+name       status  schedule  last                  usage
 ● manager  idle    every 5m  2026-08-30T22:35:02Z  $0.31 · 84.0k tok
 
 tasks:
