@@ -206,7 +206,7 @@ def test_task_add_checks_everything_it_can_before_consuming_stdin(
     """A piped issue is gone the moment stdin is drained, so nothing that can
     be checked without it — the slug, the harness, `--after` — may be checked
     after it."""
-    from quorum import cli
+    from quorum.cli import _common as cli
 
     slug = setup_task_env(home, tmp_path)
     read: list[str] = []
@@ -232,7 +232,7 @@ def test_task_add_checks_everything_it_can_before_consuming_stdin(
 def test_task_add_says_it_is_waiting_on_a_typed_prompt(home: Path, tmp_path: Path, monkeypatch):
     """`-` with nothing piped in blocks on a read that otherwise looks like a
     hang; a piped one says nothing extra."""
-    from quorum import cli
+    from quorum.cli import _common as cli
 
     slug = setup_task_env(home, tmp_path)
     args = ["task", "add", slug, "-", "--harness", "fake"]
@@ -1078,7 +1078,7 @@ def test_project_set_reads_the_notes_the_way_a_prompt_is_read(home: Path, tmp_pa
 def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path: Path, monkeypatch):
     """Piped notes are gone the moment stdin is drained, so a typo in the
     slug must not eat them — the rule `task add` already follows."""
-    from quorum import cli
+    from quorum.cli import _common as cli
     from quorum.projects import ProjectRegistry
 
     slug = setup_task_env(home, tmp_path)
