@@ -7,6 +7,13 @@ behaviour, patch bumps are fixes only).
 
 The PyPI distribution is `quorum-orchestrator`; the CLI and import name are `quorum`.
 
+Every pull request appends to the same `[Unreleased]` list, so two branches
+nearly always touch adjacent lines here. `.gitattributes` marks this file
+`merge=union` for that reason: a merge keeps both sides' bullets instead of
+reporting a conflict over lines that do not disagree. Read the merged list
+before a release — union can duplicate or reorder a bullet both branches
+edited.
+
 ## [Unreleased]
 
 The "Operate unattended" package (#67): a home should run for a week without
@@ -354,6 +361,32 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Fixed
+- A `runner.lock` holding valid JSON that is not an object (hand-edited, or
+  truncated and refilled) no longer fails the manager tick. The liveness and
+  stall readings called `.get()` / `["started_at"]` on whatever the file
+  held and caught neither the AttributeError nor the TypeError that
+  followed, so one bad lock raised out of every digest build until someone
+  deleted the file. Every state-file read now goes through
+  `fsio.read_json_or` (a dict or the caller's default, never a raise) and
+  every lock read through `fsio.read_pid` (an int pid or None).
+- `quorum task history`, the TUI history tab and the web task detail no
+  longer fail over a corrupt message archive. The archive scan caught
+  `gzip.BadGzipFile` and EOFError but not `zlib.error`, which is what gzip
+  raises when the damage is inside the compressed data rather than at its
+  start or end. Both scanners of the archive are now one function
+  (`MessageBus.archived_records`), so the views and `task export` cannot
+  disagree about what a damaged month means.
+- Reading a pid out of a lock file is one function instead of five
+  hand-written try/except blocks that disagreed about which exceptions to
+  catch: `task inbox`, `tasks.runner_alive` (which the views, the digest and
+  doctor all call) and `task cancel --kill` each read the record inside the
+  try and used it outside, so a lock that was not an object raised past the
+  handler.
+- An out-of-range cron field (`schedule = "cron 99 * * * *"`) is rejected
+  when the config is loaded instead of raising out of `quorum up`. The
+  schedule pattern only counted five fields; the expression is now handed to
+  APScheduler's own parser at validation time, so a bad `agents/<name>.toml`
+  is one named config error rather than a supervisor that will not start.
 - Six review leftovers from the package (#81): a PR still `open` is no
   longer recorded onto a live task's `task.json` — the one file its own
   runner is concurrently writing, and a state no surface renders — while a
