@@ -63,6 +63,17 @@ it. Don't contort a feature to fit an old rule; propose breaking the rule, and
 when it changes, update this file and `docs/architecture.md` in the same commit
 so the record stays true.
 
+Two lists keep the *dials* apart from the *invariants*:
+`docs/guide.md#loosening-the-rails-as-trust-is-earned` tables every setting
+that records current trust in the model (launch cap, `max_actions_per_run`,
+`run_timeout_seconds`, the per-run budget, the stall watchdog, manager
+cadence, who launches / decomposes / merges) with its home, default and
+loosening condition, facing "What does not move". A dial moves by editing
+the value where it lives; an invariant moves only through the process above.
+`dials.py` is the registry behind the table and behind doctor's `dial.*`
+lines, and `tests/test_dials.py` fails when a numeric `[tasks]`/`[agents]`
+option with a default has no row.
+
 ### Layers
 
 - `fsio.py` — the primitives everything else stands on: `atomic_write_*` (dot-prefixed
@@ -202,9 +213,12 @@ so the record stays true.
   `state/agents/<name>/usage.jsonl`) — every run, failures included, read back
   over a bounded tail by `usage.agent_usage`. Views/`quorum status`/the digest
   surface both (the digest opens with the manager's own spend).
-  `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) only *flag* an
-  over-budget run (`BUDGET-EXCEEDED`, `$!`) — an observation of the same
-  class as `possible-loop`; enforcement is deliberately not implemented.
+  `[tasks].max_cost_per_run`/`max_tokens_per_run` (0 = off) flag an
+  over-budget run (`BUDGET-EXCEEDED`, `$!`) in the digest and in views. A
+  task whose *last* run went over is then refused its next run by `task
+  run` (`runner.budget_blockers`/`budget_refusal`), waivable with
+  `--force`; nothing is killed mid-run and no particular choice is vetoed,
+  so the gate is a rate limit of the action cap's class, not a veto.
 - `transcript.py` — the **one** renderer of a transcript, and the one place
   that knows how each harness spells an event (`tool_call`, `session_id`,
   `normalize` — the seam `usage.py` owns for result events, which is why
@@ -403,6 +417,13 @@ so the record stays true.
   `prompts/babysitter.md`, never here. Optional `[ci]` table (`enabled`,
   `timeout_seconds`), shared with `forge.py` — the same two switches gate
   issue intake.
+- `dials.py` — the trust-dial registry: `DIALS` (key, label, where it lives,
+  default, a reader for the current value), `numeric_options` over a
+  pydantic config model (annotation-checked, so a `bool` switch is not a
+  dial) and `NUMERIC_AGENT_SETTINGS` for the per-agent settings the
+  `AgentConfig` model cannot enumerate. Reads config, decides nothing;
+  `DEFAULT_RUN_TIMEOUT_SECONDS` moved to `actor.py` beside the action cap so
+  both per-run agent defaults have one owner.
 - `doctor.py` — `quorum doctor`: the one place that looks at everything that
   fails soft (config, `[harness.*]` binaries/templates, git, projects, gh
   auth, herdr, nono, prompt staleness, supervisor lock + version, orphaned
@@ -422,7 +443,10 @@ so the record stays true.
   staleness through `home.classify_prompt`. A `✗` is reserved for something
   actually wrong — an offline gh and a fresh home with no harness yet are
   both `–`, so `quorum init && quorum doctor` exits 0. `check_config` is
-  the codebase's one deliberate strict `load_config` caller.
+  the codebase's one deliberate strict `load_config` caller. `check_dials`
+  ends the static run with one `–` per trust dial (`dial.<key>`, values
+  from `dials.current`, in `--json` too) — informational by construction,
+  and skipped with the rest when the config did not load.
 - `config.py` — one place to load config: `load_config` raises,
   `try_load_config` returns defaults for a *missing* file (the user said
   nothing) and None for a malformed/undecodable one — what the fail-soft

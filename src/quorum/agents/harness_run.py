@@ -18,6 +18,7 @@ from pathlib import Path
 from .. import fsio, usage
 from ..actor import (
     DEFAULT_MAX_ACTIONS_PER_RUN,
+    DEFAULT_RUN_TIMEOUT_SECONDS,
     actor_env,
     run_snapshot_path,
     runs_dir,
@@ -25,8 +26,6 @@ from ..actor import (
 )
 from ..agent import AgentContext
 from ..runner import build_harness_argv, guidance_pump, resolve_harness, stream_transcript
-
-DEFAULT_RUN_TIMEOUT_SECONDS = 300
 
 # What a run was given, kept so a later reader can see it (`quorum manager
 # log`). Bounded twice, because a tick every five minutes writes one of these
