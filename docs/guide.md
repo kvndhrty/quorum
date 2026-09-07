@@ -886,7 +886,7 @@ The mechanics behind all of this — the digest's exact contents, the actor
 env tag, the journal format — are in
 [architecture.md](architecture.md#the-manager).
 
-**When the LLM service is down, supervision halts loudly — and heals
+**When the model service is down, supervision halts loudly — and heals
 itself.** There is no dumbed-down fallback: the manager's tick simply fails
 (visible in `quorum status` and on the board), but its schedule keeps firing
 (`auto_pause = false`), so the first tick after service returns reads the
@@ -1872,8 +1872,12 @@ project's `.git`, and your `task_write` extras — nothing else. Readable:
 the interpreter's tree, the harness executable (resolved through `PATH`),
 nono's own system-read baseline (loader, system libraries — nothing can exec
 without them), and `task_read`. Network stays open, since a coding harness
-is assumed to need its API. The same flag also confines plugin agents'
-`[llm]` subprocess calls.
+is assumed to need its API.
+
+Mode 2 is the opposite: `quorum up --self-sandbox` blocks the network unless
+your profile file grants it, and it applies to the supervisor and every child
+it spawns — including the manager's harness. Run the manager under mode 2
+only with a `profile_file` whose `network` list is non-empty.
 
 **Fail-closed, all modes:** if sandboxing was requested and nono-py is
 missing or unsupported, the run does not happen unsandboxed — it fails loud.
@@ -1889,7 +1893,7 @@ plugin: a class with a synchronous `tick()`, dropped into
 
 A complete, tested example ships in the repo:
 [examples/steward.py](../examples/steward.py), a rule-based file organizer
-with undo, LLM-optional classification, and bounded retries. Copy it into
+with undo and bounded retries. Copy it into
 `~/.quorum/plugins/` and add:
 
 ```toml
@@ -1961,25 +1965,17 @@ Test it immediately: `quorum agent run-once wordcount`.
 | `ctx.bus.claim(name)` | consume your own inbox (call `.ack()` per message) |
 | `ctx.bus.read_after_cursor(topic, cursor)` | follow a board topic incrementally |
 | `ctx.projects.list()` / `.get(slug)` | registered projects, marker-merged |
-| `ctx.llm.complete(prompt)` | completion or `None` — always handle `None` |
 | `ctx.prompt(name, **placeholders)` | render a template from `prompts/` |
 | `ctx.load_state()` / `ctx.save_state(d)` | your private JSON state |
 | `ctx.log_action(type, text, **data)` | feed the dashboards' activity log |
 | `ctx.now()` | injectable clock |
 
-`ctx.llm` needs an optional `[llm]` table in config.toml (the manager does
-*not* use this — it runs a full harness); without one, `complete()` returns
-`None`:
-
-```toml
-[llm]
-backend = "cli"
-executable = "claude"
-args = ["-p"]
-input = "stdin"           # "stdin" | "argv" (use "{prompt}" in args)
-timeout_seconds = 120
-max_prompt_chars = 24000
-```
+There is no separate small-completion client: a plugin agent that wants a
+model call runs a harness, the same way the manager does. Give the agent a
+`harness` setting naming one of your `[harness.*]` tables and call
+`quorum.agents.harness_run.run_agent_harness(self.ctx, prompt)`; the run is
+synchronous, its output is streamed to `state/agents/<name>/transcript.jsonl`,
+and the per-run action cap applies as it does to any other agent run.
 
 **Testing** (see `tests/test_example_steward.py` for the full pattern):
 

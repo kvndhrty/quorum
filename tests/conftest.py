@@ -69,12 +69,6 @@ def clock() -> FakeClock:
 
 
 @pytest.fixture
-def fake_llm() -> list[str]:
-    """argv prefix invoking the canned-output fake LLM CLI."""
-    return [sys.executable, str(TESTS_BIN / "fake_llm.py")]
-
-
-@pytest.fixture
 def path_without_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A PATH holding only real git — so `gh` is provably absent until a test
     installs one (the dev machine running these tests very likely has a real
