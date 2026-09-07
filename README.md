@@ -40,6 +40,28 @@ From there: `quorum task log <id> -f` follows a run, `quorum task nudge <id>
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
 
+## What's genuinely different
+
+Two things had no equivalent in a 2026-08 survey of about thirty
+orchestration projects. That is a snapshot of a landscape that moves
+monthly, not a permanent claim — if you know of prior art,
+[open an issue](https://github.com/kvndhrty/quorum/issues).
+
+**Your live session becomes a supervised task.** `quorum task adopt` inverts
+the usual ownership: the interactive session you are already sitting in is
+recorded as a task the manager watches and sends guidance to, rather than
+one quorum spawned. The closest neighbour surveyed relays a session to your
+phone so that *you* can steer it; none handed the session to a supervisor.
+
+**The supervisor is the same harness, reading a file digest.** Among the
+open-source tools surveyed, supervision meant keystroke automation — daemons
+pressing enter, blind auto-confirmation. A model-driven supervisor appeared
+only in hosted products, where the inputs and the decisions stay in someone
+else's cloud. Here every input and decision is a file you can open: the task
+records the digest is computed from, the policy that reads it
+(`~/.quorum/prompts/manager.md`), and the journal of what it did and why
+(`quorum manager journal`).
+
 ## Documentation
 
 - **[docs/guide.md](https://github.com/kvndhrty/quorum/blob/main/docs/guide.md)** —
