@@ -28,7 +28,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .. import actor, ci, fsio, herdr, notes, tasks, usage
+from .. import actor, ci, fsio, herdr, notes, tasks, transcript, usage
 from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
 from ..agent import Agent
 from ..config import TasksConfig, load_config_or_default
@@ -104,21 +104,12 @@ LOOP_WINDOW_CALLS = 12
 LOOP_REPEAT_THRESHOLD = 4
 LOOP_DISTINCT_RATIO = 0.5
 
-# Tool-call extraction is harness-shape-dependent, so it is loose by design:
-# any nested dict tagged with one of these kinds counts as a call, whatever
-# harness emitted it (claude `tool_use`, codex `command_execution`, ...).
-# It only sees structured JSON events: a harness that prints plain text (the
-# shipped opencode template, most custom scripts) is unobservable here, and
-# the absence of a flag says nothing about it.
-TOOL_CALL_KINDS = frozenset(
-    {"tool_use", "tool_call", "function_call", "command_execution", "local_shell_call"}
-)
-TOOL_NAME_KEYS = ("name", "tool_name", "tool")
-TOOL_ARG_KEYS = ("input", "arguments", "argv", "args", "parameters", "params", "command", "cmd")
-# A harness may emit more than one event per call (codex pairs item.started
-# with item.completed, both carrying the full call); the call id is how one
-# call is counted once, whatever the event multiplicity.
-CALL_ID_KEYS = ("id", "call_id", "tool_use_id")
+# Tool-call extraction is harness-shape-dependent and lives in `transcript.py`
+# — the one place that knows how each harness spells an event, shared with the
+# narrative renderer so a harness added there is read here too. It only sees
+# structured JSON events: a harness that prints plain text (the shipped
+# opencode template, most custom scripts) is unobservable here, and the
+# absence of a flag says nothing about it.
 LOOP_RECURSION_DEPTH = 8
 
 
@@ -130,10 +121,9 @@ def _tool_fingerprints(node: object, depth: int = 0) -> list[tuple[str | None, s
     """Best-effort tool calls in one transcript entry: (call id, fingerprint).
 
     Walks the event structure rather than pattern-matching one harness's
-    schema. A call is a dict tagged with a TOOL_CALL_KINDS kind or carrying a
-    string `tool_name`; its fingerprint is `name + sha256(arguments)[:12]`,
-    the arguments taken from the first TOOL_ARG_KEYS hit. No recognized arg
-    key hashes the name alone — a coarser signal, but a predictable one (a
+    schema, asking `transcript.tool_call` what each node is; a call's
+    fingerprint is `name + sha256(arguments)[:12]`. No recognized arg key
+    hashes `null` alone — a coarser signal, but a predictable one (a
     whole-node fallback made any per-call counter or output field render
     every iteration of a genuine loop unique, so it could never fire). The
     call id, when present, lets the caller count a call once even when the
@@ -153,17 +143,10 @@ def _tool_fingerprints(node: object, depth: int = 0) -> list[tuple[str | None, s
         return [fp for item in node for fp in _tool_fingerprints(item, depth + 1)]
     if not isinstance(node, dict):
         return []
-    kinds = {str(node.get(k)) for k in ("type", "item_type") if node.get(k) is not None}
-    matched = sorted(kinds & TOOL_CALL_KINDS)
-    if matched or isinstance(node.get("tool_name"), str):
-        name = next(
-            (str(node[k]) for k in TOOL_NAME_KEYS if isinstance(node.get(k), str)),
-            matched[0] if matched else "tool",
-        )
-        args = next((node[k] for k in TOOL_ARG_KEYS if k in node), None)
-        payload = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
-        call_id = next((str(node[k]) for k in CALL_ID_KEYS if node.get(k) is not None), None)
-        return [(call_id, f"{name}:{hashlib.sha256(payload.encode()).hexdigest()[:12]}")]
+    call = transcript.tool_call(node)
+    if call is not None:
+        payload = json.dumps(call.args, sort_keys=True, default=str, ensure_ascii=False)
+        return [(call.id, f"{call.name}:{hashlib.sha256(payload.encode()).hexdigest()[:12]}")]
     out: list[tuple[str | None, str]] = []
     for value in node.values():
         out.extend(_tool_fingerprints(value, depth + 1))
@@ -779,7 +762,9 @@ class Manager(Agent):
                 cap=agent_cap(self.ctx),
             )
             prompt = self.ctx.prompt("manager", digest=digest)
-            run_agent_harness(self.ctx, prompt)
+            # the digest, not the whole prompt, is what a later reader needs:
+            # the constitution above it is the same every tick and on disk
+            run_agent_harness(self.ctx, prompt, snapshot=digest)
         except BaseException:
             for c in claimed:
                 c.reject()  # directives go straight back to new/ for the next tick
