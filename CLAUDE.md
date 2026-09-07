@@ -238,6 +238,22 @@ option with a default has no row.
   run` (`runner.budget_blockers`/`budget_refusal`), waivable with
   `--force`; nothing is killed mid-run and no particular choice is vetoed,
   so the gate is a rate limit of the action cap's class, not a veto.
+- `stats.py` — `quorum usage`: the aggregate read across tasks, harnesses,
+  weeks and agents (#96, theme #88). A pure reader in the views' mold over
+  `task.json`, each task's `reports.jsonl` (the instant it said `done`,
+  which `updated_at` does not hold) and the agent ledgers — no cache, no
+  network. Spend is one `usage.total` over every run in a group (never a
+  re-derived reduction); a task that reported nothing is counted, never
+  estimated, and `tasks_with_usage`/`tasks_with_cost` say how many
+  reported anything and how many reported a cost — the `reported` column
+  is the *cost's* coverage wherever a cost is shown, since a group mixing
+  a costing harness with a tokens-only one has fewer tasks behind its `$`
+  than behind its tokens. `share_merged` is
+  over tasks with *any* `pr_state`, never over done tasks (absence is not
+  "not merged"), and `done_to_merged` ends at `pr_state_at`, the tick that
+  first saw the merge. `--since` and `week` both read `created_at`.
+  Rendering (`_task_usage_table` / `_agent_usage_table`) lives in `cli.py`
+  beside the other table builders.
 - `transcript.py` — the **one** renderer of a transcript, and the one place
   that knows how each harness spells an event (`tool_call`, `session_id`,
   `normalize` — the seam `usage.py` owns for result events, which is why
