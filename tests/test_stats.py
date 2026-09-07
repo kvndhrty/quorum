@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from quorum import stats, tasks, usage
+from quorum import fsio, stats, tasks, usage
 from quorum.cli import app
 from quorum.tasks import TaskRun, TaskStore
 
@@ -86,18 +86,20 @@ def rows_by_key(payload: dict) -> dict[str, dict]:
     return {r["key"]: r for r in payload["rows"]}
 
 
-def test_parse_since_accepts_units_and_rejects_the_rest():
-    assert stats.parse_since("7d") == timedelta(days=7)
-    assert stats.parse_since(" 36h ") == timedelta(hours=36)
-    assert stats.parse_since("2w") == timedelta(weeks=2)
-    assert stats.parse_since("90m") == timedelta(minutes=90)
+def test_parse_window_accepts_units_and_rejects_the_rest():
+    """One window grammar for every --since / --before / --older-than."""
+    assert fsio.parse_window("7d") == timedelta(days=7)
+    assert fsio.parse_window(" 36h ") == timedelta(hours=36)
+    assert fsio.parse_window("2w") == timedelta(weeks=2)
+    assert fsio.parse_window("90m") == timedelta(minutes=90)
+    assert fsio.parse_window("30s") == timedelta(seconds=30)
     for bad in ("", "7", "d", "0d", "-1d", "3x", "1.5d", "7 days"):
-        with pytest.raises(ValueError, match="--since wants"):
-            stats.parse_since(bad)
+        with pytest.raises(ValueError, match="invalid window"):
+            fsio.parse_window(bad)
     # a count a timedelta itself refuses is still a ValueError, not an
     # OverflowError out of the constructor
     with pytest.raises(ValueError, match="longer than any date"):
-        stats.parse_since("9" * 30 + "d")
+        fsio.parse_window("9" * 30 + "d")
 
 
 def test_by_project_counts_every_task_and_sums_only_what_was_reported(home: Path):
@@ -359,7 +361,7 @@ def test_cli_says_when_nothing_is_recorded(home: Path):
 
 def test_cli_rejects_a_bad_since_and_an_unknown_dimension(home: Path):
     r = runner.invoke(app, ["usage", "--since", "3x", "--home", str(home)])
-    assert r.exit_code == 1 and "--since wants a positive count" in r.output
+    assert r.exit_code == 2 and "invalid window" in r.output
     # a window no instant is that far along: the same rejection, not a traceback
     r = runner.invoke(app, ["usage", "--since", "99999999d", "--home", str(home)])
     assert r.exit_code == 1 and "--since window reaches before any date" in r.output

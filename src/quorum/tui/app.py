@@ -26,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
-from .. import transcript, views
+from .. import fsio, transcript, views
 from ..messages import MessageBus
 from ..tasks import (
     Task,
@@ -125,7 +125,7 @@ class AttentionScreen(ModalScreen[str | None]):
         table.cursor_type = "row"
         for item in self.items:
             table.add_row(
-                item["at"].replace("T", " ").rstrip("Z"),
+                fsio.display_ts(item["at"]),
                 item["from"],
                 item["text"][:80],
                 key=item["id"],
@@ -488,7 +488,7 @@ class QuorumTUI(App):
         if journal:
             lines.append("— action journal —")
             for e in journal:
-                at = str(e.get("at", "")).replace("T", " ").rstrip("Z")
+                at = fsio.display_ts(e.get("at", ""))
                 target = f" -> {e['target']}" if e.get("target") else ""
                 args = f"  {e['args']}" if e.get("args") else ""
                 lines.append(f"[{at}] {e.get('action', '')}{target}{args}")
@@ -572,8 +572,8 @@ class QuorumTUI(App):
                     r["schedule"],
                     # "" unless this agent's own harness reported a spend.
                     r.get("usage_text", ""),
-                    (r["last_end"] or "—").replace("T", " ").rstrip("Z"),
-                    next_run.replace("T", " ").rstrip("Z"),
+                    fsio.display_ts(r["last_end"] or "—"),
+                    fsio.display_ts(next_run),
                     key=r["name"],
                 )
 
@@ -622,7 +622,7 @@ class QuorumTUI(App):
                 "⚭ attached · ▶ running)"
             )
             lines = [
-                f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
+                f"[{fsio.display_ts(m['at'])}] #{m['topic']} <{m['from']}> {m['text']}"
                 for m in views.board_tail(self.home, limit=30)
             ]
         if lines != self._log_lines:

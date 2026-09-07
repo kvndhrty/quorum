@@ -71,10 +71,7 @@ def _estimate_next_run(schedule: str, hb: dict[str, Any], now) -> str | None:
     except Exception:
         return None
     if kwargs.pop("trigger") == "interval":
-        try:
-            base = fsio.parse_iso(hb["last_end"]) if hb.get("last_end") else now
-        except (KeyError, ValueError):
-            base = now
+        base = fsio.parse_iso_or(hb.get("last_end"), now)
         nxt = base + timedelta(**kwargs)
         return fsio.iso(max(nxt, now))  # overdue → due as soon as the supervisor is back
     try:
@@ -99,11 +96,8 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
         if not acfg.enabled or status in ("paused", "removed"):
             next_run = None
         else:
-            try:
-                stale = next_run is None or fsio.parse_iso(next_run) < now
-            except ValueError:
-                stale = True
-            if stale:
+            due = fsio.parse_iso_or(next_run)
+            if due is None or due < now:
                 est = _estimate_next_run(acfg.schedule, hb, now)
                 if est:
                     next_run, estimated = est, True
@@ -381,11 +375,7 @@ def _at_parses(at: Any) -> bool:
     """Whether a row's `at` is a stamp the list can order by. Everything
     quorum writes goes through `fsio.iso`, so a value that fails here came
     off a torn line, a hand-edited file, or a harness that wrote its own."""
-    try:
-        fsio.parse_iso(str(at))
-    except (TypeError, ValueError):
-        return False
-    return True
+    return fsio.parse_iso_or(str(at)) is not None
 
 
 def _human_at(at: Any) -> str:
@@ -393,7 +383,7 @@ def _human_at(at: Any) -> str:
     parse. A row quorum cannot place in time is still shown — dropping it
     would lose the event — so the line says the time is not to be trusted
     instead of presenting a position in the list it did not earn."""
-    text = str(at or "").replace("T", " ").rstrip("Z")
+    text = fsio.display_ts(at)
     if _at_parses(at):
         return text
     return f"? {text}".rstrip()

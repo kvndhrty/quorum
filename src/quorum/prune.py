@@ -139,11 +139,9 @@ def select(
         if task.perpetual or task.status.lower() not in wanted:
             continue
         if floor is not None:
-            try:
-                updated = fsio.parse_iso(task.updated_at)
-            except ValueError:
-                continue  # unparseable timestamp: too old to judge, so not swept
-            if updated > floor:
+            updated = fsio.parse_iso_or(task.updated_at)
+            # an unparseable timestamp is too old to judge, so not swept
+            if updated is None or updated > floor:
                 continue
         out.append(task)
     return out

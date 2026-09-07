@@ -20,7 +20,7 @@ import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -96,6 +96,67 @@ def parse_iso(s: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt
+
+
+def parse_iso_or(value: Any, default: T = None) -> datetime | T:
+    """The timestamp in `value`, or `default` when it is not one.
+
+    The fail-soft companion to `parse_iso`, and the reason readers do not
+    each write their own try/except: everything quorum writes goes through
+    `iso`, so a value that fails here came off a torn line, a hand-edited
+    file or a harness that wrote its own — which a listing should survive.
+    """
+    if not isinstance(value, str) or not value:
+        return default
+    try:
+        return parse_iso(value)
+    except ValueError:
+        return default
+
+
+def display_ts(value: Any) -> str:
+    """A stored timestamp as a surface prints it: `2026-09-07 11:42:03`.
+
+    One spelling of the same two edits (drop the `T`, drop the trailing
+    `Z`) that every listing, pane and log line used to make for itself.
+    Anything that is not a timestamp — an em dash a caller substituted for
+    a missing value, say — passes through unchanged.
+    """
+    return str(value or "").replace("T", " ").rstrip("Z")
+
+
+_WINDOW = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$")
+_WINDOW_UNITS = {
+    "s": "seconds",
+    "m": "minutes",
+    "h": "hours",
+    "d": "days",
+    "w": "weeks",
+}
+
+
+def parse_window(text: str) -> timedelta:
+    """`90m` / `36h` / `7d` / `2w` / `30s` → a timedelta.
+
+    The one window grammar in quorum: `usage --since`, `board read --since`,
+    `board clear --before` and `task prune --older-than` all take these five
+    units, so a person who has learned one has learned them all.
+
+    ValueError for anything else, including `0d`: an empty window is a typo,
+    not a request. A count too large for a timedelta is a ValueError too,
+    not the OverflowError the constructor would raise — the caller rejects
+    one bad window with one message, and a number nobody can type by
+    accident is still a typo.
+    """
+    m = _WINDOW.match(text or "")
+    if not m or int(m.group(1)) <= 0:
+        raise ValueError(
+            f"invalid window {text!r} — a positive count and a unit, e.g. 90m, 24h, 7d, 2w"
+        )
+    try:
+        return timedelta(**{_WINDOW_UNITS[m.group(2)]: int(m.group(1))})
+    except OverflowError:
+        raise ValueError(f"window {text!r} is longer than any date can express") from None
 
 
 def resolve_handle(

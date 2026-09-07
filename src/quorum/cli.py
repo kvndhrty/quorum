@@ -733,8 +733,8 @@ def usage_cmd(
     from . import stats
 
     target = get_home(home)
+    window = _parse_window(since) if since is not None else None
     try:
-        window = stats.parse_since(since) if since is not None else None
         payload = stats.report(target, by=by.value, since=window)
     except ValueError as e:
         raise _fail(str(e)) from None
@@ -2247,7 +2247,7 @@ def board_read(
             if as_json:
                 typer.echo(json.dumps(msg.dump(), ensure_ascii=False))
             else:
-                created = msg.created_at.replace("T", " ").rstrip("Z")
+                created = fsio.display_ts(msg.created_at)
                 # the short id is here so `board ack` has something to name
                 typer.echo(
                     f"[{created}] {t} {msg.short_id} <{msg.sender}> "
@@ -3090,11 +3090,15 @@ def manager_journal(
 
 
 def _parse_window(text: str) -> timedelta:
-    units = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
-    text = text.strip()
-    if text and text[-1] in units and text[:-1].isdigit():
-        return timedelta(**{units[text[-1]]: int(text[:-1])})
-    raise typer.BadParameter(f"invalid window {text!r} (use e.g. 90m, 24h, 7d)")
+    """A window option, rejected as a bad parameter rather than a traceback.
+
+    The grammar is `fsio.parse_window`'s — one for every window quorum
+    takes — and this is only the CLI's way of refusing a bad one.
+    """
+    try:
+        return fsio.parse_window(text)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from None
 
 
 def _parse_before(text: str) -> datetime:
@@ -3102,8 +3106,8 @@ def _parse_before(text: str) -> datetime:
     (`7d`) or an absolute timestamp (`2026-09-01`, `2026-09-01T12:00:00Z`)."""
     text = text.strip()
     try:
-        return fsio.utc_now() - _parse_window(text)
-    except typer.BadParameter:
+        return fsio.utc_now() - fsio.parse_window(text)
+    except ValueError:
         pass
     try:
         return fsio.parse_iso(text)
