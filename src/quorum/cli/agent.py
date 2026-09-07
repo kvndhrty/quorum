@@ -33,7 +33,7 @@ from ._common import (
 
 # -- reading a run ---------------------------------------------------------
 # `agent log <name>` reads `state/<agent>/`: the digest snapshot a run was
-# given, its transcript, the actions the CLI journaled for it, and the ledger
+# given, its transcript, the actions the CLI journaled for it, and the usage-log
 # line saying how it ended. With -n or -f it reads the transcript file
 # directly instead, which is what a live tick needs. Rendering is
 # `transcript.py`'s, the same one the TUI uses. The manager is an agent like
@@ -206,7 +206,7 @@ def agent_log(
     digest it was given included.
 
     A finished run reads best whole (`--last 5`, or `--run <id>` for one by
-    id). A tick happening right now has no ledger line yet, so `-f` follows
+    id). A tick happening right now has no usage-log line yet, so `-f` follows
     the transcript file as it is written and `-n 40` prints its last forty
     entries; neither can be combined with --last or --run.
     """

@@ -343,10 +343,10 @@ def test_render_run_reports_a_then_now_outcome_for_each_action(home: Path, tmp_p
 
 
 def test_a_run_missing_every_optional_piece_still_renders(home: Path):
-    """A tick that died before its ledger line, whose snapshot has aged out."""
+    """A tick that died before its usage-log line, whose digest has aged out."""
     run_id = agent_run(home, snapshot=None, ledger=False)
     out = "\n".join(transcript.render_run(home, "manager", run_id))
-    assert "(no snapshot kept for this run)" in out
+    assert "(the digest this run was given is no longer kept)" in out
     assert "(still running, or the run ended before it could record)" in out
     assert "💬 abc123 is queued" in out  # everything that does exist still reads
 

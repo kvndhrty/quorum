@@ -621,7 +621,7 @@ def _agent_usage_cells(r: dict) -> dict[str, str]:
         "reported": f"{reported}/{r['runs']}" if reported != r["runs"] else "",
         "raised": _count(r["outcomes"]["raised"]),
         "timeout": _count(r["outcomes"]["timeout"]),
-        # A ledger line written before outcomes existed (#59): `?` elsewhere.
+        # A usage-log line written before outcomes existed (#59): `?` elsewhere.
         "unknown": _count(r["outcomes"]["unknown"]),
         **_spend_cells(r["usage"]),
         "duration": (

@@ -315,6 +315,19 @@ minute it is posted.
   could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
+- Docs restructured; one name per concept; glossary added (#102). The guide
+  opens with a five-step path (install, register a project, queue a task,
+  start the supervisor, read status), then Watching and Steering, then a
+  `## Reference` half that begins with a 33-entry glossary fixing one name
+  per idea — guidance (not nudge/directive), escalation, archive, journal,
+  usage log, transcript, digest, attached, working directory vs worktree,
+  overlay, note, agent / manager / prompt agent / plugin agent, dial. Those
+  words are now used consistently in `docs/guide.md`, `docs/architecture.md`,
+  `README.md`, `CLAUDE.md`, `--help` text, `status --legend` and the packaged
+  prompts; no command, option, config key, file name or Python name changed.
+  `README.md` is the five-step path plus links, `docs/architecture.md` keeps
+  the design record without the passages that only narrated how it got there,
+  and `CLAUDE.md` is one short paragraph per layer.
 - `--home` is one option on the root command and goes **before** the
   subcommand: `quorum --home /path/to/home task list`. It used to be
   declared on 54 of the 55 commands — 54 of 172 option declarations for one
