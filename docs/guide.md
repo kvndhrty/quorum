@@ -285,16 +285,16 @@ quorum task add my-api "migrate the test suite to pytest" --harness codex
 quorum up                      # the manager launches queued tasks
 ```
 
-A prompt does not have to survive shell quoting. `-` reads it from stdin and
-`--prompt-file` reads it from a file, both verbatim:
+A prompt does not have to survive shell quoting. `-` reads it from stdin,
+verbatim — which covers a file too:
 
 ```bash
-quorum task add my-api --prompt-file ~/notes/migration-plan.md
+quorum task add my-api - < ~/notes/migration-plan.md
 cat ~/notes/plan.md | quorum task add my-api -
 ```
 
-Pass the prompt exactly one way — an argument, `-`, or `--prompt-file`; two
-at once is an error, and so is empty input.
+The prompt has one home, the argument; `-` is what makes that argument
+stdin. Empty input is an error.
 
 **From an issue.** `--issue` takes a number or a full URL, fetches the
 issue's title and body through `gh`, and makes them the prompt:
@@ -573,12 +573,12 @@ at stays where it is.
 ```bash
 quorum task list                  # every task, one line each (cost too, when reported)
 quorum task show a3f2k9           # what/where/how it stands (--json: raw record)
-quorum task tail a3f2k9 -f        # live transcript, rendered as a story
-quorum task log a3f2k9            # the whole run, same rendering
+quorum task log a3f2k9            # the whole run, rendered as a story
+quorum task log a3f2k9 -f         # the same, following a live one
 quorum status                     # tasks alongside agents and projects
 ```
 
-What `tail` and `log` print is described under "Reading a run and reading a
+What `task log` prints is described under "Reading a run and reading a
 tick" below.
 
 Each section is a table fitted to the terminal: the report and flags
@@ -853,12 +853,13 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
-quorum manager log                        # one tick end to end: saw, said, did, cost
+quorum agent log manager                  # one tick end to end: saw, said, did, cost
 quorum manager notes                      # its notebook: what it remembers
 ```
 
-`journal` is the flat list of actions; `log` reads one whole tick, digest
-included — see [Watching](#watching-reading-a-run-and-reading-a-tick).
+`journal` is the flat list of actions; `agent log manager` reads one whole
+tick, digest included — the manager is an agent, so it is read with the
+agent commands. See [Watching](#watching-reading-a-run-and-reading-a-tick).
 
 A `tell` is normally read at the start of the next tick. If the manager's
 harness sets `inject = "stream-json"` (see [Harnesses](#harnesses)), a
@@ -1218,7 +1219,6 @@ because the board has no read-state. When you've dealt with them:
 ```bash
 quorum board ack 7c1af2                  # just this one — see Dashboards
 quorum board clear attention             # archive the topic, empty the banner
-quorum board ack --all attention         # the same sweep, other name
 quorum board clear tasks --before 30d    # or just the old part of one
 ```
 
@@ -1345,8 +1345,8 @@ integration (`enabled = false`).
 
 A transcript is every event the harness emitted, one JSON object per line.
 It is the complete record and it is unreadable — a few hundred lines of
-nested tool payloads and echoed output for one run. `quorum task tail` and
-`quorum task log` render it as a story instead:
+nested tool payloads and echoed output for one run. `quorum task log`
+renders it as a story instead:
 
 ```
 $ quorum task log 5yqg9f
@@ -1369,20 +1369,21 @@ Two flags:
 
 - `-v` unfolds everything: reasoning, full tool arguments, full results, the
   folded events, and the raw payload behind every line.
-- `--raw` prints the transcript's own JSON lines, exactly as earlier versions
-  of `task tail` did — for grepping and for piping into `jq`.
+- `--raw` prints the transcript's own JSON lines, exactly as the pre-#82
+  renderer did — for grepping and for piping into `jq`.
 
-`task tail` takes `-n` (how many entries) and `-f` (follow a live run);
-`task log` renders the whole file. An event quorum does not recognize prints
-as its raw line rather than disappearing, so a harness it has never seen is
-still readable, just less pretty.
+`task log` renders the whole file; `-n 40` bounds it to the last forty
+entries and `-f` follows a live run. An event quorum does not recognize
+prints as its raw line rather than disappearing, so a harness it has never
+seen is still readable, just less pretty.
 
 **Reading a manager tick.** The manager's transcript is the same stream, but
 the question is different: not "what did it type" but "why did it do that".
-`quorum manager log` answers it from the four files one tick leaves behind:
+`quorum agent log manager` answers it from the four files one tick leaves
+behind:
 
 ```
-$ quorum manager log
+$ quorum agent log manager
 === manager run 01M1JN0ZB0GZG6WKNG6FH8VKNR — 2026-09-03T03:20:05Z
 
 --- what it saw (01M1JN0ZB0GZG6WKNG6FH8VKNR.md)
@@ -1409,16 +1410,17 @@ actions quorum recorded, not the model's account of them — each with what its
 target's status was then and is now. "How it ended" is the usage ledger line.
 
 ```bash
-quorum manager log                # the most recent tick
-quorum manager log --last 5       # the last five, oldest first
-quorum manager log --run 3g785y   # one tick, by id / prefix / suffix
-quorum manager tail -f            # follow the tick that is running now
-quorum agent log babysitter       # the same for a prompt agent
-quorum agent tail babysitter -f
+quorum agent log manager                # the most recent tick
+quorum agent log manager --last 5       # the last five, oldest first
+quorum agent log manager --run 3g785y   # one tick, by id / prefix / suffix
+quorum agent log manager -f             # follow the tick that is running now
+quorum agent log babysitter             # the same for a prompt agent
 ```
 
 `-v` and `--raw` mean the same things here. A prompt agent has no digest, so
-what it saw is its rendered prompt.
+what it saw is its rendered prompt. A tick that is still running has no
+ledger line yet, so `-n` and `-f` read its transcript directly instead of
+the four-file narrative.
 
 Snapshots are bounded: the newest fifty runs per agent, each head-truncated.
 An older tick still renders — its transcript, journal and ledger lines are
@@ -1443,7 +1445,7 @@ already handled would otherwise sit there for the rest of the week. Say you have
 ```bash
 quorum board read attention              # each line starts with its short id
 quorum board ack 7c1af2                  # that one leaves every banner
-quorum board ack --all attention         # all of them (= board clear)
+quorum board clear attention             # all of them at once
 ```
 
 Acking **archives** rather than marks: the message moves into
@@ -1518,7 +1520,7 @@ quietly ignored.
 - `quorum task history <id>` — one task's life, oldest first (`--json`
   for scripting); see [the life of a task](#watching-the-life-of-a-task).
 - `quorum manager journal` — what the manager did and why.
-- `quorum manager log` — one tick end to end, digest included.
+- `quorum agent log manager` — one tick end to end, digest included.
 - `quorum manager notes` — what it is carrying forward between runs.
 
 ### What it cost, what it delivered
@@ -1647,11 +1649,17 @@ While `quorum up` is running you can steer its schedule without editing
 config or restarting:
 
 ```bash
-quorum agent run-now manager      # tick immediately
+quorum agent run-now manager      # ask the running supervisor to tick it now
 quorum agent pause manager        # stop scheduling it
 quorum agent resume manager       # resume (also clears the failure streak)
 quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
+
+`run-now` and `run-once` are two mechanisms, not two spellings: `run-now` is
+a message to a running `quorum up` and returns before the tick does;
+`run-once` builds the agent in your shell and runs the tick in front of you,
+which is what to reach for with the supervisor stopped or when you want to
+watch it fail.
 
 Commands are delivered through the supervisor's inbox and applied within
 ~15 seconds. An agent that fails 5 ticks in a row is auto-paused, announced
@@ -1670,11 +1678,14 @@ harness. You can mint more of them — a standup summarizer, a nightly triage
 bot, a docs gardener — without writing Python:
 
 ```bash
-quorum agent create standup \
-  --schedule "every 1d" \
-  --prompt-text "Read the board with \`quorum board read\`, then post a short
-standup summary with \`quorum board post notes ...\`."
+quorum agent create standup --schedule "every 1d" \
+  "Read the board with \`quorum board read\`, then post a short standup
+summary with \`quorum board post notes ...\`."
 ```
+
+The prompt body is the second argument, or `-` to read it from stdin
+(`quorum agent create standup - < standup.md`) — the same grammar `task add`
+uses.
 
 This writes two plain files — `agents/standup.toml` (schedule, type,
 settings; hand-editable, and the one config location quorum itself may
@@ -1717,9 +1728,9 @@ nothing until you create an agent over it:
 quorum agent create babysitter --schedule "every 10m" --harness claude
 ```
 
-(No `--prompt-text` needed: the template already exists. `quorum agent
-create ci-cop --prompt babysitter` runs the same prompt under a different
-agent name.)
+(No prompt text needed: the template already exists. `quorum agent create
+ci-cop --prompt babysitter` runs the same prompt under a different agent
+name.)
 
 Each tick it lists your tasks, asks `gh` about the pull request behind each
 one, and — for a red PR whose task is **idle** — reads the failing job's
@@ -2000,7 +2011,7 @@ def test_milestone(tmp_path):
                                     ended (agents get the same file under
                                     state/agents/<name>/)
   state/manager/runs/<run>.md       the digest each tick was given, so
-                                    `manager log` can show what it saw
+                                    `agent log manager` can show what it saw
                                     (newest fifty, head-truncated)
   state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl

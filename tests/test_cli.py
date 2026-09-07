@@ -166,72 +166,31 @@ def test_task_add_reads_prompt_from_stdin(home: Path, tmp_path: Path):
     assert stored_prompt(home) == ISSUE_PROMPT
 
 
-def test_task_add_reads_prompt_from_file(home: Path, tmp_path: Path):
+def test_task_add_stdin_keeps_crlf(home: Path, tmp_path: Path):
+    """Bytes decoded here, not `sys.stdin.read`: universal newlines would
+    rewrite what was piped in."""
     slug = setup_task_env(home, tmp_path)
-    body = tmp_path / "issue.md"
-    body.write_bytes(ISSUE_PROMPT.encode("utf-8"))
     r = runner.invoke(
         app,
-        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
-    )
-    assert r.exit_code == 0, r.output
-    assert stored_prompt(home) == ISSUE_PROMPT
-
-
-def test_task_add_prompt_file_keeps_crlf(home: Path, tmp_path: Path):
-    """read_bytes, not read_text: universal newlines would rewrite the file."""
-    slug = setup_task_env(home, tmp_path)
-    body = tmp_path / "crlf.md"
-    body.write_bytes(b"line one\r\nline two\r\n")
-    r = runner.invoke(
-        app,
-        ["task", "add", slug, "--prompt-file", str(body), "--harness", "fake", "--home", str(home)],
+        ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
+        input=b"line one\r\nline two\r\n",
     )
     assert r.exit_code == 0, r.output
     assert stored_prompt(home) == "line one\r\nline two\r\n"
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["do it", "--prompt-file", "PROMPT"],
-        ["-", "--prompt-file", "PROMPT"],
-    ],
-)
-def test_task_add_refuses_two_prompt_sources(home: Path, tmp_path: Path, args: list[str]):
-    slug = setup_task_env(home, tmp_path)
-    body = tmp_path / "issue.md"
-    body.write_text(ISSUE_PROMPT)
-    args = [str(body) if a == "PROMPT" else a for a in args]
-    r = runner.invoke(
-        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
-        input=ISSUE_PROMPT,
-    )
-    assert r.exit_code == 1
-    assert "exactly one way" in r.output
-    from quorum.tasks import TaskStore
-
-    assert TaskStore(home).list() == []
 
 
 def test_task_add_without_a_prompt_says_how(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(app, ["task", "add", slug, "--harness", "fake", "--home", str(home)])
     assert r.exit_code == 1
-    assert "--prompt-file" in r.output
+    assert "a task needs a prompt" in r.output and "read stdin" in r.output
 
 
-@pytest.mark.parametrize("source", ["stdin", "file"])
-def test_task_add_refuses_empty_input(home: Path, tmp_path: Path, source: str):
+def test_task_add_refuses_empty_input(home: Path, tmp_path: Path):
     """A whitespace-only prompt would queue, launch, and waste a whole run."""
     slug = setup_task_env(home, tmp_path)
-    args = ["-"]
-    if source == "file":
-        blank = tmp_path / "blank.md"
-        blank.write_text("\n  \n")
-        args = ["--prompt-file", str(blank)]
     r = runner.invoke(
-        app, ["task", "add", slug, *args, "--harness", "fake", "--home", str(home)],
+        app, ["task", "add", slug, "-", "--harness", "fake", "--home", str(home)],
         input="\n  \n",
     )
     assert r.exit_code == 1
@@ -283,16 +242,6 @@ def test_task_add_says_it_is_waiting_on_a_typed_prompt(home: Path, tmp_path: Pat
     r = runner.invoke(app, args, input=ISSUE_PROMPT)
     assert r.exit_code == 0, r.output
     assert "reading the prompt from stdin" in r.output and "ctrl-D" in r.output
-
-
-def test_task_add_reports_an_unreadable_prompt_file(home: Path, tmp_path: Path):
-    slug = setup_task_env(home, tmp_path)
-    missing = tmp_path / "nope.md"
-    r = runner.invoke(
-        app,
-        ["task", "add", slug, "--prompt-file", str(missing), "--harness", "fake", "--home", str(home)],
-    )
-    assert r.exit_code == 1 and "cannot read" in r.output
 
 
 # -- issue intake (--issue) --------------------------------------------------
@@ -382,20 +331,19 @@ def test_issue_intake_fails_loudly_and_queues_nothing(
     assert TaskStore(home).list() == []
 
 
-def test_issue_intake_still_refuses_two_prompt_sources(
+def test_issue_intake_still_refuses_an_empty_prompt(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
-    """--issue makes the prompt optional, not the rule negotiable."""
+    """--issue makes the prompt optional, not the rule negotiable: a source
+    that *was* named still has to carry something."""
     slug = setup_task_env(home, tmp_path)
     install_gh(path_without_gh, monkeypatch, issue=ISSUE)
-    body = tmp_path / "extra.md"
-    body.write_text("and this")
     r = runner.invoke(
         app,
-        ["task", "add", slug, "do it", "--prompt-file", str(body), "--issue", "62",
-         "--harness", "fake", "--home", str(home)],
+        ["task", "add", slug, "-", "--issue", "62", "--harness", "fake", "--home", str(home)],
+        input="\n  \n",
     )
-    assert r.exit_code == 1 and "exactly one way" in r.output
+    assert r.exit_code == 1 and "empty prompt" in r.output
 
 
 def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
@@ -426,7 +374,7 @@ def test_task_lifecycle_through_the_cli(home: Path, tmp_path: Path):
     assert r.exit_code == 0
     r = runner.invoke(app, ["task", "show", short, "--home", str(home)])
     assert "status:   pr" in r.output and "https://example.com/pr/1" in r.output
-    r = runner.invoke(app, ["task", "tail", short, "--home", str(home)])
+    r = runner.invoke(app, ["task", "log", short, "--home", str(home)])
     assert "tidy the docs" in r.output  # the fake harness echoes its prompt
 
     r = runner.invoke(app, ["task", "cancel", short, "--home", str(home)])
@@ -456,8 +404,8 @@ def test_agent_create_remove_and_reload(home: Path):
     from quorum.messages import MessageBus
 
     r = runner.invoke(app, [
-        "agent", "create", "standup", "--schedule", "every 30m",
-        "--prompt-text", "post a standup note", "--harness", "fake", "--home", str(home),
+        "agent", "create", "standup", "post a standup note", "--schedule", "every 30m",
+        "--harness", "fake", "--home", str(home),
     ])
     assert r.exit_code == 0, r.output
     assert (home / "agents" / "standup.toml").exists()
@@ -473,11 +421,11 @@ def test_agent_create_remove_and_reload(home: Path):
 
     # duplicates and promptless prompt agents are refused
     r = runner.invoke(app, [
-        "agent", "create", "standup", "--prompt-text", "again", "--home", str(home),
+        "agent", "create", "standup", "again", "--home", str(home),
     ])
     assert r.exit_code == 1 and "already exists" in r.output
     r = runner.invoke(app, ["agent", "create", "mute", "--home", str(home)])
-    assert r.exit_code == 1 and "--prompt-text or --prompt-file" in r.output
+    assert r.exit_code == 1 and "a prompt agent needs a prompt" in r.output
 
     # editing + reload is the update path
     r = runner.invoke(app, ["agent", "reload", "standup", "--home", str(home)])
@@ -766,10 +714,9 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     r = runner.invoke(app, ["agent", "create", "nope", "--prompt", "ghost", "--home", str(home)])
     assert r.exit_code == 1 and "prompts/ghost.md" in r.output
     r = runner.invoke(app, [
-        "agent", "create", "nope", "--prompt", "babysitter", "--prompt-text", "x",
-        "--home", str(home),
+        "agent", "create", "nope", "x", "--prompt", "babysitter", "--home", str(home),
     ])
-    assert r.exit_code == 1 and "drop --prompt-text" in r.output
+    assert r.exit_code == 1 and "drop the prompt argument" in r.output
 
 
 def _quorum_invocations(text: str) -> list[str]:

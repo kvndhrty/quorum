@@ -43,7 +43,7 @@ minute it is posted.
   row in the table. `docs/architecture.md` and `CLAUDE.md` link to the
   section as the place a change to either list is argued.
 - Readable logs: one narrative renderer (`quorum.transcript`) behind
-  `quorum task tail` and a new `task log`, so a run reads as what it tried
+  `quorum task log`, so a run reads as what it tried
   and what came back rather than as a few hundred JSON events — assistant
   text in full, one line per tool call with its first argument, results
   collapsed to a size or an exit code, reasoning and noise events folded
@@ -53,13 +53,13 @@ minute it is posted.
   disagree, and the per-harness
   event shapes now live in one place — `manager.loop_signal` and the
   runner's session-id capture read it too.
-  `quorum manager log [--last N | --run <id>]` reads one *tick* end to end:
-  the digest it was given, what it said, the actions the CLI journaled for
-  it with their then-vs-now outcome, and what the run cost. That first part
-  needed the one new file, `state/manager/runs/<run>.md` — bounded like the
-  journal tail (newest fifty per agent, head-truncated) and read by nothing
-  that decides anything. `manager tail -f` follows a live tick; `agent log`
-  / `agent tail` do the same for a prompt agent. (#82)
+  `quorum agent log <name> [--last N | --run <id>]` reads one *tick* end to
+  end: the digest it was given, what it said, the actions the CLI journaled
+  for it with their then-vs-now outcome, and what the run cost. That first
+  part needed the one new file, `state/<agent>/runs/<run>.md` — bounded like
+  the journal tail (newest fifty per agent, head-truncated) and read by
+  nothing that decides anything. The manager is an agent here like any
+  other: `quorum agent log manager`, with `-f` to follow a live tick. (#82)
 - Notification hook: a `[notify]` table holds an argv template
   (`{text}`, `{from}`, `{topic}`, `{type}`, `{id}` substituted per argument,
   no shell) that the supervisor runs once for every new message on the
@@ -81,8 +81,8 @@ minute it is posted.
   `messages/archive/` keeps it with its original `created_at`. Ids resolve
   like task ids (full id, unique prefix, or the short suffix `board read`
   now prints); unknown and ambiguous are refused, never guessed at.
-  `board ack --all <topic>` is `board clear <topic>`, implemented on top of
-  it. The same ack is a keystroke in the TUI (`a` opens the `#attention`
+  A whole topic at once is `board clear <topic>`.
+  The same ack is a keystroke in the TUI (`a` opens the `#attention`
   list and acks the highlighted line, notifying rather than crashing on an
   unwritable home) — a thin call to one shared
   `MessageBus.ack_board_message`. Every list an ack acts on is a snapshot, so
@@ -212,10 +212,10 @@ minute it is posted.
   out, escalate after hitting the cap two runs running. A prompt agent whose
   template writes `{notes}` gets the same self-observation lines above its
   notebook (no new placeholder).
-- `quorum task add <project> -` reads the prompt from stdin, and
-  `--prompt-file <path>` reads it from a file — both byte-for-byte, so a
-  piped GitHub issue is stored exactly as it arrived. Exactly one of the
-  three sources is allowed, and empty input is refused. Makes the
+- `quorum task add <project> -` reads the prompt from stdin, byte-for-byte,
+  so a piped GitHub issue is stored exactly as it arrived — and a prompt
+  kept in a file goes in as `quorum task add <project> - < file`. Empty
+  input is refused. Makes the
   issue-driven loop a one-liner without putting `gh` inside quorum:
   `gh issue view 14 --json title,body -q '"\(.title)\n\n\(.body)"' | quorum task add my-api -`
   (#60)
@@ -369,6 +369,32 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Removed
+- Second spellings of commands that already existed (#102, "one way to do
+  each thing"). `quorum manager log` and `quorum manager tail` are gone:
+  they were aliases of `agent log manager` / `agent tail manager` — the
+  manager is an agent and is read with the agent commands.
+- `quorum task tail` and `quorum agent tail` are gone, merged into `task
+  log` and `agent log`. The surviving command covers what `tail` did: `-n N`
+  bounds the output to the last N transcript entries and `-f` follows a live
+  run. With no `-n`, `task log` prints the whole transcript as before, and
+  `agent log <name>` renders the run narrative (digest, transcript, journal,
+  ledger) as before; `-n`/`-f` there read the transcript file directly,
+  which is what a tick still running needs, and cannot be combined with
+  `--run`. `--raw` keeps its byte-for-byte promise on both.
+- `quorum board ack --all <topic>`, with the `--before` and `--yes` options
+  that existed only for it. `board clear <topic>` is the one spelling of the
+  sweep and is unchanged; `board ack` now takes one message id, `--topic`
+  and `--dry-run`. The shared `_clear_topic` helper no longer takes an
+  action name, since only `board clear` journals through it.
+- `quorum task add --prompt-file <path>`. The positional prompt and `-` for
+  stdin remain, so a file goes in as `quorum task add <project> - < file`,
+  read as bytes and decoded here exactly as `--prompt-file` was.
+- `quorum agent create --prompt-file` and `--prompt-text`. The prompt body
+  is now the command's second argument, or `-` to read stdin — the same
+  grammar `task add` uses, through the same verbatim-bytes helper, which
+  also fixes `--prompt-file`'s locale-dependent decoding. `--prompt <name>`
+  (reuse an existing template) is unchanged, and an agent whose template
+  already resolves still needs no prompt text at all.
 - The web dashboard (#102). `quorum web`, the `web` optional-dependency
   extra (fastapi, uvicorn), `src/quorum/web/` and its thirteen HTTP routes
   are gone. The terminal dashboard is the one dashboard: `quorum tui` has
@@ -473,6 +499,26 @@ minute it is posted.
   and the count now happen under the same lock the close check takes.
 
 ### Upgrading
+- Command spellings that changed, old to new:
+  `quorum task tail X` → `quorum task log X -n 25`;
+  `quorum task tail X -f` → `quorum task log X -f`;
+  `quorum manager log` → `quorum agent log manager`;
+  `quorum manager tail -f` → `quorum agent log manager -f`;
+  `quorum agent tail X -f` → `quorum agent log X -f`;
+  `quorum board ack --all T` → `quorum board clear T`;
+  `quorum task add P --prompt-file F` → `quorum task add P - < F`;
+  `quorum agent create N --prompt-text "..."` → `quorum agent create N "..."`;
+  `quorum agent create N --prompt-file F` → `quorum agent create N - < F`.
+  Nothing is deprecated in place: the old spellings exit 2 with a usage
+  error. `quorum init` reseeds `prompts/manager.md` and
+  `prompts/babysitter.md`, which named `task tail`; an edited copy is left
+  alone, so change `task tail <id> -n 40` to `task log <id> -n 40` there
+  yourself.
+- `quorum agent run-now` and `quorum agent run-once` both stay: they are two
+  mechanisms, not two spellings. `run-now` sends a message to a running
+  `quorum up` and returns before the tick does; `run-once` builds the agent
+  in your shell and runs the tick in the foreground, which works with the
+  supervisor stopped. Each command's help now says which to reach for.
 - The web dashboard is gone, so reinstall without the extra:
   `uv tool install quorum-orchestrator` (or `pip install
   quorum-orchestrator`). `quorum-orchestrator[web]` no longer resolves;

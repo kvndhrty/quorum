@@ -226,18 +226,18 @@ def issue_view(home: Path, ref: str, workdir: Path) -> dict:
     if cfg is None:
         raise ForgeError(
             "config.toml could not be read, so forge access is off — fix it "
-            "(`quorum doctor`) or paste the issue text with `--prompt-file`"
+            "(`quorum doctor`) or paste the issue text in yourself (`quorum task add <project> -`)"
         )
     if not cfg.enabled:
         raise ForgeError(
             "[ci].enabled = false in config.toml, so quorum will not call the forge — "
-            "set it to true, or paste the issue text with `--prompt-file`"
+            "set it to true, or paste the issue text in yourself (`quorum task add <project> -`)"
         )
     cli = cli_name(home)
     if shutil.which(cli) is None:
         raise ForgeError(
             f"no `{cli}` on PATH — install it (brew install {cli}) and `{cli} auth login`, "
-            "or paste the issue text with `--prompt-file`"
+            "or paste the issue text in yourself (`quorum task add <project> -`)"
         )
     try:
         proc = _invoke(home, workdir, ["issue", "view", target, "--json", ISSUE_FIELDS])

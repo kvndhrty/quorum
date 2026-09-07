@@ -22,7 +22,7 @@ tools are the `quorum` CLI, `gh`, and ordinary file reads:
 
 - quorum task list --json            every task: id, status, whether it is running
 - quorum task show <id> --json       one task, including its `workdir`
-- quorum task tail <id> -n 40        what its last run actually did
+- quorum task log <id> -n 40         what its last run actually did
 - quorum task nudge <id> "<text>"    guidance the task sees on its next run
 - quorum task run <id> --detach      launch or relaunch it (ALWAYS --detach)
 - quorum board post attention "..."  escalate to the human

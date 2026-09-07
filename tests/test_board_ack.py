@@ -151,48 +151,14 @@ def test_ack_dry_run_changes_nothing(home: Path):
     assert archive_lines(home) == []
 
 
-def test_ack_refuses_before_without_all(home: Path):
+def test_ack_is_one_message_only(home: Path):
+    """A whole topic is `board clear <topic>`, so `board ack` has no --all and
+    no --before: one spelling for the sweep, one for the single message."""
     msg = MessageBus(home).post("manager", "attention", "escalation", text="here")
-    result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--before", "7d", "--home", str(home)]
-    )
-    assert result.exit_code != 0
-    assert "--before applies to --all" in result.output
-    assert views.attention_summary(home)["count"] == 1
-
-
-def test_ack_all_is_board_clear(home: Path):
-    """The alias is the same sweep, not a second implementation."""
-    bus = MessageBus(home)
-    bus.post("manager", "attention", "escalation", text="one")
-    bus.post("manager", "attention", "escalation", text="two")
-
-    result = runner.invoke(app, ["board", "ack", "--all", "attention", "--yes", "--home", str(home)])
-    assert result.exit_code == 0, result.output
-    assert "archived 2 message(s) from attention" in result.output
-    assert views.attention_summary(home)["count"] == 0
-    assert sorted(m["payload"]["text"] for m in archive_lines(home)) == ["one", "two"]
-
-
-def test_ack_all_honours_before_and_dry_run(home: Path):
-    old = MessageBus(home, now=lambda: fsio.utc_now() - timedelta(days=30))
-    old.post("manager", "attention", "escalation", text="ancient")
-    MessageBus(home).post("manager", "attention", "escalation", text="recent")
-
-    dry = runner.invoke(
-        app, ["board", "ack", "--all", "attention", "--dry-run", "--home", str(home)]
-    )
-    assert dry.exit_code == 0, dry.output
-    assert "would archive 2" in dry.output
-    assert archive_lines(home) == []
-
-    result = runner.invoke(
-        app,
-        ["board", "ack", "--all", "attention", "--before", "7d", "--yes", "--home", str(home)],
-    )
-    assert result.exit_code == 0, result.output
-    assert [m.payload["text"] for m in MessageBus(home).read_topic("attention")] == ["recent"]
-    assert [m["payload"]["text"] for m in archive_lines(home)] == ["ancient"]
+    for extra in (["--all"], ["--before", "7d"]):
+        result = runner.invoke(app, ["board", "ack", msg.short_id, *extra, "--home", str(home)])
+        assert result.exit_code != 0
+        assert views.attention_summary(home)["count"] == 1
 
 
 def test_board_read_prints_the_handle_an_ack_needs(home: Path):
@@ -257,22 +223,3 @@ def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypat
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
     assert [m["payload"]["text"] for m in archive_lines(home)] == ["handled elsewhere"]
-
-
-def test_ack_all_refuses_a_topic_option(home: Path):
-    """With `--all` the argument *is* the topic, so a `--topic` next to it can
-    only be a misunderstanding — and silently sweeping the wrong board is the
-    one outcome an ack must never have."""
-    bus = MessageBus(home)
-    bus.post("manager", "attention", "escalation", text="still here")
-    bus.post("manager", "notes", "note", text="also still here")
-
-    result = runner.invoke(
-        app,
-        ["board", "ack", "--all", "attention", "--topic", "notes", "--yes", "--home", str(home)],
-    )
-    assert result.exit_code != 0
-    assert "--topic does not apply to --all" in result.output
-    assert views.attention_summary(home)["count"] == 1
-    assert len(MessageBus(home).read_topic("notes")) == 1
-    assert archive_lines(home) == []

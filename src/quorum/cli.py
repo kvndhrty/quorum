@@ -1151,58 +1151,36 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def _task_prompt(prompt: str, prompt_file: Path | None, optional: bool = False) -> str:
-    """The task prompt from exactly one of: the positional argument, stdin
-    (`-`), or --prompt-file. `""` when `optional` and none was given.
+def _task_prompt(prompt: str, optional: bool = False) -> str:
+    """The task prompt from the positional argument, or from stdin when that
+    argument is `-`. `""` when `optional` and nothing was given.
 
     `optional` is what `--issue` passes: there the issue is the prompt and
     anything given here is *appended*, so "nothing given" is the normal
-    case. Two sources at once is still an error, and so is empty input from
-    a source that was named — an explicitly empty prompt is a mistake either
-    way.
+    case. Empty input from a source that was named is still an error — an
+    explicitly empty prompt is a mistake either way.
 
-    Read as bytes and decoded here rather than through `read_text`, so what
-    lands in task.json is byte-for-byte what was piped or written — a prompt
-    is quoted verbatim into the harness's context, and silently rewriting
-    CRLF or the trailing newline would make a stored task differ from its
-    source. Empty (or whitespace-only) input is refused: a task with nothing
-    to do would queue, launch, and waste a whole run."""
-    from_stdin = prompt == "-"
-    given = [
-        label
-        for label, on in (
-            ("the prompt argument", bool(prompt) and not from_stdin),
-            ("`-` (stdin)", from_stdin),
-            ("--prompt-file", prompt_file is not None),
-        )
-        if on
-    ]
-    if len(given) > 1:
-        raise _fail(f"pass the prompt exactly one way — got {' and '.join(given)}")
-    if not given and optional:
-        return ""
-    if not given:
-        raise _fail(
-            "a task needs a prompt: pass it as an argument, `-` to read stdin, "
-            "or --prompt-file <path>"
-        )
-    if from_stdin:
-        # Nothing is piped in: say so, or the blocking read looks like a hang.
-        if _stdin_is_tty():
-            typer.echo("reading the prompt from stdin — end with ctrl-D (ctrl-C to abort)", err=True)
-        text = _stdin_prompt()
+    Stdin is read as bytes and decoded here rather than through
+    `sys.stdin.read`, so what lands in task.json is byte-for-byte what was
+    piped — a prompt is quoted verbatim into the harness's context, and
+    silently rewriting CRLF or the trailing newline would make a stored task
+    differ from its source. A prompt kept in a file goes in the same way:
+    `quorum task add <project> - < prompt.md`. Empty (or whitespace-only)
+    input is refused: a task with nothing to do would queue, launch, and
+    waste a whole run."""
+    if prompt == "-":
+        text = _verbatim_text(Path("-"), "prompt")
         source = "stdin"
-    elif prompt_file is not None:
-        try:
-            text = prompt_file.read_bytes().decode("utf-8")
-        except OSError as e:
-            raise _fail(f"cannot read {prompt_file}: {e}") from None
-        except UnicodeDecodeError:
-            raise _fail(f"{prompt_file} is not valid UTF-8") from None
-        source = str(prompt_file)
-    else:
+    elif prompt:
         text = prompt
         source = "the prompt argument"
+    elif optional:
+        return ""
+    else:
+        raise _fail(
+            "a task needs a prompt: pass it as an argument, or `-` to read stdin "
+            "(`quorum task add <project> - < prompt.md`)"
+        )
     if not text.strip():
         raise _fail(f"empty prompt ({source}) — a task needs something to do")
     return text
@@ -1212,7 +1190,6 @@ def _task_prompt(prompt: str, prompt_file: Path | None, optional: bool = False) 
 def task_add(
     project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
     prompt: str = typer.Argument("", help="What the harness should do — or `-` to read it from stdin."),
-    prompt_file: Path | None = typer.Option(None, "--prompt-file", help="Read the prompt from this file instead of the argument."),
     issue: str | None = typer.Option(None, "--issue", help="Queue this forge issue (number or URL): its title and body become the prompt."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
@@ -1226,8 +1203,8 @@ def task_add(
 
     Example: quorum task add my-api "fix the flaky auth tests"
 
-    A long prompt does not have to fight the shell: `-` reads it from stdin
-    and --prompt-file reads it from a file, both verbatim.
+    A long prompt does not have to fight the shell: `-` reads it from stdin,
+    verbatim — `quorum task add my-api - < plan.md` queues a file.
 
     --issue queues an issue directly — `quorum task add my-api --issue 62`
     (a number or a full URL) fetches its title and body through the forge
@@ -1269,7 +1246,7 @@ def task_add(
     # consuming it: a piped issue is gone the moment stdin is drained, so a
     # typo in the slug must not eat it. With --issue the prompt is optional —
     # the issue is the work, and anything given here is appended to it.
-    text = _task_prompt(prompt, prompt_file, optional=issue is not None)
+    text = _task_prompt(prompt, optional=issue is not None)
     # The forge call comes after every free check for the same reason, and
     # it spends a subprocess and a network round trip besides. It runs in
     # the project's own directory so a bare number resolves against its
@@ -1686,7 +1663,7 @@ def task_show(
         typer.echo("handoff (what this task left for the tasks that depend on it):")
         for line in handoff.rstrip("\n").splitlines():
             typer.echo(f"  {line}")
-    typer.echo(f"more: `quorum task tail {task.short_id}` for the transcript, `--json` for the raw record")
+    typer.echo(f"more: `quorum task log {task.short_id}` for the transcript, `--json` for the raw record")
 
 
 @task_app.command("history")
@@ -1795,7 +1772,7 @@ def task_run(
     )
     if detach:
         pid = launch_detached(target, task.id, force=force, fresh_session=fresh_session)
-        typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task tail {task.short_id}`", fg="green")
+        typer.secho(f"task {task.short_id} running detached (pid {pid}) — `quorum task log {task.short_id} -f`", fg="green")
         return
     try:
         code = run_task(target, config, task.id, force=force, fresh_session=fresh_session)
@@ -1839,16 +1816,28 @@ def _follow(path: Path, render, seen: int) -> None:
         pass
 
 
-@task_app.command("tail")
-def task_tail(
+_LINES_OPT = typer.Option(
+    0, "-n", "--lines", help="Show only the last N transcript entries (default: all of them)."
+)
+_FOLLOW_OPT = typer.Option(
+    False, "-f", "--follow", help="Keep printing new entries as they arrive (Ctrl-C stops)."
+)
+
+
+@task_app.command("log")
+def task_log(
     task_id: str,
-    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
-    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
+    lines: int = _LINES_OPT,
+    follow: bool = _FOLLOW_OPT,
     raw: bool = _RAW_OPT,
     verbose: bool = _VERBOSE_OPT,
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Print the tail of a task's harness transcript, as a narrative."""
+    """Render a task's harness transcript as a narrative.
+
+    The whole transcript by default; `-n 40` prints only the last forty
+    entries and `-f` keeps printing new ones as the run writes them.
+    """
     from .tasks import transcript_path
 
     target = get_home(home)
@@ -1859,28 +1848,12 @@ def task_tail(
         return transcript_mod.render(entries, verbose=verbose, raw=raw)
 
     entries = fsio.read_jsonl(path)
-    _echo(render(entries[-lines:]))
-    if follow:
-        _follow(path, render, len(entries))
-
-
-@task_app.command("log")
-def task_log(
-    task_id: str,
-    raw: bool = _RAW_OPT,
-    verbose: bool = _VERBOSE_OPT,
-    home: Path | None = _HOME_OPT,
-) -> None:
-    """Render a task's whole transcript — `task tail` over every entry."""
-    from .tasks import transcript_path
-
-    target = get_home(home)
-    task = _resolve_task(target, task_id)
-    entries = fsio.read_jsonl(transcript_path(target, task.id))
-    if not entries:
+    if not entries and not follow:
         typer.echo(f"task {task.short_id} has no transcript yet")
         return
-    _echo(transcript_mod.render(entries, verbose=verbose, raw=raw))
+    _echo(render(entries[-lines:] if lines > 0 else entries))
+    if follow:
+        _follow(path, render, len(entries))
 
 
 @task_app.command("report", rich_help_panel="Harness protocol")
@@ -2433,26 +2406,18 @@ def board_clear(
     hourly janitor writes — nothing is lost, it just stops being live.
     `quorum board clear attention` is the one that empties the banner.
     """
-    _clear_topic(get_home(home), topic, before=before, dry_run=dry_run, yes=yes, action="board.clear")
+    _clear_topic(get_home(home), topic, before=before, dry_run=dry_run, yes=yes)
 
 
 @board_app.command("ack")
 def board_ack(
     target_id: str = typer.Argument(
-        ..., metavar="MESSAGE_ID",
-        help="A message id, prefix or short suffix — or, with --all, a topic.",
-    ),
-    all_: bool = typer.Option(
-        False, "--all", help="Ack a whole topic instead of one message (`board clear`)."
+        ..., metavar="MESSAGE_ID", help="A message id, prefix or short suffix."
     ),
     topic: str | None = typer.Option(
         None, "--topic", help="Only look in this topic (default: every topic)."
     ),
-    before: str | None = typer.Option(
-        None, "--before", help="With --all: only messages older than this (7d, 2026-09-01)."
-    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="With --all: skip the confirmation."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Say "I have seen this one": archive a single board message.
@@ -2463,22 +2428,9 @@ def board_ack(
     into `messages/archive/YYYY-MM.jsonl.gz`, which drops it from every view
     while the history keeps its original `created_at`.
 
-    `quorum board ack --all attention` is `quorum board clear attention`:
-    the same sweep, spelled the way you were already thinking about it.
+    A whole topic at once is `quorum board clear <topic>`.
     """
     home_path = get_home(home)
-    if all_:
-        if topic:
-            raise _fail(
-                "--topic does not apply to --all; the argument is the topic "
-                f"(`quorum board ack --all {topic}`)"
-            )
-        _clear_topic(
-            home_path, target_id, before=before, dry_run=dry_run, yes=yes, action="board.ack.all"
-        )
-        return
-    if before:
-        raise _fail("--before applies to --all; a single ack names one message")
     bus = MessageBus(home_path)
     try:
         msg, path = bus.resolve_board_message(target_id, topic=topic)
@@ -2501,11 +2453,9 @@ def board_ack(
     typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
 
 
-def _clear_topic(
-    home: Path, topic: str, before: str | None, dry_run: bool, yes: bool, action: str
-) -> None:
-    """The sweep behind both `board clear <topic>` and `board ack --all <topic>`
-    — one implementation, so the alias can never drift from what it aliases."""
+def _clear_topic(home: Path, topic: str, before: str | None, dry_run: bool, yes: bool) -> None:
+    """The sweep behind `board clear <topic>`: archive a whole topic, or the
+    part of it older than `before`."""
     floor = _parse_before(before) if before else None
     bus = MessageBus(home)
     doomed = bus.archive_topic(topic, before=floor, dry_run=True)
@@ -2518,7 +2468,7 @@ def _clear_topic(
             typer.echo(f"  [{msg.created_at}] <{msg.sender}> {msg.payload.get('text', '')[:70]}")
         return
     _confirm(yes, f"archive {len(doomed)} message(s) from {topic}?")
-    _actor_guard(home, action, args=f"{topic}: {len(doomed)} message(s)")
+    _actor_guard(home, "board.clear", args=f"{topic}: {len(doomed)} message(s)")
     archived = bus.archive_topic(topic, before=floor)
     typer.secho(f"archived {len(archived)} message(s) from {topic}", fg="green")
 
@@ -2796,11 +2746,12 @@ def tui(home: Path | None = _HOME_OPT) -> None:
 
 
 # -- reading a run ---------------------------------------------------------
-# `manager log`, `manager tail` and their `agent` twins are one pair of
-# readers over `state/<agent>/`: the digest snapshot a run was given, its
-# transcript, the actions the CLI journaled for it, and the ledger line
-# saying how it ended. Rendering is `transcript.py`'s, the same one the TUI
-# uses.
+# `agent log <name>` reads `state/<agent>/`: the digest snapshot a run was
+# given, its transcript, the actions the CLI journaled for it, and the ledger
+# line saying how it ended. With -n or -f it reads the transcript file
+# directly instead, which is what a live tick needs. Rendering is
+# `transcript.py`'s, the same one the TUI uses. The manager is an agent like
+# any other here — `agent log manager`.
 
 
 def _resolve_run(home: Path, name: str, ref: str) -> str:
@@ -2816,7 +2767,7 @@ def _resolve_run(home: Path, name: str, ref: str) -> str:
         r for r in ids if r.startswith(ref) or r.endswith(ref)
     ]
     if not matches:
-        raise _fail(f"no {name} run matching {ref!r} (see `quorum {name} log --last 5`)")
+        raise _fail(f"no {name} run matching {ref!r} (see `quorum agent log {name} --last 5`)")
     if len(matches) > 1:
         raise _fail(f"{ref!r} matches {len(matches)} {name} runs: " + ", ".join(matches))
     return matches[0]
@@ -2870,7 +2821,7 @@ def _run_tail(
     if not entries and not follow:
         typer.echo(f"{name} has written no transcript yet")
         return
-    _echo(render(entries[-lines:]))
+    _echo(render(entries[-lines:] if lines > 0 else entries))
     if follow:
         _follow(path, render, len(entries))
 
@@ -2906,7 +2857,13 @@ def agent_run_once(
     verbose: bool = typer.Option(False, "--verbose", help="Show the full traceback when the tick fails."),
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Construct an agent and run a single tick (no supervisor needed)."""
+    """Construct an agent and run a single tick in this process.
+
+    Use this when the supervisor is stopped, or when you want the tick's
+    output and its failure in front of you. `quorum agent run-now` is the
+    other one: it asks a *running* supervisor to tick the agent on its own
+    schedule thread.
+    """
     from .agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from .registry import AgentResolutionError, resolve
 
@@ -2962,25 +2919,28 @@ def agent_log(
     name: str,
     last: int = _LAST_OPT,
     run: str | None = _RUN_OPT,
+    lines: int = _LINES_OPT,
+    follow: bool = _FOLLOW_OPT,
     verbose: bool = _VERBOSE_OPT,
     raw: bool = _RAW_OPT,
     home: Path | None = _HOME_OPT,
 ) -> None:
-    """Render an agent's run end to end: what it saw, said, did, and cost."""
+    """Render an agent's run end to end: what it saw, said, did, and cost.
+
+    The manager is an agent: `quorum agent log manager` reads one tick, the
+    digest it was given included.
+
+    A finished run reads best whole (`--last 5`, or `--run <id>` for one by
+    id). A tick happening right now has no ledger line yet, so `-f` follows
+    the transcript file as it is written and `-n 40` prints its last forty
+    entries; neither can be combined with --last or --run.
+    """
+    if lines or follow:
+        if run:
+            raise _fail("--run reads a finished run; -n/-f follow the transcript itself")
+        _run_tail(home, name, lines, follow, verbose, raw)
+        return
     _run_log(home, name, last, run, verbose, raw)
-
-
-@agent_app.command("tail")
-def agent_tail(
-    name: str,
-    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
-    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
-    verbose: bool = _VERBOSE_OPT,
-    raw: bool = _RAW_OPT,
-    home: Path | None = _HOME_OPT,
-) -> None:
-    """Follow an agent's transcript as it runs."""
-    _run_tail(home, name, lines, follow, verbose, raw)
 
 
 def _agent_command(home: Path | None, name: str, command: str, note: str) -> None:
@@ -3007,7 +2967,12 @@ def agent_resume(name: str, home: Path | None = _HOME_OPT) -> None:
 
 @agent_app.command("run-now")
 def agent_run_now(name: str, home: Path | None = _HOME_OPT) -> None:
-    """Ask the running supervisor to tick an agent immediately."""
+    """Ask the running supervisor to tick an agent immediately.
+
+    This is a message to `quorum up`, so it needs the supervisor running and
+    returns before the tick does. With the supervisor stopped, or to watch
+    the tick happen, use `quorum agent run-once`.
+    """
     _agent_command(home, name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
 
 
@@ -3026,17 +2991,21 @@ def _prompt_exists(home: Path, name: str) -> bool:
 @agent_app.command("create")
 def agent_create(
     name: str,
+    prompt: str = typer.Argument("", help="The agent's prompt body — or `-` to read it from stdin."),
     schedule: str = typer.Option("every 1h", "--schedule", help="'every <N><s|m|h|d>' or 'cron <5 fields>'."),
     type_: str = typer.Option("prompt", "--type", help="Agent type: builtin short name or module:Class."),
     harness: str = typer.Option("", "--harness", help="Harness table for a prompt agent (default: \\[tasks].default_harness)."),
-    prompt_file: Path | None = typer.Option(None, "--prompt-file", help="File whose contents seed prompts/<name>.md."),
-    prompt_text: str = typer.Option("", "--prompt-text", help="Inline prompt body for prompts/<name>.md."),
     prompt_template: str = typer.Option("", "--prompt", help="Use an existing template instead of writing one (e.g. the shipped 'babysitter')."),
     timeout: int = typer.Option(0, "--timeout", help="run_timeout_seconds for the agent's harness runs."),
     max_actions: int = typer.Option(0, "--max-actions", help="Per-run action cap for the agent's harness runs."),
     home: Path | None = _HOME_OPT,
 ) -> None:
     """Create a file-defined agent (agents/<name>.toml + prompts/<name>.md).
+
+    The prompt body is the second argument, or `-` to read it from stdin —
+    `quorum agent create standup - < standup.md` — read verbatim, the same
+    way `task add` reads a prompt. --prompt instead names a template that
+    already exists, so nothing is written to prompts/.
 
     A running supervisor picks it up within seconds — no restart, and
     config.toml is never touched.
@@ -3045,21 +3014,19 @@ def agent_create(
 
     target = get_home(home)
     text: str | None = None
-    if prompt_file is not None:
-        try:
-            text = prompt_file.read_text(encoding="utf-8")
-        except OSError as e:
-            raise _fail(f"cannot read {prompt_file}: {e}") from None
-    elif prompt_text:
-        text = prompt_text
+    if prompt == "-":
+        text = _verbatim_text(Path("-"), "prompt")
+    elif prompt:
+        text = prompt
     template = prompt_template or name
     if prompt_template and text is not None:
-        raise _fail("--prompt names an existing template; drop --prompt-text/--prompt-file")
+        raise _fail("--prompt names an existing template; drop the prompt argument")
     if type_ == "prompt" and text is None and not _prompt_exists(target, template):
         raise _fail(
-            f"a prompt agent needs a prompt: --prompt-text or --prompt-file (they become "
-            f"prompts/{name}.md), or --prompt <name> naming a template that already exists "
-            f"(no prompts/{template}.md, and no packaged default by that name)"
+            f"a prompt agent needs a prompt: pass its text as an argument or `-` to read "
+            f"stdin (it becomes prompts/{name}.md), or --prompt <name> naming a template "
+            f"that already exists (no prompts/{template}.md, and no packaged default by "
+            f"that name)"
         )
     settings: dict = {}
     if prompt_template:
@@ -3255,31 +3222,6 @@ def manager_journal(
         if e.get("args"):
             line += f"  {e['args']}"
         typer.echo(line)
-
-
-@manager_app.command("log")
-def manager_log(
-    last: int = _LAST_OPT,
-    run: str | None = _RUN_OPT,
-    verbose: bool = _VERBOSE_OPT,
-    raw: bool = _RAW_OPT,
-    home: Path | None = _HOME_OPT,
-) -> None:
-    """Render one manager tick end to end: the digest it saw, what it said,
-    the actions it took (with their then-vs-now outcome), and what it cost."""
-    _run_log(home, "manager", last, run, verbose, raw)
-
-
-@manager_app.command("tail")
-def manager_tail(
-    lines: int = typer.Option(25, "-n", "--lines", help="Transcript entries to show."),
-    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines (Ctrl-C stops)."),
-    verbose: bool = _VERBOSE_OPT,
-    raw: bool = _RAW_OPT,
-    home: Path | None = _HOME_OPT,
-) -> None:
-    """Follow the manager's transcript as its tick runs."""
-    _run_tail(home, "manager", lines, follow, verbose, raw)
 
 
 def _parse_window(text: str) -> timedelta:
