@@ -14,6 +14,15 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- The surface inventory (#102): `scripts/surfaces.py` prints one table per
+  class of thing quorum exposes — CLI commands, options and arguments,
+  config keys, the home layout, TUI key bindings, prompt placeholders,
+  doctor checks, digest markers, guide sections — each with a count, read
+  from the code rather than the docs. `quorum doctor` ends with the same
+  three numbers as one informational `–` line (`surfaces: N commands,
+  M options, K config keys`, `surfaces` in `--json`, never a ✗), counted by
+  the shared `quorum.surfaces` module so the two cannot disagree. Re-run the
+  script after a change that adds or removes a surface.
 - The trust dials in one place (#85): a guide section, "Loosening the rails
   as trust is earned", tables every setting that records how far a home
   currently trusts its models — the launch cap, `max_actions_per_run`,
@@ -33,8 +42,8 @@ minute it is posted.
   collapsed to a size or an exit code, reasoning and noise events folded
   (`-v` unfolds all of it, `--raw` prints the old output byte for byte, an
   unrecognized event prints as its raw line rather than raising). The TUI's
-  transcript pane and the web dashboard's task detail render through the
-  same function, so the three surfaces cannot disagree, and the per-harness
+  transcript pane renders through the same function, so the surfaces cannot
+  disagree, and the per-harness
   event shapes now live in one place — `manager.loop_signal` and the
   runner's session-id capture read it too.
   `quorum manager log [--last N | --run <id>]` reads one *tick* end to end:
@@ -60,19 +69,18 @@ minute it is posted.
   a `notify` line. (#55)
 - Attention acknowledgement: `quorum board ack <message-id>` archives
   one board message, so an escalation you have handled
-  leaves the `#attention` banner in `quorum status`, the TUI header and the
-  web header instead of sitting there for the seven-day window — while
+  leaves the `#attention` banner in `quorum status` and the TUI header
+  instead of sitting there for the seven-day window — while
   `messages/archive/` keeps it with its original `created_at`. Ids resolve
   like task ids (full id, unique prefix, or the short suffix `board read`
   now prints); unknown and ambiguous are refused, never guessed at.
   `board ack --all <topic>` is `board clear <topic>`, implemented on top of
   it. The same ack is a keystroke in the TUI (`a` opens the `#attention`
   list and acks the highlighted line, notifying rather than crashing on an
-  unwritable home) and an **Ack** button per escalation in the web
-  dashboard's new Attention panel — both thin calls to one shared
+  unwritable home) — a thin call to one shared
   `MessageBus.ack_board_message`. Every list an ack acts on is a snapshot, so
-  a message archived out of band (the janitor, a second `board ack`, the web
-  panel) between the render and the keystroke is reported, never a traceback:
+  a message archived out of band (the janitor, a second `board ack`)
+  between the render and the keystroke is reported, never a traceback:
   the TUI notifies and stays up, and the CLI archives the path it already
   resolved instead of resolving twice. `--topic` alongside `--all` is refused
   — the `--all` argument is itself the topic. (#56)
@@ -93,7 +101,7 @@ minute it is posted.
   - `quorum task prune [--status] [--older-than] [--worktrees] [--dry-run]
     [--force]` moves finished tasks into `tasks/.archive/<id>/`. The
     directory is dot-prefixed, so every existing reader — `status`,
-    `task list`, the TUI, the web dashboard, the manager digest — skips it
+    `task list`, the TUI, the manager digest — skips it
     with no code change, and restoring a task is one `mv` back. Refuses a
     task with a live runner, an attached task, one another task still
     depends on, and (unless `--force`) one whose worktree holds uncommitted
@@ -116,7 +124,7 @@ minute it is posted.
   from "done and waiting on a human" — the default `manager.md` reads a
   merged task as needing nothing, and a `done` task whose PR was *closed
   unmerged* as one line for the human. `quorum status`, `task list`, `task
-  show`, the TUI and the web dashboard badge it (`✔` merged, `⊘` closed
+  show` and the TUI badge it (`✔` merged, `⊘` closed
   unmerged) without making a network call, because the manager tick records
   what it saw as `pr_state` / `pr_state_at` on `tasks/<id>/task.json`.
 
@@ -223,7 +231,7 @@ minute it is posted.
 - Issue intake: `quorum task add <project> --issue <number|url>` fetches an
   issue's title and body through `gh`, composes them (plus the issue URL)
   into the prompt, and records `issue_url` on the task — so `task list`,
-  the TUI, the web dashboard and the manager's digest all show `issue=#62`,
+  the TUI and the manager's digest all show `issue=#62`,
   `task show` prints the full URL, and the run preamble tells the harness
   which issue it is working from. A prompt given as well is appended as
   extra instructions. Unlike the manager's PR probe this fails loudly: no
@@ -270,7 +278,7 @@ minute it is posted.
   record each fact (`task.json`, `reports.jsonl`, the inbox and message
   archive, the agents' journals, `tasks/.archive`); nothing new is written.
   It still answers for a pruned task, resolved out of the archive. The same
-  list is the TUI's `t` tab on a task and a block on the web task page; the
+  list is the TUI's `t` tab on a task; the
   tab is a snapshot rather than a follower, since building it is too much
   work for the two-second tick — `r` rebuilds it. (#95)
 - `quorum usage [--by project|harness|week|agent] [--since 7d] [--json]`:
@@ -353,19 +361,33 @@ minute it is posted.
   lists the five properties that fence it — this is the case that note said
   to revisit for. (#57)
 
+### Removed
+- The web dashboard (#102). `quorum web`, the `web` optional-dependency
+  extra (fastapi, uvicorn), `src/quorum/web/` and its thirteen HTTP routes
+  are gone. The terminal dashboard is the one dashboard: `quorum tui` has
+  nudge, manager directive, run, cancel, hold/release, priority and
+  attention-ack, `quorum status [--json]` is the one-shot read of the same
+  model, and `quorum task history <id>` is the per-task list the web task
+  page carried. What the browser could do and the TUI cannot is on the CLI:
+  `quorum agent create`, `agent pause|resume|run-now|reload`, `project set`
+  and `board post`. Evidence for
+  the removal: the extra was never installed in the dogfood home and none
+  of the thirteen routes was ever exercised. Quorum now opens no ports at
+  all, which invariant 1 says outright.
+
 ### Fixed
 - Six review leftovers from the package (#81): a PR still `open` is no
   longer recorded onto a live task's `task.json` — the one file its own
   runner is concurrently writing, and a state no surface renders — while a
   merge, which every surface badges, is recorded wherever it is seen; a task
   already recorded `merged` is never probed again; `$! GATED` now renders in
-  the TUI and the web dashboard, not only in `task list`; `quorum task add
+  the TUI, not only in `task list`; `quorum task add
   <slug> -` validates the project,
   harness and `--after` ids *before* draining stdin, so a typo no longer eats
   a piped issue (and says so when `-` is typed at a terminal); `task prune`
   no longer refuses a `--no-worktree` task over unrelated dirt in the user's
-  own checkout; the web Attention panel lists every escalation the banner
-  counts, so each one has an Ack button; and `quorum down` asks an in-flight
+  own checkout; the TUI's `a` list carries every escalation the banner
+  counts, so each one can be acked; and `quorum down` asks an in-flight
   notification drain to stop after the message it is delivering instead of
   waiting for the whole batch.
 - The guidance pump could close a stream-json harness's stdin with a nudge
@@ -376,6 +398,12 @@ minute it is posted.
   and the count now happen under the same lock the close check takes.
 
 ### Upgrading
+- The web dashboard is gone, so reinstall without the extra:
+  `uv tool install quorum-orchestrator` (or `pip install
+  quorum-orchestrator`). `quorum-orchestrator[web]` no longer resolves;
+  fastapi and uvicorn are no longer pulled in. Any `[web]` key left in a
+  `config.toml` is ignored — quorum never read one, and nothing warns.
+  Use `quorum tui`, `quorum status` and `quorum task history <id>` instead.
 - Prompt seeds are now recognized by `prompts/.seeded.json`, which the
   first `quorum init` on this version writes for every prompt copy that
   matches the packaged default. A copy that is an *older* unedited seed at

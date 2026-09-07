@@ -887,12 +887,12 @@ def _plain(text: str) -> str:
 
 def test_help_keeps_config_table_names():
     """Rich treats [bracketed] text as markup; unescaped, the help would tell
-    users to edit "" instead of [harness.<name>] / [tasks] / [web]."""
+    users to edit "" instead of [harness.<name>] / [tasks]."""
     r = runner.invoke(app, ["task", "add", "--help"])
     assert "[harness.<name>]" in _plain(r.output)
     assert "[tasks].default_harness" in _plain(r.output)
-    r = runner.invoke(app, ["web", "--help"])
-    assert "[web]" in _plain(r.output)
+    r = runner.invoke(app, ["task", "adopt", "--help"])
+    assert "[harness.<name>]" in _plain(r.output)
 
 
 def test_version_flag():

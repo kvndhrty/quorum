@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync --all-extras            # dev setup (extras: web, nono; the TUI is a core dep)
+uv sync --all-extras            # dev setup (one extra: nono; the TUI is a core dep)
 uv run pytest                   # full suite
 uv run pytest tests/test_tasks.py::test_run_creates_worktree_and_streams_transcript
 uv run pytest -m "not nono_integration"   # what CI's unit-test matrix runs
@@ -23,7 +23,7 @@ builds with uv and publishes to PyPI via trusted publishing (OIDC, no token).
 
 `tests/test_nono_integration.py` self-skips when nono-py is missing or the platform
 lacks Landlock/Seatbelt; a dedicated CI job asserts support so it can never silently
-skip there. `test_web.py` needs the `web` extra (it `importorskip`s FastAPI).
+skip there.
 
 ## What quorum is
 
@@ -43,8 +43,8 @@ below govern nearly every change:
    APScheduler `BackgroundScheduler` — foreground by default, or detached with
    `up --detach` the same way task runs detach (`quorum down` SIGTERMs it and polls
    the lock). Task runs are detached child processes (they survive supervisor
-   restarts). No cron, systemd, daemonization frameworks, root, or open ports (the
-   web dashboard is opt-in, localhost-only).
+   restarts). No cron, systemd, daemonization frameworks, root, or open ports —
+   quorum has no server and nothing listens.
 2. **All state is plain files** under `QUORUM_HOME` (resolution: `--home` > `$QUORUM_HOME`
    > `./quorum-home` if present > `~/.quorum`). No database. Adding new durable state
    means adding a file layout, documented in `docs/architecture.md`.
@@ -57,7 +57,7 @@ below govern nearly every change:
 
 These are the project's *current* design commitments, not gospel. Quorum is
 evolving: any recorded stance — including the big three above and smaller ones
-noted per-layer below (e.g. the TUI/web reading files and writing only through
+noted per-layer below (e.g. the TUI reading files and writing only through
 thin shared bus calls) — is open to deliberate revision when a change is worth
 it. Don't contort a feature to fit an old rule; propose breaking the rule, and
 when it changes, update this file and `docs/architecture.md` in the same commit
@@ -267,8 +267,8 @@ option with a default has no row.
   result lines read `usage_from_event` rather than re-deriving cost, and why
   `manager.loop_signal` and the runner's session capture call in here). A
   pure reader, nothing cached: `task tail`/`task log`, `manager log`/`manager
-  tail`, `agent log`/`agent tail`, the TUI pane and the web task detail all
-  call `render`, so the surfaces cannot drift. Assistant text in full, tool
+  tail`, `agent log`/`agent tail` and the TUI pane all call `render`, so the
+  surfaces cannot drift. Assistant text in full, tool
   calls one line with their first argument, results collapsed to a size/exit
   code, reasoning and noise folded (`-v` unfolds, including every line's raw
   payload); **fail-soft is the rule** — an unknown event is its raw line, a
@@ -312,7 +312,7 @@ option with a default has no row.
   generic sibling: renders `prompts/<name>.md` (no digest, no wake condition;
   conditional behavior belongs in the prompt) and runs the harness with the
   same journal/cap rails under `state/agents/<name>/`. Prompt agents are
-  usually file-defined and created by `quorum agent create` or the web form
+  usually file-defined and created by `quorum agent create`
   (`agent create` accepts no prompt text when the template already resolves,
   and `--prompt <name>` reuses one — how the shipped `babysitter` example, a
   whole CI-reactive policy written as prompt text, is put to work).
@@ -331,14 +331,13 @@ option with a default has no row.
   `paused`. An hourly janitor archives expired board messages and returns
   crash-orphaned `cur/` claims to `new/`.
 - `views.py` — the shared read-model assembled purely from files (`overview` includes
-  `attention_summary`, a time-windowed read of the `attention` topic that `status`,
-  the TUI banner, and the web header all surface — the board has no read-state, so
-  "needs a look" is time-bounded, not tracked); `quorum status`, the
-  web app, and the TUI all read it and nothing else. `agent_rows` estimates a stale
+  `attention_summary`, a time-windowed read of the `attention` topic that `status`
+  and the TUI banner both surface — the board has no read-state, so
+  "needs a look" is time-bounded, not tracked); `quorum status` and the TUI
+  read it and nothing else. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/store/config calls shared with
-  the CLI — never view-local write logic. The two surfaces overlap only on nudge;
-  neither is a superset of the other. `task_history` (#95) is the post-hoc reader: one
+  the CLI — never view-local write logic. `task_history` (#95) is the post-hoc reader: one
   oldest-first list per task (`{at, at_text, kind, text, …}`, rendered everywhere by
   `history_line`) over task.json, `runner.lock` (the live run), reports.jsonl, the
   inbox `new/`/`cur/` plus the message archive (`MessageBus.archived_direct`), every
@@ -351,7 +350,7 @@ option with a default has no row.
   rather than by string comparison. Bounded is still ~0.4s on a home with real
   history, so the **TUI tab is a snapshot** — rebuilt on `t`, `r`, a dashboard
   write and opening another task, never on the 2s tick. Surfaced as
-  `task history [--json]`, the TUI `t` tab and `history` on the web task detail. **TUI**: nudge (`n`), manager directive (`m`,
+  `task history [--json]` and the TUI `t` tab. **TUI**: nudge (`n`), manager directive (`m`,
   the `manager` inbox, same as `quorum manager tell`), run (`s`,
   `runner.launch_detached`, refused on an attached task or a live runner) and cancel
   (`c`, a `cancelled` status update, the one destructive binding so it confirms
@@ -361,10 +360,7 @@ option with a default has no row.
   home notifies instead of taking the dashboard down. `a` is the fifth,
   aimed at the banner rather than a task: `AttentionScreen` is a picker (the
   banner is a count and the board pane is a log, so neither can be pointed
-  at) that dismisses with a message id, and the app acks it through `_write`. **Web**: nudge, board posts,
-  project edits, and agent create (via `config.create_agent`) /
-  pause / resume / run-now / reload, plus an Ack button per live escalation
-  (`POST /api/board/{topic}/ack/{message_id}`) — the same shared bus call.
+  at) that dismisses with a message id, and the app acks it through `_write`.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`

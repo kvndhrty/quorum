@@ -4,7 +4,7 @@ Artifact tests parse the configs the READMEs tell users to copy and assert
 they wire the harness's lifecycle events to the right quorum commands. The
 opencode plugin — the one adapter with logic of its own — is additionally
 driven for real under node with the PluginInput stubbed, against a real
-quorum home (skipped when node is absent, like test_web.py without FastAPI).
+quorum home (skipped when node is absent).
 """
 
 from __future__ import annotations

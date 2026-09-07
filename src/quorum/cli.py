@@ -724,7 +724,7 @@ def usage_cmd(
 #
 # Columns that are empty on every row are dropped, so a home with no PRs,
 # flags or reported usage does not grow blank headers. Cells are built from
-# the same `views.*_rows` dicts the TUI, web app and `--json` read, so the
+# the same `views.*_rows` dicts the TUI and `--json` read, so the
 # CLI renders and never re-derives.
 
 PLAIN_TABLE_WIDTH = 4096  # off-terminal render width: wide enough that no cell is cut
@@ -2405,7 +2405,7 @@ def board_ack(
 ) -> None:
     """Say "I have seen this one": archive a single board message.
 
-    The banner (`quorum status`, the TUI header, the web header) is a time
+    The banner (`quorum status`, the TUI header) is a time
     window over #attention, not a read-state — so an escalation you have
     already handled sits there for a week. Acking archives that one message
     into `messages/archive/YYYY-MM.jsonl.gz`, which drops it from every view
@@ -2443,7 +2443,7 @@ def board_ack(
         return
     _actor_guard(home_path, "board.ack", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
     # archive the path resolution already handed us: resolving a second time
-    # could miss (the janitor, another `board ack`, the web panel) and raise
+    # could miss (the janitor, another `board ack`, the TUI) and raise
     # where a tidy line belongs, and archiving a gone file is a no-op anyway
     bus.archive_board_message(path)
     typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
@@ -2725,28 +2725,7 @@ def integration_install(
         typer.echo(note)
 
 
-# -- dashboards ------------------------------------------------------------
-
-
-@app.command()
-def web(
-    port: int = typer.Option(8787, "--port"),
-    home: Path | None = _HOME_OPT,
-) -> None:
-    r"""Serve the local web dashboard on 127.0.0.1 (requires the \[web] extra)."""
-    target = get_home(home)
-    try:
-        import uvicorn
-
-        from .web.app import create_app
-    except ImportError:
-        raise _fail(
-            "the web dashboard needs the [web] extra: "
-            "uv tool install 'quorum-orchestrator[web]' "
-            "(or pip install 'quorum-orchestrator[web]')"
-        ) from None
-    typer.echo(f"dashboard: http://127.0.0.1:{port}")
-    uvicorn.run(create_app(target), host="127.0.0.1", port=port, log_level="warning")
+# -- dashboard -------------------------------------------------------------
 
 
 @app.command()
@@ -2769,7 +2748,7 @@ def tui(home: Path | None = _HOME_OPT) -> None:
 # readers over `state/<agent>/`: the digest snapshot a run was given, its
 # transcript, the actions the CLI journaled for it, and the ledger line
 # saying how it ended. Rendering is `transcript.py`'s, the same one the TUI
-# and the web dashboard use.
+# uses.
 
 
 def _resolve_run(home: Path, name: str, ref: str) -> str:
