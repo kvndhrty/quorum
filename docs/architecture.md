@@ -137,8 +137,8 @@ state/manager/runs/<run>.md       what that run was given: the situation
                                   head-truncated at SNAPSHOT_MAX_BYTES, only
                                   the newest SNAPSHOT_KEEP files kept — and
                                   read by nothing that decides anything: it
-                                  exists so `quorum manager log` can show what
-                                  a tick saw (see "Reading a run")
+                                  exists so `quorum agent log <name>` can show
+                                  what a tick saw (see "Reading a run")
 state/notify.json                 the [notify] hook's private board cursors
                                   (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
@@ -537,14 +537,14 @@ codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
 `TaskStore.resolve` accepts any unique prefix or suffix.
 
-**Where the prompt comes in.** `task add` takes the prompt from exactly one
-of three places: the positional argument, stdin (`-`), or `--prompt-file
-<path>`. Two at once is an error rather than a precedence rule, and empty
-(or whitespace-only) input is refused before anything is written — a task
-with nothing to do would still queue, launch, and spend a run. Both
-indirect paths read *bytes* and decode UTF-8 themselves instead of going
-through `read_text`, so what lands in `task.json` is byte-for-byte its
-source: the prompt is quoted verbatim into the harness's context, and
+**Where the prompt comes in.** `task add` takes the prompt from one place:
+the positional argument, which is `-` to read stdin instead. A file goes in
+as `quorum task add <project> - < plan.md`, so there is no second file
+option to keep in step with the first. Empty (or whitespace-only) input is
+refused before anything is written — a task with nothing to do would still
+queue, launch, and spend a run. Stdin is read as *bytes* and decoded here
+instead of through `sys.stdin.read`, so what lands in `task.json` is
+byte-for-byte its source: the prompt is quoted verbatim into the harness's context, and
 universal-newline translation or a stripped trailing newline would make a
 queued task differ from the issue it was piped from. `gh issue view N
 --json title,body | quorum task add <project> -` therefore still works, and
@@ -965,12 +965,10 @@ follow the bus's rule: **archive, never delete.**
   with no code change anywhere. Restoring one is `mv` in the other direction.
 - Cleared board and inbox messages go into the same
   `messages/archive/YYYY-MM.jsonl.gz` the janitor writes, keeping their
-  `created_at`. `board clear` is `archive_old`'s per-message path run
-  immediately for one topic (and `quorum board ack --all <topic>` is the same
-  sweep under the name a reader who has been acking one at a time reaches
-  for — one command implemented on top of the other, so the alias cannot
-  drift, and since its argument is the topic, a `--topic` alongside `--all`
-  is an error rather than a silently ignored flag); `inbox --clear` touches
+  `created_at`. `board clear <topic>` is `archive_old`'s per-message path run
+  immediately for one topic, and it is the only spelling of that sweep:
+  `board ack` takes one message id and nothing else, so neither command can
+  be mistaken for the other; `inbox --clear` touches
   `new/` only, because a message in `cur/` has a claimant.
 
 `prune.py` splits into total readers and two doers — `select()` (pure, over
@@ -1516,7 +1514,7 @@ nudges + relaunches with the *specific* failing check, and gives up to the
 human after two failed relaunches. Every bit of that is prompt text under
 the ordinary prompt-agent rails (journal + per-run action cap): the shape
 Sculptor and Jules grew in Python, quorum ships as a file you can edit.
-`agent create` therefore accepts a prompt agent with no `--prompt-text`
+`agent create` therefore accepts a prompt agent with no prompt text at all
 when the template already resolves (user file or packaged default).
 
 ## Messaging protocol
@@ -1563,7 +1561,7 @@ One `Message` schema serves two channels:
 - The same archive is where **on-demand** clearing goes: `MessageBus`
   exposes the janitor's per-message path as `archive_board_message`, with
   `ack_board_message` (behind `quorum board ack <id>`), `archive_topic`
-  (behind `quorum board clear` and its `board ack --all <topic>` alias) and
+  (behind `quorum board clear <topic>`) and
   `clear_inbox` (behind `quorum task inbox --clear`) on top of it. Clearing
   and acking are archival, not a flag on the message, so the board keeps
   carrying no read-state and any number of readers still coexist.
@@ -1814,10 +1812,11 @@ purpose; every listing, view and digest keeps skipping it.
 A transcript is complete and illegible: a claude run is a few hundred events
 of nested `tool_use` payloads and echoed tool output, and answering "what did
 it try, what came back, why did it stop" took `jq`. `transcript.py` renders
-those files as a narrative, and it is the *only* renderer — `quorum task tail`
-/ `task log`, `quorum manager log` / `manager tail`, `agent log` / `agent
-tail` and the TUI's transcript pane all call it, so the surfaces cannot
-drift into different readings of one file.
+those files as a narrative, and it is the *only* renderer — `quorum task log`,
+`quorum agent log` and the TUI's transcript pane all call it, so the surfaces
+cannot drift into different readings of one file. There is one command per
+transcript rather than a `log`/`tail` pair: `-n N` bounds the output to the
+last N entries, `-f` follows a live one, and neither is a separate verb.
 
 What it renders: the run's start (session id, working directory), assistant
 text in full, one line per tool call with its first argument trimmed, each
@@ -1840,17 +1839,19 @@ Three properties fence it:
   and a malformed entry as its `repr`; `normalize` catches everything. This
   runs in a dashboard refresh loop and in `-f` tails, where a raise is a dead
   surface.
-- **`--raw` is a promise.** It prints what `task tail` printed before the
-  renderer existed, byte for byte, so anything grepping a transcript keeps
-  working.
+- **`--raw` is a promise.** It prints what the old `task tail` printed
+  before the renderer existed, byte for byte, so anything grepping a
+  transcript keeps working.
 
-`quorum manager log [--last N | --run <id>]` reads one *tick* rather than one
-file, out of the four the tick leaves behind: the digest snapshot it was
-given (`state/manager/runs/<run>.md`), its transcript entries, the actions the
-CLI journaled for it — each with the then-vs-now target status the next digest
-would show — and the usage-ledger line saying how it ended. `agent log <name>`
-is the same reader over a prompt agent, whose snapshot is its rendered prompt.
-Every section degrades to a note rather than an error: a run whose snapshot
+`quorum agent log <name> [--last N | --run <id>]` reads one *tick* rather
+than one file, out of the four the tick leaves behind: the digest snapshot it
+was given (`state/<agent>/runs/<run>.md`), its transcript entries, the actions
+the CLI journaled for it — each with the then-vs-now target status the next
+digest would show — and the usage-ledger line saying how it ended. The manager
+is an agent here like any other (`agent log manager`); a prompt agent's
+snapshot is its rendered prompt. A tick happening right now has no ledger line
+yet, so `-n`/`-f` on the same command fall back to reading the transcript file
+directly. Every section degrades to a note rather than an error: a run whose snapshot
 has aged out of the bounded directory, or that died before writing a ledger
 line, still renders everything else.
 

@@ -171,7 +171,7 @@ def test_no_gh_on_path_is_an_error_naming_the_fix(home: Path, tmp_path: Path, pa
     with pytest.raises(forge.ForgeError) as e:
         forge.issue_view(home, "62", tmp_path)
     assert "no `gh` on PATH" in str(e.value)
-    assert "--prompt-file" in str(e.value)  # the way to proceed without gh
+    assert "quorum task add" in str(e.value)  # the way to proceed without gh
 
 
 def test_an_unknown_issue_is_an_error_quoting_the_cli(

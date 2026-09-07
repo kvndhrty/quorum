@@ -193,9 +193,8 @@ option with a default has no row.
   a sweep can't burn an agent's action cap half-way through. The board/inbox
   half lives in `messages.py` (`archive_board_message` → `ack_board_message`,
   `archive_topic`, `clear_inbox`), behind `quorum board ack`, `board clear`
-  and `task inbox --clear`. `board ack --all <topic>` and `board clear
-  <topic>` share one CLI helper (`_clear_topic`) so the alias cannot drift
-  from what it aliases.
+  and `task inbox --clear`. `board ack` takes one message and `board clear`
+  takes a whole topic — one spelling each, no alias between them.
 - `export.py` — `quorum task export <id>`: one `.tar.gz` of a task for
   sharing or a bug report, a **pure reader** in the #88 mold (no new
   state; the only write is the archive, refused inside the home and over
@@ -279,15 +278,18 @@ option with a default has no row.
   `normalize` — the seam `usage.py` owns for result events, which is why
   result lines read `usage_from_event` rather than re-deriving cost, and why
   `manager.loop_signal` and the runner's session capture call in here). A
-  pure reader, nothing cached: `task tail`/`task log`, `manager log`/`manager
-  tail`, `agent log`/`agent tail` and the TUI pane all call `render`, so the
-  surfaces cannot drift. Assistant text in full, tool
+  pure reader, nothing cached: `task log`, `agent log` and the TUI pane all
+  call `render`, so the surfaces cannot drift. There is one reader per
+  transcript, not a `log`/`tail` pair: `-n` bounds it to the last N entries
+  and `-f` follows a live one, and `agent log <name>` (the manager included,
+  as `agent log manager`) renders the *run* instead when neither is given.
+  Assistant text in full, tool
   calls one line with their first argument, results collapsed to a size/exit
   code, reasoning and noise folded (`-v` unfolds, including every line's raw
   payload); **fail-soft is the rule** — an unknown event is its raw line, a
   malformed entry its `repr`, `normalize` catches everything, because this
   runs in dashboard refreshes and `-f` tails. `--raw` is `raw_entry`: what
-  `task tail` printed before #82, byte for byte. `render_run` reads one agent
+  the old `task tail` printed before #82, byte for byte. `render_run` reads one agent
   *tick* out of four files — the digest snapshot
   (`state/<agent>/runs/<run>.md`, written by
   `agents/harness_run.write_run_snapshot`, the one new durable file: bounded
@@ -326,7 +328,8 @@ option with a default has no row.
   conditional behavior belongs in the prompt) and runs the harness with the
   same journal/cap rails under `state/agents/<name>/`. Prompt agents are
   usually file-defined and created by `quorum agent create`
-  (`agent create` accepts no prompt text when the template already resolves,
+  (its prompt body is its second argument, or `-` to read stdin; it accepts
+  no prompt text at all when the template already resolves,
   and `--prompt <name>` reuses one — how the shipped `babysitter` example, a
   whole CI-reactive policy written as prompt text, is put to work).
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single

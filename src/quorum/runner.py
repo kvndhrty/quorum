@@ -241,7 +241,7 @@ def note_transcript(path: Path, text: str) -> None:
 
     Everything quorum itself does to a run — an auto-commit, a stall, a
     stop — says so in the same stream the harness writes to, because that is
-    where every reader (the digest's `out|` tail, `task tail`, the TUI) is
+    where every reader (the digest's `out|` tail, `task log`, the TUI) is
     already looking. Never raises: a note that cannot be written must not
     cost the run its record.
     """
@@ -742,7 +742,7 @@ def stream_transcript(
     Each non-empty line becomes one entry: `{"at": ..., **extra}` plus either
     `event` (parsed JSON, also passed to `on_event`) or `line` (raw text).
     Both the task runner and the manager write transcripts through here, so
-    every reader (`read_transcript_tail`, the digest, `task tail`) sees one
+    every reader (`read_transcript_tail`, the digest, `task log`) sees one
     entry shape.
 
     `on_line` is called for every line, parsed or not — it is the "the

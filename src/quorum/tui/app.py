@@ -675,7 +675,7 @@ class QuorumTUI(App):
         return [views.history_line(row) for row in views.task_history(self.home, task)]
 
     def _task_log_lines(self, task_id: str) -> list[str]:
-        # the same renderer `quorum task tail` uses, so the surfaces cannot
+        # the same renderer `quorum task log` uses, so the surfaces cannot
         # drift into two readings of one file
         lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
         reports = read_reports(self.home, task_id, limit=8)

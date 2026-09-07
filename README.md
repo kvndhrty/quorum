@@ -79,7 +79,7 @@ Then:
 
 ```bash
 quorum status                # supervisor, agents, tasks, deadlines
-quorum task tail a3f2k9 -f   # live harness transcript
+quorum task log a3f2k9 -f    # live harness transcript
 quorum task nudge a3f2k9 "prefer the retry approach over sleeps"
 quorum manager tell "the api task is urgent; park everything else"
 quorum manager journal       # what the manager did, and why

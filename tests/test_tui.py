@@ -637,7 +637,7 @@ def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
 
 
 def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
-    """The TUI and `task tail` read one renderer, so what a
+    """The TUI and `task log` read one renderer, so what a
     person sees is the same wherever they look."""
     ids = populate(home)
     fsio.append_jsonl(tasks.transcript_path(home, ids[0]), {

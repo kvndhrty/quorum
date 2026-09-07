@@ -8,8 +8,8 @@ nested `tool_use` payloads and echoed tool output, and the questions a person
 asks of it ("what did it try, what came back, why did it stop") take `jq`.
 
 This module answers them without changing the record. It is a **pure reader**:
-nothing here writes, and the rendering is never cached — `task tail`, `task
-log`, `manager log` and the TUI's transcript pane all call
+nothing here writes, and the rendering is never cached — `task log`,
+`agent log` and the TUI's transcript pane all call
 `render()` on entries they read themselves, so the surfaces agree by
 construction rather than by convention.
 
@@ -26,7 +26,7 @@ Three properties it is built around, the same shape `usage.py` has:
   raise. This runs inside a dashboard's refresh loop and inside `-f` tails,
   where an exception on an event shape a harness added last week would take
   the whole surface down.
-- **The raw output survives.** `raw_entry` is the line `task tail` printed
+- **The raw output survives.** `raw_entry` is the line the old `task tail` printed
   before this module existed, byte for byte, and `--raw` still prints it —
   anything grepping a transcript keeps working.
 
@@ -514,7 +514,7 @@ def _block_lines(block: dict, at: str, source: str = "") -> list[Line]:
 
 
 def raw_entry(entry: dict) -> str:
-    """One transcript entry the way `task tail` printed it before this module
+    """One transcript entry the way the old `task tail` printed it before this module
     existed. `--raw` is this, byte for byte."""
     at = str(entry.get("at", "")).replace("T", " ").rstrip("Z")
     if "line" in entry:
@@ -614,7 +614,7 @@ def run_ledger(home: Path, name: str, run_id: str) -> dict | None:
 
 def _action_lines(home: Path, entries: list[dict]) -> list[str]:
     """Journaled actions with their then-vs-now outcome — the same reading the
-    next digest gives the manager, so `manager log` and the digest agree."""
+    next digest gives the manager, so `agent log manager` and the digest agree."""
     from .tasks import TaskStore
 
     try:

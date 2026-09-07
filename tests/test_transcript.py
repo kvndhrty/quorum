@@ -395,7 +395,7 @@ def invoke(*args: str) -> str:
     return result.output
 
 
-def test_task_tail_and_log_render_the_narrative(home: Path, project_run):
+def test_task_log_renders_the_narrative(home: Path, project_run):
     task_id, path = project_run
     short = task_id[-6:].lower()
 
@@ -407,7 +407,7 @@ def test_task_tail_and_log_render_the_narrative(home: Path, project_run):
     assert '{"type": "system", "session_id": "sess-fake-123"}' in raw
     assert raw.splitlines() == transcript.render(fsio.read_jsonl(path), raw=True)
 
-    assert invoke("task", "tail", short, "-n", "2").count("\n") <= 3
+    assert invoke("task", "log", short, "-n", "2").count("\n") <= 3
 
 
 def test_task_log_on_a_task_that_never_ran(home: Path, tmp_path: Path):
@@ -416,51 +416,62 @@ def test_task_log_on_a_task_that_never_ran(home: Path, tmp_path: Path):
     assert "no transcript yet" in invoke("task", "log", task.short_id)
 
 
-def test_manager_log_renders_a_tick_and_resolves_a_run_by_suffix(home: Path):
+def test_agent_log_renders_a_tick_and_resolves_a_run_by_suffix(home: Path):
     run_id = agent_run(home)
-    out = invoke("manager", "log")
+    out = invoke("agent", "log", "manager")
     assert "what it saw" in out and "what it said" in out
     assert "what it did" in out and "how it ended" in out
 
-    assert run_id in invoke("manager", "log", "--run", run_id[-6:])
-    assert run_id in invoke("manager", "log", "--run", run_id)
+    assert run_id in invoke("agent", "log", "manager", "--run", run_id[-6:])
+    assert run_id in invoke("agent", "log", "manager", "--run", run_id)
 
 
-def test_manager_log_last_renders_several_ticks_oldest_first(home: Path):
+def test_agent_log_last_renders_several_ticks_oldest_first(home: Path):
     first = agent_run(home, run_id="01AGENTRUN0000000000000001")
     second = agent_run(home, run_id="01AGENTRUN0000000000000002")
-    out = invoke("manager", "log", "--last", "2")
+    out = invoke("agent", "log", "manager", "--last", "2")
     assert out.index(first) < out.index(second)
-    assert invoke("manager", "log").count("=== manager run") == 1  # one tick by default
+    # one tick by default
+    assert invoke("agent", "log", "manager").count("=== manager run") == 1
 
 
-def test_manager_log_says_so_when_there_is_nothing_to_read(home: Path):
-    assert "no manager runs recorded yet" in invoke("manager", "log")
-    assert "manager has written no transcript yet" in invoke("manager", "tail")
+def test_agent_log_says_so_when_there_is_nothing_to_read(home: Path):
+    assert "no manager runs recorded yet" in invoke("agent", "log", "manager")
+    assert "manager has written no transcript yet" in invoke("agent", "log", "manager", "-n", "5")
 
 
 def test_an_unknown_run_reference_is_refused_not_guessed_at(home: Path):
     agent_run(home, run_id="01AGENTRUN0000000000000001")
     agent_run(home, run_id="01AGENTRUN0000000000000002")
-    missing = runner.invoke(app, ["manager", "log", "--run", "ZZZZZZ"])
+    missing = runner.invoke(app, ["agent", "log", "manager", "--run", "ZZZZZZ"])
     assert missing.exit_code == 1 and "no manager run matching" in missing.output
-    ambiguous = runner.invoke(app, ["manager", "log", "--run", "01AGENTRUN"])
+    ambiguous = runner.invoke(app, ["agent", "log", "manager", "--run", "01AGENTRUN"])
     assert ambiguous.exit_code == 1 and "matches 2 manager runs" in ambiguous.output
 
 
-def test_agent_log_and_tail_read_a_prompt_agent(home: Path):
+def test_agent_log_reads_a_prompt_agent_whole_or_as_a_tail(home: Path):
+    """One command, two readings: the run narrative by default, the
+    transcript itself under -n/-f — what `agent tail` used to print."""
     run_id = agent_run(home, name="standup", run_id="01AGENTRUN000000000000000S")
     out = invoke("agent", "log", "standup")
     assert run_id in out and "💬 abc123 is queued" in out
-    assert "💬 abc123 is queued" in invoke("agent", "tail", "standup")
+    assert "💬 abc123 is queued" in invoke("agent", "log", "standup", "-n", "5")
     assert "no nobody runs recorded yet" in invoke("agent", "log", "nobody")
+
+
+def test_agent_log_refuses_a_run_reference_with_a_tail(home: Path):
+    """--run reads a finished run out of four files; -n/-f follow the
+    transcript. Asking for both is asking for two different readings."""
+    run_id = agent_run(home)
+    result = runner.invoke(app, ["agent", "log", "manager", "--run", run_id, "-f"])
+    assert result.exit_code == 1 and "--run reads a finished run" in result.output
 
 
 @pytest.mark.parametrize("bad", ["../../etc", "Bad Name", "task-abc"])
 def test_an_agent_name_from_the_outside_stays_inside_the_home(home: Path, bad: str):
     """`agent log <name>` builds a path under state/agents/, so the name is
     validated the way every other agent-name entry point validates it."""
-    for command in (["agent", "log", bad], ["agent", "tail", bad]):
+    for command in (["agent", "log", bad], ["agent", "log", bad, "-n", "5"]):
         result = runner.invoke(app, command)
         assert result.exit_code == 1
         assert "invalid agent name" in result.output or "reserved" in result.output
