@@ -600,8 +600,8 @@ whose working directory holds uncommitted changes or unpushed commits
 task in that state `STRANDED-WORK`, which the default manager prompt answers
 by relaunching it with guidance to commit and push.
 
-**Auto-commit** is the safety net under that protocol, for the harness that
-crashes mid-edit and obeys nothing:
+**Auto-commit** is the safety net under that protocol, for a harness that
+crashes mid-edit or ignores its instructions:
 
 ```toml
 [tasks]
@@ -1184,8 +1184,8 @@ The prompt body is the second argument, or `-` to read it from stdin — the
 same grammar `task add` uses. This writes two plain files:
 `agents/standup.toml` (schedule, type, settings; hand-editable, and the one
 config location quorum itself may write) and `prompts/standup.md`, the prompt,
-which you can edit at any time. It also pokes a running supervisor, which
-schedules the agent within seconds. No restart, and `config.toml` is never
+which you can edit at any time. It also tells a running supervisor to
+schedule the agent, which happens within seconds. No restart, and `config.toml` is never
 touched.
 
 Each tick a prompt agent renders its prompt and runs your harness over it,
