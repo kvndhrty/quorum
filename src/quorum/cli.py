@@ -1967,9 +1967,8 @@ def task_inbox(
         typer.echo("no guidance waiting")
         return
     for path in entries:
-        try:
-            raw = fsio.read_json(path)
-        except (OSError, ValueError):
+        raw = fsio.read_json_or(path, None)
+        if raw is None:
             continue
         typer.echo(f"[from {raw.get('from', '?')} at {raw.get('created_at', '')}] "
                    f"{raw.get('payload', {}).get('text', '')}")
@@ -2196,11 +2195,8 @@ def task_cancel(
     TaskStore(target).update(task.id, status="cancelled")
     typer.echo(f"task {task.short_id} cancelled")
     if kill:
-        try:
-            pid = int(fsio.read_json(runner_lock_path(target, task.id)).get("pid", -1))
-        except (OSError, ValueError):
-            pid = -1
-        if pid > 0 and fsio.pid_alive(pid):
+        pid = fsio.read_pid(runner_lock_path(target, task.id))
+        if pid is not None and fsio.pid_alive(pid):
             os.kill(pid, signal.SIGTERM)
             typer.echo(f"sent SIGTERM to runner pid {pid}")
 

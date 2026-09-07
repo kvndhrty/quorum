@@ -94,11 +94,10 @@ def load_cursors(home: Path) -> dict[str, str] | None:
     path = state_path(home)
     if not path.exists():
         return {}
-    try:
-        data = fsio.read_json(path)
-    except (OSError, ValueError):
+    data = fsio.read_json_or(path, None)
+    if data is None:
         return None
-    cursors = data.get("cursors") if isinstance(data, dict) else None
+    cursors = data.get("cursors")
     if not isinstance(cursors, dict) or not all(
         isinstance(k, str) and isinstance(v, str) for k, v in cursors.items()
     ):

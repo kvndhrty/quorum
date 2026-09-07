@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import fsio, prune, usage
+from .agent import read_heartbeat
 from .config import Config, load_config_or_default, parse_schedule
 from .messages import MessageBus
 from .projects import ProjectRegistry
@@ -43,10 +44,10 @@ def supervisor_status(home: Path) -> dict[str, Any]:
     lock = home / "supervisor.lock"
     if not lock.exists():
         return {"alive": False}
+    meta = fsio.read_json_or(lock, {})
     try:
-        meta = fsio.read_json(lock)
         age = time.time() - lock.stat().st_mtime
-    except (OSError, ValueError):
+    except OSError:
         return {"alive": False}
     pid = meta.get("pid")
     # The mtime heartbeat is only touched once a minute, so on its own it
@@ -91,12 +92,7 @@ def agent_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]
     now = fsio.utc_now()
     rows = []
     for name, acfg in sorted(config.agents.items()):
-        hb_path = home / "state" / "agents" / name / "heartbeat.json"
-        hb: dict[str, Any] = {}
-        try:
-            hb = fsio.read_json(hb_path)
-        except (OSError, ValueError):
-            pass
+        hb = read_heartbeat(home, name)
         status = hb.get("status", "never-ran")
         next_run = hb.get("next_run")
         estimated = False
@@ -543,10 +539,7 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
     # The run in progress has no record yet — the runner writes one when it
     # ends — but its lock says when it began, and a live process holds it.
     if runner_alive(home, task.id):
-        try:
-            started = str(fsio.read_json(root / "runner.lock").get("started_at") or "")
-        except (OSError, ValueError, AttributeError):
-            started = ""
+        started = str(fsio.read_json_or(root / "runner.lock", {}).get("started_at") or "")
         if started:
             n = len(task.runs) + 1
             rows.append(

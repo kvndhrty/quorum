@@ -52,6 +52,7 @@ from .tasks import (
     TERMINAL_STATUSES,
     Task,
     TaskStore,
+    git_runner,
     runner_alive,
     short_handle,
     task_dir,
@@ -333,9 +334,7 @@ def _branch_exists(repo: Path, branch: str) -> bool:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60
-    )
+    return git_runner(repo)(*args)
 
 
 def _trim(text: str) -> str:

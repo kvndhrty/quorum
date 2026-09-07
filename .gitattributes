@@ -1,0 +1,6 @@
+# Every PR appends bullets to the same [Unreleased] list, so two branches
+# almost always touch adjacent lines and git reports a conflict where there
+# is no disagreement. A union merge keeps both sides' bullets; read the
+# result before releasing, since union can reorder or duplicate a bullet
+# that both branches edited.
+CHANGELOG.md merge=union

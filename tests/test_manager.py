@@ -372,6 +372,28 @@ def mark_runner_alive(home: Path, task_id: str) -> None:
     tasks.runner_lock_path(home, task_id).write_text('{"pid": 1}\n')  # alive, never ours
 
 
+def test_digest_survives_a_runner_lock_that_is_not_an_object(home: Path, clock, project: str):
+    """A hand-edited or truncated-then-refilled `runner.lock` holding valid
+    JSON that is not an object used to raise out of the liveness and stall
+    readings — TypeError or AttributeError, neither of them caught — which
+    fails every manager tick until someone deletes the file by hand."""
+    store = TaskStore(home)
+    task = store.add(project, "spinning", "tasktool")
+    store.update(task.id, status="executing")
+    bodies = [
+        "[]",
+        '"x"',
+        "null",
+        "not json at all",
+        '{"pid": 1, "started_at": []}',  # live lock, unusable timestamp
+        '{"pid": 1}',
+    ]
+    for body in bodies:
+        tasks.runner_lock_path(home, task.id).write_text(body)
+        digest = build_digest(home, store.list(), clock(), directives=[])
+        assert task.short_id in digest
+
+
 def test_digest_flags_a_looping_task_but_not_a_varied_one(home: Path, clock, project: str):
     store = TaskStore(home)
     looping = store.add(project, "spinning", "tasktool")

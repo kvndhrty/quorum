@@ -184,12 +184,28 @@ class AgentConfig(BaseModel):
     @field_validator("schedule")
     @classmethod
     def _check_schedule(cls, v: str) -> str:
-        if not _SCHEDULE_RE.match(v.strip()):
+        v = v.strip()
+        if not _SCHEDULE_RE.match(v):
             raise ValueError(
                 f"invalid schedule {v!r}: use 'every <N><s|m|h|d>' (e.g. 'every 30m') "
                 "or 'cron <minute> <hour> <dom> <month> <dow>'"
             )
-        return v.strip()
+        if v.startswith("cron"):
+            # The regex counts five fields; it does not know what a field may
+            # contain. APScheduler is the parser that will actually be given
+            # this expression, so ask it here: `Supervisor._schedule_agent`
+            # calls `add_job` outside the per-agent try that records a load
+            # failure, so an out-of-range field found there comes out of
+            # `quorum up` itself instead of marking one agent broken.
+            # Imported inside the validator to keep config.py cheap for the
+            # pure readers (views, doctor, the CLI's help path).
+            from apscheduler.triggers.cron import CronTrigger
+
+            try:
+                CronTrigger.from_crontab(" ".join(v.split()[1:6]))
+            except ValueError as e:
+                raise ValueError(f"invalid cron schedule {v!r}: {e}") from None
+        return v
 
 
 def parse_schedule(schedule: str) -> dict:

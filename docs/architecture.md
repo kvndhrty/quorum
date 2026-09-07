@@ -146,6 +146,21 @@ logs/supervisor.log, actions.jsonl
 plugins/                          drop-in custom agent modules
 ```
 
+Every one of those files is written atomically (dot-prefixed tmp in the same
+directory, fsync, rename) and read back through two functions in `fsio.py`.
+`read_json_or(path, default)` answers a dict or the caller's default —
+missing, unreadable, not JSON, and JSON that is not an object are all the
+default — and `read_pid(path)` answers an int pid or None for the lock files.
+Neither raises. That matters because these reads happen inside APScheduler
+jobs, digest builds and dashboard refreshes, where an exception is not a
+diagnostic but a stopped supervisor or a blank view: a hand-edited
+`runner.lock` holding `[]` used to raise out of every manager tick. Fail
+loudly is about the work quorum was asked to do, not about a bookkeeping file
+somebody edited. `agent.read_heartbeat` applies the same rule to
+`state/agents/<name>/heartbeat.json`, and `MessageBus.archived_records` to
+the compacted `messages/archive/`, where damage inside a gzip member raises
+`zlib.error` rather than an OSError.
+
 ## Prompts
 
 `quorum.prompts` resolves a template name three ways, in order: the home
@@ -1597,7 +1612,13 @@ One `Message` schema serves two channels:
   `new/` by the hourly janitor.
 - The janitor also compacts board messages older than
   `[quorum].retention_days` (per-message `ttl_days` overrides) into
-  `messages/archive/YYYY-MM.jsonl.gz`.
+  `messages/archive/YYYY-MM.jsonl.gz`. `MessageBus.archived_records` is the
+  one reader of those files — raw dicts addressed to one recipient, bounded
+  by a starting month, sorted by `(created_at, id)`, skipping a line that
+  will not parse and a month that will not decompress. `archived_direct` is
+  its validated face (Messages, for `views.task_history`) and
+  `export.delivered_guidance` takes the raw records, so an export keeps a
+  message the current schema would reject.
 - The same archive is where **on-demand** clearing goes: `MessageBus`
   exposes the janitor's per-message path as `archive_board_message`, with
   `ack_board_message` (behind `quorum board ack <id>`), `archive_topic`

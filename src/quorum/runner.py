@@ -60,6 +60,7 @@ from .tasks import (
     TaskRun,
     TaskStore,
     dependency_state,
+    git_runner,
     inbox_name,
     issue_ref,
     read_handoff,
@@ -1004,11 +1005,8 @@ def stop_run(
             "quorum never kills your session; end it yourself, or `quorum task detach` it"
         )
     lock = runner_lock_path(home, task.id)
-    try:
-        meta = fsio.read_json(lock)
-        pid = int(meta.get("pid", -1))
-    except (OSError, ValueError):
-        meta, pid = {}, -1
+    meta = fsio.read_json_or(lock, {})
+    pid = fsio.read_pid(lock) or -1
     if pid <= 0:
         raise RunnerError(
             f"task {task.short_id} has no live run to stop "
@@ -1236,6 +1234,4 @@ def _find_session_id(event: dict) -> str | None:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60
-    )
+    return git_runner(repo)(*args)

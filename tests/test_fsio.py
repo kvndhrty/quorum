@@ -169,3 +169,42 @@ def test_ulid_is_unique_across_threads_at_one_instant():
     for t in threads:
         t.join()
     assert len(set(minted)) == 1600
+
+
+def test_read_json_or_answers_the_default_for_everything_unreadable(tmp_path: Path):
+    """The fail-soft reader every state file goes through: the only two
+    outcomes are a dict and the caller's default."""
+    assert fsio.read_json_or(tmp_path / "missing.json", {}) == {}
+    assert fsio.read_json_or(tmp_path / "missing.json", None) is None
+
+    good = tmp_path / "good.json"
+    fsio.atomic_write_json(good, {"pid": 7})
+    assert fsio.read_json_or(good, {}) == {"pid": 7}
+
+    torn = tmp_path / "torn.json"
+    torn.write_text('{"pid": 7')
+    assert fsio.read_json_or(torn, {}) == {}
+
+    binary = tmp_path / "binary.json"
+    binary.write_bytes(b"\xff\xfe\x00")
+    assert fsio.read_json_or(binary, {}) == {}
+
+    # Valid JSON that is not an object: the shape that used to raise
+    # TypeError or AttributeError out of a caller's `.get()`.
+    not_object = tmp_path / "shape.json"
+    for body in ("[]", '"x"', "3", "null"):
+        not_object.write_text(body)
+        assert fsio.read_json_or(not_object, {}) == {}
+
+    assert fsio.read_json_or(tmp_path, {}) == {}  # a directory
+
+
+def test_read_pid_returns_an_int_or_nothing(tmp_path: Path):
+    lock = tmp_path / "runner.lock"
+    fsio.atomic_write_json(lock, {"pid": 4321, "started_at": "2026-01-01T00:00:00Z"})
+    assert fsio.read_pid(lock) == 4321
+
+    assert fsio.read_pid(tmp_path / "gone.lock") is None
+    for body in ("[]", '"x"', '{"pid": "nine"}', '{"pid": null}', '{"pid": 0}', "{}"):
+        lock.write_text(body)
+        assert fsio.read_pid(lock) is None

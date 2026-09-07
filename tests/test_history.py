@@ -6,7 +6,9 @@ here builds the files the way the substrate does and reads them back."""
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -240,6 +242,24 @@ def test_history_is_fail_soft_over_bad_files(home: Path):
     rows = views.task_history(home, task)
     assert kinds(rows) == ["queued", "report"]
     assert MessageBus(home).archived_direct(inbox_name(task.id)) == []
+
+
+def test_history_survives_a_corrupt_deflate_stream_in_the_archive(home: Path):
+    """gzip reports damage three ways and only two of them are OSErrors:
+    corruption inside the compressed data raises zlib.error, which used to
+    escape the archive scan and take `task history` (and the TUI tab and the
+    web task detail) down with it."""
+    task = TaskStore(home).add("proj", "x", "fake", now=at(1))
+    archive = home / "messages" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    good = gzip.compress(json.dumps({"to": inbox_name(task.id)}).encode() + b"\n")
+    # A valid gzip header (the first ten bytes) over random deflate data.
+    (archive / "2026-01.jsonl.gz").write_bytes(good[:10] + os.urandom(200))
+
+    assert MessageBus(home).archived_records(inbox_name(task.id)) == []
+    assert kinds(views.task_history(home, task)) == ["queued"]
+    r = runner.invoke(app, ["task", "history", task.short_id, "--home", str(home)])
+    assert r.exit_code == 0, r.output
 
 
 def test_cli_prints_the_life_and_emits_json(home: Path):

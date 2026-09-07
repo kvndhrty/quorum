@@ -36,6 +36,8 @@ from . import notify as notify_mod
 from .agent import (
     Agent,
     AgentContext,
+    heartbeat_path,
+    read_heartbeat,
     success_heartbeat_fields,
     tick_lock_path,
     write_heartbeat,
@@ -328,13 +330,9 @@ class Supervisor:
 
         "Unreadable" includes well-formed JSON that isn't an object: a
         hand-edited heartbeat must never raise into APScheduler and take the
-        tick down with it.
+        tick down with it. `agent.read_heartbeat` is where that rule lives.
         """
-        try:
-            data = fsio.read_json(self.home / "state" / "agents" / name / "heartbeat.json")
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        return read_heartbeat(self.home, name)
 
     def _write_heartbeat(self, name: str, **fields) -> None:
         try:
@@ -351,12 +349,9 @@ class Supervisor:
         Without this a fixed config.toml would keep showing the old error
         until the agent's first tick landed.
         """
-        path = self.home / "state" / "agents" / name / "heartbeat.json"
-        try:
-            current = fsio.read_json(path)
-        except (OSError, ValueError):
-            return
-        if not isinstance(current, dict):
+        path = heartbeat_path(self.home, name)
+        current = fsio.read_json_or(path, None)
+        if current is None:
             return
         if not current.pop("load_error", False):
             return

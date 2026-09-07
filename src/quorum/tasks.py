@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -234,10 +234,7 @@ def write_attached_state(
 
 
 def attached_state(home: Path, task_id: str) -> dict[str, Any] | None:
-    try:
-        return fsio.read_json(attached_path(home, task_id))
-    except (OSError, ValueError):
-        return None
+    return fsio.read_json_or(attached_path(home, task_id), None)
 
 
 def inbox_name(task_id: str) -> str:
@@ -374,11 +371,8 @@ def record_pr_state(home: Path, task: Task, state: str | None, now: Any = None) 
     if task.pr_state == state:
         return False
     path = task_json_path(home, task.id)
-    try:
-        data = fsio.read_json(path)
-    except (OSError, ValueError):
-        return False
-    if not isinstance(data, dict):
+    data = fsio.read_json_or(path, None)
+    if data is None:
         return False
     data["pr_state"] = state
     data["pr_state_at"] = fsio.iso(now or fsio.utc_now())
@@ -632,12 +626,8 @@ def read_reports(home: Path, task_id: str, limit: int | None = None) -> list[dic
 
 def runner_alive(home: Path, task_id: str) -> bool:
     """Whether a runner process currently holds this task's lock."""
-    try:
-        meta = fsio.read_json(runner_lock_path(home, task_id))
-        pid = int(meta.get("pid", -1))
-    except (OSError, ValueError):
-        return False
-    return pid > 0 and fsio.pid_alive(pid)
+    pid = fsio.read_pid(runner_lock_path(home, task_id))
+    return pid is not None and fsio.pid_alive(pid)
 
 
 def last_activity(home: Path, task_id: str) -> datetime | None:
@@ -660,6 +650,57 @@ def last_activity(home: Path, task_id: str) -> datetime | None:
     return datetime.fromtimestamp(newest, tz=UTC)
 
 
+GIT_PROBE_TIMEOUT_SECONDS = 10
+GIT_TIMEOUT_SECONDS = 60
+
+
+def git_runner(
+    cwd: Path, timeout: float = GIT_TIMEOUT_SECONDS
+) -> Callable[..., subprocess.CompletedProcess]:
+    """A `git -C <cwd> ...` caller, as one function instead of five copies.
+
+    Every git call quorum makes runs inside a task's worktree or the project
+    checkout that worktree came from, which is why this lives in `tasks.py`
+    beside the probes that use it (`workdir_git_state`,
+    `worktree_changed_paths`) rather than in `fsio.py`: fsio is filesystem
+    primitives and knows nothing about repositories or tasks.
+
+    Loud: a git that cannot be run at all (no binary, a timeout) raises, which
+    is what the mutating callers want — `runner.py` creating a worktree and
+    `prune.py` removing one both run in front of the person who asked. A git
+    that ran and exited non-zero is returned, not raised; the caller reads
+    `returncode`. Read-only probes use `git_probe` instead.
+    """
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout
+        )
+
+    return git
+
+
+def git_probe(
+    cwd: Path, timeout: float = GIT_PROBE_TIMEOUT_SECONDS
+) -> Callable[..., subprocess.CompletedProcess | None]:
+    """`git_runner`'s fail-soft face: None when git could not be run at all.
+
+    What the read-only probes want — the stranded-work and overlap probes and
+    `task export`'s diff feed digests, views and an export, all of which must
+    produce something rather than raise over a missing git or a hung call.
+    The short default timeout is the probe's, not the operation's.
+    """
+    run = git_runner(cwd, timeout)
+
+    def git(*args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return run(*args)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    return git
+
+
 def workdir_git_state(task: Task) -> dict[str, Any] | None:
     """Git state of the task's working directory, or None when there is
     nothing to probe (no workdir resolved yet, directory gone, not git).
@@ -677,16 +718,7 @@ def workdir_git_state(task: Task) -> dict[str, Any] | None:
     if not workdir.is_dir():
         return None
 
-    def git(*args: str) -> subprocess.CompletedProcess | None:
-        try:
-            return subprocess.run(
-                ["git", "-C", str(workdir), *args],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
+    git = git_probe(workdir)
 
     # --untracked-files=all: a repo-level `status.showUntrackedFiles no`
     # must not hide an untracked-only dirty tree from the stranded-work probe.
@@ -767,16 +799,7 @@ def worktree_changed_paths(task: Task) -> set[str] | None:
     if not workdir.is_dir():
         return None
 
-    def git(*args: str) -> subprocess.CompletedProcess | None:
-        try:
-            return subprocess.run(
-                ["git", "-C", str(workdir), *args],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
+    git = git_probe(workdir)
 
     inside = git("rev-parse", "--is-inside-work-tree")
     if inside is None or inside.returncode != 0 or inside.stdout.strip() != "true":
