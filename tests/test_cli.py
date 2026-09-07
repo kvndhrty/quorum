@@ -4,6 +4,7 @@ layer — everything else is exercised through the agents and views directly."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -843,6 +844,16 @@ def test_home_after_the_subcommand_is_no_longer_an_option(home: Path):
     """The per-command copies are gone; the flag has one position."""
     r = runner.invoke(app, ["task", "list", "--home", str(home)])
     assert r.exit_code == 2
+
+
+def test_root_home_is_exported_to_the_environment(home: Path, monkeypatch):
+    """Anything spawned without an environment of its own — a [notify] hook
+    calling quorum back, a harness under a foreground supervisor — must
+    resolve the home the command line named, not the default one."""
+    monkeypatch.setenv("QUORUM_HOME", str(home / "somewhere-else"))
+    r = runner.invoke(app, ["--home", str(home), "task", "list"])
+    assert r.exit_code == 0, r.output
+    assert os.environ["QUORUM_HOME"] == str(home)
 
 
 def test_status_surfaces_attention_and_empty_state(home: Path):

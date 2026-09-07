@@ -4,19 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
 
 from .. import fsio
-from ..actor import (
-    current_actor,
-)
+from ..actor import current_actor
 from ..messages import MessageBus
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _actor_guard,
     _confirm,
@@ -56,7 +49,7 @@ def board_read(
     bus = MessageBus(get_home())
     window = _parse_window(since)
     topics = [topic] if topic else bus.topics()
-    floor = fsio.utc_now() - window
+    floor = fsio.window_start(fsio.utc_now(), window)
     empty = True
     for t in topics:
         for msg in bus.read_topic(t, since=floor):

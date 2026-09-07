@@ -98,8 +98,10 @@ option with a default has no row.
   case-insensitive; `KeyError` for nothing, `ValueError` for more than one)
   behind tasks, board messages, notes, archived tasks and agent runs;
   `parse_window` is the **only** window grammar (a positive count and one of
-  `s m h d w`) behind `usage --since`, `board read --since`, `board clear
-  --before` and `task prune --older-than`; `parse_iso_or` is the fail-soft
+  `s m h d w`, refusing a count no date can express) behind `usage --since`,
+  `board read --since`, `board clear --before` and `task prune
+  --older-than`, with `window_start` the one subtraction so an impossible
+  window is a ValueError everywhere rather than an OverflowError; `parse_iso_or` is the fail-soft
   `parse_iso`; `display_ts` is the one way a stored stamp is printed.
 - `messages.py` — one `Message` schema over two channels: an append-only board
   (`messages/board/<topic>/`, filenames `<utc-compact>-<ULID>.json` so lexicographic
@@ -368,10 +370,12 @@ option with a default has no row.
   marks, once, for every surface (the `usage_text` precedent): `task_marker`
   (`⚭ ▶ ✓ ✗ ·`, before the short id), `task_badges` (`∞`, then `✔`/`⊘` for
   the PR), `task_flags` (`⚠` stranded work, `waiting-on`, `DEP-*`) and
-  `usage_badge` (spend plus `$!` / `$! GATED`) — called by the CLI table,
-  the TUI table and `task show`, and described by `quorum status --legend`.
-  A surface may choose *where* it puts them (the TUI has no flags column, so
-  it appends them to the status cell); it may not spell them differently.
+  `usage_badge` (spend plus `$!` / `$! GATED`) — all four called by the CLI
+  task table and the TUI task table, `task_badges` also by `task show`, and
+  described by `quorum status --legend` (whose agent markers are the CLI
+  listing's own: the TUI's agent table prints the status word). A surface
+  may choose *where* it puts them (the TUI has no flags column, so it
+  appends them to the status cell); it may not spell them differently.
   `task_history` (#95) is the post-hoc reader: one
   oldest-first list per task (`{at, at_text, kind, text, …}`, rendered everywhere by
   `history_line`) over task.json, `runner.lock` (the live run), reports.jsonl, the

@@ -256,7 +256,6 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     return rows
 
 
-
 # -- one rendering of a task row -------------------------------------------
 #
 # `task_rows` returns facts; these four turn them into the marks a person

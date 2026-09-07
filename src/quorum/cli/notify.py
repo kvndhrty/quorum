@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
 
 import typer
-
-if TYPE_CHECKING:
-    pass
 
 from ._common import (
     _fail,

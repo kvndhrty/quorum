@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
-
-if TYPE_CHECKING:
-    pass
 
 from ._common import (
     _actor_guard,

@@ -249,14 +249,10 @@ def report(
         raise ValueError(f"--by wants one of {', '.join(DIMENSIONS)}: {by!r}")
     home = Path(home)
     moment = now() if callable(now) else (now or fsio.utc_now())
-    try:
-        cutoff = moment - since if since is not None else None
-    except OverflowError:
-        # A window that reaches before year 1. `fsio.parse_window` catches the
-        # counts a timedelta itself refuses; this catches the ones it holds
-        # but no instant is that far along, and both reach the CLI as the
-        # same rejection.
-        raise ValueError(f"--since window reaches before any date: {since}") from None
+    # `fsio.window_start` turns the OverflowError of a window reaching
+    # before year 1 into the ValueError the caller already handles; the CLI
+    # rejects such a window at the option, so this is for a direct caller.
+    cutoff = fsio.window_start(moment, since) if since is not None else None
     if by == "agent":
         rows, total = agent_rows(home, cutoff)
     else:

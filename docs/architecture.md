@@ -76,11 +76,12 @@ interleaving.
 
 Resolution: `--home` flag > `$QUORUM_HOME` > `./quorum-home` (if it exists) >
 `~/.quorum`. `--home` is one option on the root app and goes before the
-subcommand (`quorum --home /path task list`); it was declared on all sixty
-commands until #102, which is a third of the CLI's option surface for one
-path. Every process quorum spawns is handed the resolved home in
-`$QUORUM_HOME`, so a detached run and a manager harness read the same tree
-without repeating the flag.
+subcommand (`quorum --home /path task list`); until #102 it was declared on
+54 of the 55 commands, 54 of the CLI's 172 option declarations for one
+path. The root callback also exports the resolved home as `$QUORUM_HOME`,
+and every process quorum spawns is handed it explicitly, so a detached run,
+a manager harness and a `[notify]` hook that calls quorum back all read the
+tree the command line named.
 
 ```
 config.toml                       user-owned; quorum never rewrites it
@@ -490,7 +491,10 @@ the rules of theme #88:
 - **A task belongs to the moment it was queued.** `--since` (one window
   grammar, `fsio.parse_window`: a positive count and one of `s m h d w`,
   shared with `board read --since`, `board clear --before` and `task prune
-  --older-than`) and the `week`
+  --older-than`, and refusing a count no date can express — the check is
+  `fsio.window_start`, which every reader that subtracts a window calls, so
+  the four commands answer an impossible window the same way instead of
+  three of them raising OverflowError) and the `week`
   dimension (ISO week, `2026-W36`) both read `created_at`: a task is in
   exactly one week and a window is a set of tasks, never runs sliced
   mid-task. Agent runs have no such anchor and filter on the ledger
@@ -1720,11 +1724,14 @@ The marks *inside* those cells are views', not the CLI's: `task_marker`
 `✗` blocked, `·` anything else), `task_badges` (`∞` perpetual, then `✔` or
 `⊘` for what the forge last said about the PR), `task_flags` (`⚠` stranded
 work, `waiting-on <ids>`, `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE`) and
-`usage_badge` (the spend plus `$!` or `$! GATED`). The CLI table, the TUI
-table and `task show` all call them, which is what stopped the two tables
-from disagreeing about where a dependency mark goes; `quorum status
---legend` describes exactly that set and nothing else. The TUI has no
-flags column of its own, so it appends the flags to the status cell. On a terminal the table is fitted to the window: the
+`usage_badge` (the spend plus `$!` or `$! GATED`). The CLI task table and
+the TUI task table call all four, which is what stopped the two from
+disagreeing about where a dependency mark goes; `task show` calls
+`task_badges` for the two marks it has room for and spells the rest out in
+words. `quorum status --legend` describes that set — plus the agent
+markers, which are the CLI listing's own, since the TUI's agent table
+prints the status word instead. The TUI has no flags column of its own, so
+it appends the flags to the status cell. On a terminal the table is fitted to the window: the
 report and flags (agents: error; projects: tags) columns absorb the
 shortfall with an ellipsis, so the id, status, harness, pr and usage
 columns stay whole down to the width at which the give-way column has

@@ -362,19 +362,20 @@ class MessageBus:
         ambiguous, exactly as task resolution does — a wrong ack is silent (the
         banner just drops something else), so both fail loudly.
         """
-        # the filename is <compact-ts>-<ULID>.json and the timestamp carries
-        # no "-", so the candidate ids come off the names without reading a
-        # single file; only the one that matches is parsed
-        paths = {
-            path.stem.split("-", 1)[-1].upper(): path
-            for name in ([topic] if topic else self.topics())
-            for path in fsio.sorted_entries(self.board_dir / name)
-        }
-        path = paths[fsio.resolve_handle(handle, paths, what="message handle")]
-        msg = _load(path)
-        if msg is None:
-            raise KeyError(handle)  # a file nobody can read is not a message
-        return msg, path
+        # The filename is <compact-ts>-<ULID>.json and the timestamp carries
+        # no "-", so a candidate id comes off the name. Only files that parse
+        # are candidates: one that does not can be read by nobody, so it must
+        # not join the ambiguity set and turn a good match into a refusal.
+        # That costs a read per live message, which is what `archive_topic`
+        # already pays and what a hand-typed ack can afford.
+        found: dict[str, tuple[Message, Path]] = {}
+        for name in [topic] if topic else self.topics():
+            for path in fsio.sorted_entries(self.board_dir / name):
+                candidate = path.stem.split("-", 1)[-1].upper()
+                msg = _load(path)
+                if msg is not None:
+                    found[candidate] = (msg, path)
+        return found[fsio.resolve_handle(handle, found, what="message handle")]
 
     def ack_board_message(self, handle: str, topic: str | None = None) -> Message:
         """Archive the one board message `handle` names — the per-message half

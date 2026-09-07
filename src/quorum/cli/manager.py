@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import typer
 
 from .. import fsio
-from ..actor import (
-    journal_path,
-)
+from ..actor import journal_path
 from ..messages import MessageBus
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _AGENT_OPT,
     _actor_guard,

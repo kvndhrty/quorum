@@ -10,16 +10,11 @@ import subprocess
 import sys
 import time
 from enum import StrEnum
-from typing import TYPE_CHECKING
 
 import typer
 
 from .. import doctor as doctor_mod
 from .. import home as home_mod
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _agent_table,
     _agent_usage_table,
@@ -202,7 +197,9 @@ def doctor(
         raise typer.Exit(1)
 
 
-STATUS_LEGEND = """glyphs (the same ones in `task list`, `status` and the TUI):
+STATUS_LEGEND = """glyphs. The task marks are the same in `status`, `task list`
+and the TUI; the agent markers below are this listing's own — the TUI's
+agent table prints the status word itself.
   before a task's id:
           ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
   after its status:

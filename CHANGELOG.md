@@ -317,10 +317,11 @@ minute it is posted.
 ### Changed
 - `--home` is one option on the root command and goes **before** the
   subcommand: `quorum --home /path/to/home task list`. It used to be
-  declared on all sixty commands, a third of the CLI's option surface for
-  one path, and `quorum task list --home /path` is now an unknown option.
-  `$QUORUM_HOME` is unchanged, and every process quorum spawns is still
-  handed the resolved home in its environment. (#102)
+  declared on 54 of the 55 commands — 54 of 172 option declarations for one
+  path — and `quorum task list --home /path` is now an unknown option.
+  `$QUORUM_HOME` resolution is unchanged, the root option is still exported
+  into the environment, and every process quorum spawns is still handed the
+  resolved home. (#102)
 - The marks on a task row are rendered in one place (`views.task_marker`,
   `task_badges`, `task_flags`, `usage_badge`) and every surface uses them,
   so the CLI table and the TUI no longer disagree. In the TUI a task's
@@ -333,7 +334,10 @@ minute it is posted.
   of `s m h d w`. `quorum usage --since 30s` and `board read --since 2w`
   are now accepted (each used to refuse one of the units the other took),
   and a malformed window is refused as a bad option (exit 2) wherever it
-  is given — `usage --since` used to exit 1. (#102)
+  is given — `usage --since` used to exit 1, and `board read --since`,
+  `board clear --before` and `task prune --older-than` used to end a window
+  too large to subtract from now (`142857142w`) in an OverflowError
+  traceback. (#102)
 - `quorum manager remember` from inside a task run is now refused. The
   runner used to strip the launcher's actor tag and set nothing in its
   place, so a task harness ran as `user` and the manager's notebook

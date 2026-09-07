@@ -6,7 +6,6 @@ import json
 import os
 import signal
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
 
@@ -14,14 +13,8 @@ from .. import fsio, usage
 from .. import home as home_mod
 from .. import prune as prune_mod
 from .. import transcript as transcript_mod
-from ..actor import (
-    current_actor,
-)
+from ..actor import current_actor
 from ..messages import MessageBus
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _FOLLOW_OPT,
     _LINES_OPT,

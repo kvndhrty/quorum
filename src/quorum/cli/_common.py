@@ -87,11 +87,17 @@ def _main(
 ) -> None:
     global _home_option
     _home_option = home
+    if home is not None:
+        # Exported as well as recorded: anything this process spawns without
+        # an environment of its own — a [notify] hook that calls quorum back,
+        # a harness the foreground supervisor runs — resolves the home the
+        # command line named rather than the default one.
+        os.environ["QUORUM_HOME"] = str(home)
 
 
 #: the --home given on the command line, before the subcommand. One option on
-#: the root app rather than a copy on each of sixty commands; `get_home` is
-#: the only reader, and `$QUORUM_HOME` still answers when nothing was given.
+#: the root app rather than a copy on every command; `get_home` is the only
+#: reader, and `$QUORUM_HOME` still answers when nothing was given.
 _home_option: Path | None = None
 
 
@@ -775,12 +781,15 @@ def _parse_window(text: str) -> timedelta:
 
 def _parse_before(text: str) -> datetime:
     """A cutoff instant, written either way round: a window back from now
-    (`7d`) or an absolute timestamp (`2026-09-01`, `2026-09-01T12:00:00Z`)."""
+    (`7d`) or an absolute timestamp (`2026-09-01`, `2026-09-01T12:00:00Z`).
+
+    Anything shaped like a window is judged as one, so a count no date can
+    express (`142857142w`) is refused in the words every other window option
+    uses; only text that is not a window at all is tried as a date.
+    """
     text = text.strip()
-    try:
-        return fsio.utc_now() - fsio.parse_window(text)
-    except ValueError:
-        pass
+    if fsio.looks_like_window(text):
+        return fsio.utc_now() - _parse_window(text)
     try:
         return fsio.parse_iso(text)
     except ValueError:

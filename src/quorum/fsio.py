@@ -135,6 +135,15 @@ _WINDOW_UNITS = {
 }
 
 
+def looks_like_window(text: str) -> bool:
+    """Whether `text` is shaped like a window at all — a count and one of the
+    five units. What it does not answer is whether that window is usable:
+    a caller that also accepts a date uses this to decide which of the two
+    mistakes to report, and `parse_window` decides the rest.
+    """
+    return bool(_WINDOW.match(text or ""))
+
+
 def parse_window(text: str) -> timedelta:
     """`90m` / `36h` / `7d` / `2w` / `30s` → a timedelta.
 
@@ -143,20 +152,42 @@ def parse_window(text: str) -> timedelta:
     units, so a person who has learned one has learned them all.
 
     ValueError for anything else, including `0d`: an empty window is a typo,
-    not a request. A count too large for a timedelta is a ValueError too,
-    not the OverflowError the constructor would raise — the caller rejects
-    one bad window with one message, and a number nobody can type by
-    accident is still a typo.
+    not a request. A count no date can express is a ValueError too, not the
+    OverflowError it would otherwise be — whether the count overflows the
+    timedelta itself (`9999...d`) or only the subtraction from now
+    (`142857142w`, a span a timedelta holds but no instant is far enough
+    along for). Both are the same typo to a person, so both raise the same
+    message and every window option refuses them the same way.
     """
     m = _WINDOW.match(text or "")
     if not m or int(m.group(1)) <= 0:
         raise ValueError(
             f"invalid window {text!r} — a positive count and a unit, e.g. 90m, 24h, 7d, 2w"
         )
+    too_long = ValueError(f"window {text!r} is longer than any date can express")
     try:
-        return timedelta(**{_WINDOW_UNITS[m.group(2)]: int(m.group(1))})
+        delta = timedelta(**{_WINDOW_UNITS[m.group(2)]: int(m.group(1))})
     except OverflowError:
-        raise ValueError(f"window {text!r} is longer than any date can express") from None
+        raise too_long from None
+    try:
+        window_start(utc_now(), delta)
+    except ValueError:
+        raise too_long from None
+    return delta
+
+
+def window_start(now: datetime, delta: timedelta) -> datetime:
+    """`now - delta`, as a ValueError rather than an OverflowError when the
+    result is before any date a datetime can name.
+
+    Every reader that takes a window subtracts it from some instant, and
+    `datetime` raises OverflowError there rather than at the timedelta —
+    which reached a person as a traceback in three of the four commands.
+    """
+    try:
+        return now - delta
+    except OverflowError:
+        raise ValueError(f"window of {delta} reaches before any date") from None
 
 
 def resolve_handle(

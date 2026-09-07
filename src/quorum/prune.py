@@ -133,7 +133,11 @@ def select(
     "finished a week ago" means to a reader.
     """
     wanted = {s.strip().lower() for s in statuses if s.strip()}
-    floor = (now or fsio.utc_now()) - older_than if older_than is not None else None
+    floor = (
+        fsio.window_start(now or fsio.utc_now(), older_than)
+        if older_than is not None
+        else None
+    )
     out = []
     for task in tasks:
         if task.perpetual or task.status.lower() not in wanted:

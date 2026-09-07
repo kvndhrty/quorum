@@ -4,16 +4,11 @@ the packaged default."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
 
 from .. import fsio
 from .. import prompts as prompts_mod
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _fail,
     get_home,

@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import typer
 
 from .. import fsio
 from .. import transcript as transcript_mod
-from ..actor import (
-    current_actor,
-)
+from ..actor import current_actor
 from ..messages import MessageBus
-
-if TYPE_CHECKING:
-    pass
-
 from ._common import (
     _FOLLOW_OPT,
     _LAST_OPT,
