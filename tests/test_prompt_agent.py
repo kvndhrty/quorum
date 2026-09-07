@@ -229,7 +229,7 @@ def test_a_failed_run_still_lands_in_the_ledger(home: Path, clock):
 
 
 def test_a_corrupt_ledger_line_is_silence_not_a_raise(home: Path):
-    """The ledger is read by status, the TUI, the web and the digest — a
+    """The ledger is read by status, the TUI and the digest — a
     hand-edited or truncated line must degrade to nothing, never propagate."""
     from quorum import usage
     from quorum.actor import usage_path

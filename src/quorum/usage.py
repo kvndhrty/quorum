@@ -306,7 +306,7 @@ def agent_usage(home: Any, name: str, limit: int = AGENT_USAGE_TAIL) -> dict[str
     entries = fsio.read_jsonl_tail(actor.usage_path(home, name), limit=limit)
     # A hand-edited or truncated line may parse to anything; only dicts with
     # a dict `usage` count, everything else is silence (never a raise out of
-    # status / the web / the digest).
+    # status / the TUI / the digest).
     reported = [
         e["usage"] for e in entries if isinstance(e, dict) and isinstance(e.get("usage"), dict)
     ]

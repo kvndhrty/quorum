@@ -239,7 +239,7 @@ def test_topic_scopes_the_cli_ack(home: Path):
 
 def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypatch):
     """Resolution hands back a path; between that and the archive the janitor
-    (or a second `board ack`, or the web panel) can take the file. Acking the
+    (or a second `board ack`, or the TUI) can take the file. Acking the
     path we already have makes that a no-op instead of a traceback from a
     second resolution — and the message is archived once, not twice."""
     bus = MessageBus(home)

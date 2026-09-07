@@ -1,4 +1,4 @@
-"""Shared read-model for `quorum status`, the web dashboard, and the TUI.
+"""Shared read-model for `quorum status` and the TUI.
 
 Everything here is assembled purely from files under QUORUM_HOME, so every
 view works whether or not the supervisor is running.
@@ -651,13 +651,13 @@ def recent_actions(home: Path, limit: int = 20) -> list[dict[str, Any]]:
 # The board has no read-state, so "needs a look" is time-bounded rather than
 # tracked: recent posts on the escalation topic. Old escalations age out of
 # the summary (and are eventually archived by the janitor); a handled one is
-# dropped early by acking it (`quorum board ack`, TUI `a`, the web Ack button),
+# dropped early by acking it (`quorum board ack`, TUI `a`),
 # which archives the message rather than marking it — see
 # `MessageBus.ack_board_message`. Each entry therefore carries its id, because
 # that is the handle every ack affordance needs.
 ATTENTION_WINDOW_DAYS = 7
-#: how many of those the *lists* carry — the TUI's `a` picker and the web
-#: panel, both of which ack a line and so need one entry per escalation the
+#: how many of those the *lists* carry — the TUI's `a` picker, which acks a
+#: line and so needs one entry per escalation the
 #: banner counts. `attention_summary`'s own default stays small for the
 #: banner-shaped callers that only ever show a couple.
 ATTENTION_LIST_LIMIT = 50
@@ -693,9 +693,8 @@ def overview(home: Path) -> dict[str, Any]:
         "projects": project_rows(home),
         "board": board_tail(home),
         # The full list, not the banner's handful: `overview` is what the
-        # web dashboard reads, and its Attention panel offers an Ack button
-        # per line — an escalation the panel never renders cannot be acked
-        # there at all.
+        # TUI reads, and its `a` picker acks one line at a time — an
+        # escalation the picker never renders cannot be acked there at all.
         "attention": attention_summary(home, limit=ATTENTION_LIST_LIMIT),
         "actions": recent_actions(home),
     }

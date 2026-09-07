@@ -26,9 +26,9 @@ quorum task add my-api "add rate limiting to the public endpoints, then open a P
 │             through `quorum task report` and reading guidance   │
 │             from `quorum task inbox`                            │
 └──────────────────── all state in ~/.quorum ─────────────────────┘
-        ▲                    ▲                    ▲
-   quorum status        quorum tui           quorum web
-   quorum manager tell  (steer with `n`)     (localhost only)
+        ▲                    ▲
+   quorum status        quorum tui
+   quorum manager tell  (steer with `n`)
 ```
 
 ## Install
@@ -37,11 +37,10 @@ Needs Python 3.11+.
 
 ```bash
 uv tool install quorum-orchestrator              # includes the TUI dashboard
-uv tool install "quorum-orchestrator[web]"       # + the localhost web dashboard
 uvx --from quorum-orchestrator quorum --help     # zero-install trial run
 ```
 
-(or `pip install "quorum-orchestrator[web]"` if you don't use uv.)
+(or `pip install quorum-orchestrator` if you don't use uv.)
 
 The PyPI distribution is `quorum-orchestrator`; the command it installs is
 plain `quorum` (and the import name is `quorum` too).
@@ -86,15 +85,9 @@ quorum manager tell "the api task is urgent; park everything else"
 quorum manager journal       # what the manager did, and why
 quorum tui                   # dashboard; select a task, press n to steer
                              # (m tells the manager, s runs, c cancels)
-quorum web                   # http://127.0.0.1:8787
 ```
 
 ## What it looks like
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-dark.png">
-  <img alt="quorum web dashboard" src="https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/web-light.png">
-</picture>
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
 
@@ -134,8 +127,8 @@ background runs? Because the same wave made sessions externally
 addressable — hooks, streaming protocols, control-plane APIs — and an
 outside layer can still own what a single vendor's cloud cannot: one queue
 over every harness, on your own disk, under a supervision policy you edit.
-No daemonization framework, no database, and no open ports beyond the
-opt-in localhost-only dashboard. The survey's ranked implications became
+No daemonization framework, no database, and no open ports at all. The
+survey's ranked implications became
 the project roadmap:
 [issue #23](https://github.com/kvndhrty/quorum/issues/23).
 
@@ -184,9 +177,9 @@ and the per-harness adapters under
   relaunches whatever died. No degraded fallback mode to babysit.
 - **All state is files** under `QUORUM_HOME` (default `~/.quorum`): task
   records, transcripts, a message board, inboxes — written with atomic
-  tmp+rename. The TUI and web dashboard read those files and work even when
-  the supervisor is down; what they write (a nudge, a directive, a run, a
-  cancel) is the same call the CLI makes. Copy the directory and your whole
+  tmp+rename. The TUI reads those files and works even when the supervisor
+  is down; what it writes (a nudge, a directive, a run, a cancel) is the
+  same call the CLI makes. Copy the directory and your whole
   setup moves.
 
 ## Supervision policy is a prompt

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import types
@@ -21,7 +22,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from quorum import doctor, fsio, installed_version
+from quorum import doctor, fsio, installed_version, surfaces
 from quorum import home as home_mod
 from quorum.cli import app
 from quorum.config import (
@@ -853,3 +854,43 @@ def test_status_points_at_doctor_when_an_agent_is_failing(home: Path):
     write_heartbeat(home, "manager", status="error", error="harness died", consecutive_failures=3)
     result = runner.invoke(app, ["status", "--home", str(home)])
     assert "`quorum doctor`" in result.output
+
+
+# -- the surfaces line -------------------------------------------------------
+
+
+def test_surfaces_check_is_informational(home: Path):
+    """Growth in the exposed surface is a number to look at, not a fault, so
+    the line is `na` — and it is the last thing the run reports."""
+    check = doctor.check_surfaces()
+    assert check.status == NA
+    assert check.name == "surfaces"
+    assert re.match(r"^surfaces: \d+ commands, \d+ options, \d+ config keys$", check.summary)
+    assert "scripts/surfaces.py" in check.fix
+
+
+def test_surfaces_check_counts_what_the_inventory_module_counts(home: Path):
+    counts = surfaces.counts()
+    assert doctor.check_surfaces().summary == (
+        f"surfaces: {counts['commands']} commands, "
+        f"{counts['options']} options, {counts['config_keys']} config keys"
+    )
+    assert counts["commands"] > 0 and counts["options"] > 0 and counts["config_keys"] > 0
+
+
+def test_doctor_command_ends_with_the_surfaces_line(home: Path):
+    disable_ci(home)
+    result = runner.invoke(app, ["doctor", "--home", str(home)])
+    assert result.exit_code == 0, result.output
+    assert "– surfaces: " in result.output
+    payload = json.loads(
+        runner.invoke(app, ["doctor", "--json", "--home", str(home)]).output
+    )
+    assert payload["checks"][-1]["name"] == "surfaces"
+    assert payload["checks"][-1]["status"] == NA
+
+
+def test_doctor_skips_the_surfaces_line_when_the_config_is_unreadable(home: Path):
+    """The run stops at an unloadable config, like every check below it."""
+    (home / "config.toml").write_text("[tasks\nbroken = ", encoding="utf-8")
+    assert "surfaces" not in [c.name for c in doctor.run_checks(home)]

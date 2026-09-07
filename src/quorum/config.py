@@ -334,8 +334,8 @@ def create_agent(
     prompt_text: str | None = None,
 ) -> AgentConfig:
     """Create a file-defined agent: agents/<name>.toml plus, when given,
-    prompts/<name>.md. Shared by `quorum agent create` and the web dashboard;
-    callers send the `agent.reload` poke themselves."""
+    prompts/<name>.md. Used by `quorum agent create`; callers send the
+    `agent.reload` poke themselves."""
     from . import fsio
 
     validate_agent_name(name)

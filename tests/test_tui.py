@@ -531,7 +531,7 @@ def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path):
 
 def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path):
     """The attention list is a snapshot: the janitor, a second `board ack` or
-    the web panel can archive the line between the render and the keystroke.
+    another `board ack` can archive the line between the render and the keystroke.
     That failure arrives as the KeyError board resolution raises, not as an
     OSError — and `_write` has to cover it, or the dashboard dies at the very
     keystroke you pressed to tidy up."""
@@ -718,7 +718,7 @@ def test_the_history_tab_is_a_snapshot_not_a_follower(home: Path, monkeypatch):
 
 
 def test_the_transcript_pane_shows_the_narrative_not_raw_events(home: Path):
-    """The TUI, `task tail` and the web dashboard read one renderer, so what a
+    """The TUI and `task tail` read one renderer, so what a
     person sees is the same wherever they look."""
     ids = populate(home)
     fsio.append_jsonl(tasks.transcript_path(home, ids[0]), {
