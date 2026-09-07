@@ -331,7 +331,20 @@ option with a default has no row.
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/store/config calls shared with
   the CLI — never view-local write logic. The two surfaces overlap only on nudge;
-  neither is a superset of the other. **TUI**: nudge (`n`), manager directive (`m`,
+  neither is a superset of the other. `task_history` (#95) is the post-hoc reader: one
+  oldest-first list per task (`{at, at_text, kind, text, …}`, rendered everywhere by
+  `history_line`) over task.json, `runner.lock` (the live run), reports.jsonl, the
+  inbox `new/`/`cur/` plus the message archive (`MessageBus.archived_direct`), every
+  agent's journal (`target` = short id, or a `task.prune` naming it) and
+  `tasks/.archive` (ctime) — records nothing, bounded (`HISTORY_JOURNAL_BYTES`),
+  fail-soft, and `quorum task history` resolves a pruned task through
+  `prune.resolve_archived`. Guidance is deduped by message id (delivered beats
+  claimed beats waiting: `ack()` archives before it unlinks `cur/`), and a stamp
+  that will not parse sorts after every real row with a `?` in its `at_text`
+  rather than by string comparison. Bounded is still ~0.4s on a home with real
+  history, so the **TUI tab is a snapshot** — rebuilt on `t`, `r`, a dashboard
+  write and opening another task, never on the 2s tick. Surfaced as
+  `task history [--json]`, the TUI `t` tab and `history` on the web task detail. **TUI**: nudge (`n`), manager directive (`m`,
   the `manager` inbox, same as `quorum manager tell`), run (`s`,
   `runner.launch_detached`, refused on an attached task or a live runner) and cancel
   (`c`, a `cancelled` status update, the one destructive binding so it confirms

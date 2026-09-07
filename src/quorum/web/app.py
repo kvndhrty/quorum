@@ -80,6 +80,9 @@ def create_app(home: Path) -> FastAPI:
             # browser is not a fourth reading of the transcript format
             "narrative": transcript.render(entries),
             "reports": read_reports(home, task.id, limit=20),
+            # The task's life in one list (views.task_history), rendered by
+            # the page as its own block under the transcript.
+            "history": views.task_history(home, task),
         }
 
     @app.post("/api/tasks/{task_id}/nudge")
