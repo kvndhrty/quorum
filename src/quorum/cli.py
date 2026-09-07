@@ -628,19 +628,22 @@ def doctor(
         raise typer.Exit(1)
 
 
-STATUS_LEGEND = """glyphs:
-  tasks:  ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
+STATUS_LEGEND = """glyphs (the same ones in `task list`, `status` and the TUI):
+  before a task's id:
+          ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
+  after its status:
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
              means nothing was ever observed (no PR yet, or no `gh` here)
-          ⏳ waiting on unfinished dependencies (`task add --after`); the
+  flags:  ⚠ uncommitted/unpushed work in the task's workdir
+          waiting-on <ids> unfinished dependencies (`task add --after`); the
              runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
              name dependencies that can never finish — nothing waits on those,
              they are yours (or the manager's) to decide about
-          ⚠ uncommitted/unpushed work in the task's workdir
-          $! a run went over [tasks].max_cost_per_run / max_tokens_per_run
-          cost/tokens are shown when the harness reported them, summed over runs
+  spend:  $! a run went over [tasks].max_cost_per_run / max_tokens_per_run;
+             $! GATED means the last one did, so the next run needs --force.
+             cost/tokens are shown when the harness reported them, summed over runs
   agents: ● idle   ◐ running   ✗ error   ‖ paused   ○ never ran
           an agent's own harness spend is shown when its harness reports it"""
 
@@ -899,59 +902,24 @@ def _pr_ref(url: str) -> str:
     return url
 
 
-def _task_flags(t: dict) -> str:
-    """The stranded-work and dependency observations, as the legend names them."""
-    flags = []
-    git = t.get("git")
-    if git and (git["dirty"] or git["unpushed"]):
-        risks = []
-        if git["dirty"]:
-            risks.append(f"{git['dirty']} uncommitted")
-        if git["unpushed"]:
-            risks.append(f"{git['unpushed']} unpushed")
-        flags.append("⚠ " + ", ".join(risks))
-    if t.get("waiting_on"):
-        flags.append(f"waiting-on {','.join(t['waiting_on'])}")
-    if t.get("dep_failed"):
-        flags.append(f"DEP-FAILED {','.join(t['dep_failed'])}")
-    if t.get("dep_missing"):
-        flags.append(f"DEP-MISSING {','.join(t['dep_missing'])}")
-    if t.get("dep_cycle"):
-        flags.append("DEP-CYCLE")
-    return "  ".join(flags)
-
-
 def _task_cells(t: dict) -> dict[str, str]:
-    if t.get("attached"):
-        marker = "⚭"
-    elif t["running"]:
-        marker = "▶"
-    else:
-        marker = {"done": "✓", "blocked": "✗"}.get(t["status"], "·")
+    from . import views
+
     report = _one_line(t.get("last_report"))
     if len(report) > REPORT_MAX_CHARS:
         report = report[: REPORT_MAX_CHARS - 1] + "…"
-    usage_text = t.get("usage_text") or ""
-    if t.get("budget_gated"):
-        usage_text = f"{usage_text} $! GATED".strip()
-    elif t.get("budget_overages"):
-        usage_text = f"{usage_text} $!".strip()
-    status = t["status"] + (" ∞" if t.get("perpetual") else "")
-    # The forge's word next to the harness's: "done ✔" is delivered, "done ⊘"
-    # is a PR someone closed without merging. Absent = never observed.
-    status += {"merged": " ✔", "closed": " ⊘"}.get(t.get("pr_state") or "", "")
     return {
-        "id": f"{marker} {t['id_short']}",
+        "id": f"{views.task_marker(t)} {t['id_short']}",
         "project": t["project"],
-        "status": status,
+        "status": t["status"] + views.task_badges(t),
         "harness": t["harness"],
         "report": report,
         # Where the task came from and where it went: both short forms,
         # both dropped as whole columns on a home that uses neither.
         "issue": t.get("issue_ref", ""),
         "pr": _pr_ref(t["pr_url"]) if t.get("pr_url") else "",
-        "flags": _task_flags(t),
-        "usage": usage_text,
+        "flags": views.task_flags(t),
+        "usage": views.usage_badge(t),
     }
 
 
@@ -1526,6 +1494,7 @@ def task_show(
     """Show one task: what it is, where it stands, its recent reports and
     its notebook."""
     from . import notes as notes_mod
+    from . import views
     from .config import load_config_or_default
     from .tasks import (
         TaskStore,
@@ -1542,7 +1511,12 @@ def task_show(
         typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
         return
     running = runner_alive(target, task.id)
-    state = task.status
+    # The badges every listing shows, then the words this surface has room
+    # for. `views.task_badges` reads a row, and the two fields it wants are
+    # on the task itself.
+    state = task.status + views.task_badges(
+        {"perpetual": task.perpetual, "pr_state": task.pr_state}
+    )
     if task.attached:
         state += " (attached to a live session)"
     elif running:

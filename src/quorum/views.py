@@ -262,6 +262,88 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     return rows
 
 
+
+# -- one rendering of a task row -------------------------------------------
+#
+# `task_rows` returns facts; these four turn them into the marks a person
+# reads, once, for every surface. `quorum status --legend` names exactly
+# this set of glyphs, and `usage_text` above set the precedent: a thing
+# shown two ways is rendered here and copied there.
+
+
+def task_marker(row: dict[str, Any]) -> str:
+    """The one-character state marker that leads a task's id cell.
+
+    Liveness first, because it is what a reader is looking for: an adopted
+    session, a live run, then the terminal statuses quorum itself knows
+    (`done`, `blocked`), then `·` for a status only the harness understands.
+    """
+    if row.get("attached"):
+        return "⚭"
+    if row.get("running"):
+        return "▶"
+    return {"done": "✓", "blocked": "✗"}.get(row.get("status") or "", "·")
+
+
+def task_badges(row: dict[str, Any]) -> str:
+    """The marks that follow a task's status word: `∞` for a perpetual task,
+    then the forge's word about its pull request.
+
+    "done ✔" is delivered and "done ⊘" is a pull request somebody closed
+    unmerged. The absence of both means nothing was ever observed — the
+    manager tick materializes `pr_state`, so a home with no `gh` never
+    badges one.
+    """
+    marks = " ∞" if row.get("perpetual") else ""
+    return marks + {"merged": " ✔", "closed": " ⊘"}.get(row.get("pr_state") or "", "")
+
+
+def task_flags(row: dict[str, Any]) -> str:
+    """Stranded work and unsatisfied dependencies: the observations that ask
+    a reader (or the manager) to decide something.
+
+    Only `waiting-on` blocks a run. `DEP-FAILED` / `DEP-MISSING` /
+    `DEP-CYCLE` name dependencies that can never finish, so nothing waits on
+    them and the decision is a person's.
+    """
+    flags = []
+    git = row.get("git")
+    if git and (git["dirty"] or git["unpushed"]):
+        risks = []
+        if git["dirty"]:
+            risks.append(f"{git['dirty']} uncommitted")
+        if git["unpushed"]:
+            risks.append(f"{git['unpushed']} unpushed")
+        flags.append("⚠ " + ", ".join(risks))
+    if row.get("waiting_on"):
+        flags.append(f"waiting-on {','.join(row['waiting_on'])}")
+    if row.get("dep_failed"):
+        flags.append(f"DEP-FAILED {','.join(row['dep_failed'])}")
+    if row.get("dep_missing"):
+        flags.append(f"DEP-MISSING {','.join(row['dep_missing'])}")
+    if row.get("dep_cycle"):
+        flags.append("DEP-CYCLE")
+    return "  ".join(flags)
+
+
+def usage_badge(row: dict[str, Any]) -> str:
+    """A task's spend with the budget marks on it, or "" when the harness
+    reported nothing.
+
+    `$!` says a run went over `[tasks].max_cost_per_run` /
+    `max_tokens_per_run`; `$! GATED` says the *last* run did, which is the
+    one the runner refuses to follow until `--force` or a cheaper run. The
+    gate is the sharper case, so it is spelled out rather than left to the
+    refusal.
+    """
+    text = row.get("usage_text") or ""
+    if row.get("budget_gated"):
+        return f"{text} $! GATED".strip()
+    if row.get("budget_overages"):
+        return f"{text} $!".strip()
+    return text
+
+
 # -- task history ----------------------------------------------------------
 #
 # One chronological list of what happened to a task, read back out of the
