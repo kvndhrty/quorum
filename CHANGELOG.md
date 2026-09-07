@@ -354,6 +354,27 @@ minute it is posted.
   to revisit for. (#57)
 
 ### Fixed
+- Notebook fixes from the review of the task-notebook change: a
+  `tasks/<id>/notes.jsonl` that cannot be read at all — a directory, or a
+  file the run has no permission for — failed every run of that task inside
+  prompt composition, before the harness was spawned and so with no run
+  record to say why; it now reads as an empty notebook, like every other
+  fail-soft read. A manager configured under another name
+  (`[agents.boss] type = "manager"`) was refused every `quorum task
+  remember`, because a task's notebook admitted the extra writer by the
+  literal name "manager" while the harness is tagged with the agent's own
+  name; the extra writer is now every agent whose configured type is
+  `manager`. The notebook's byte budget counted characters, so a notebook
+  written in a non-Latin script was handed up to three times the budget it
+  names; it counts UTF-8 bytes. `quorum task show` dropped the notebook's
+  header line, which its own comment said it kept, and printed no
+  `task remember` hint for a notebook whose live notes had all fallen
+  outside the read window. `quorum task remember` on an attached task said
+  "every future run reads it", which is not true of an adopted session —
+  nothing renders a notebook into one — and now says where the notes are
+  read instead. An agent could be named `task-` exactly: the name check
+  read it as an agent name rather than as the task namespace it collides
+  with.
 - Six review leftovers from the package (#81): a PR still `open` is no
   longer recorded onto a live task's `task.json` — the one file its own
   runner is concurrently writing, and a state no surface renders — while a

@@ -32,6 +32,11 @@ def lines(path: Path) -> list[dict]:
     return fsio.read_jsonl(path)
 
 
+def book(home: Path, owner: str = "manager"):
+    """The notebook under test: one value, whose methods are the whole API."""
+    return notes.agent_notebook(home, owner)
+
+
 def test_remember_notes_and_forget_round_trip(home: Path):
     r = invoke(home, "manager", "remember", NOTE)
     assert r.exit_code == 0, r.output
@@ -50,7 +55,7 @@ def test_remember_notes_and_forget_round_trip(home: Path):
     assert r.exit_code == 0, r.output
     # append-only: the note stays on disk, a tombstone hides it
     assert len(lines(notes_path(home))) == 2
-    assert notes.active(home) == []
+    assert book(home).active() == []
     assert NOTE not in invoke(home, "manager", "notes").output
 
     # and the human's two writes are auditable in the manager's journal
@@ -59,9 +64,9 @@ def test_remember_notes_and_forget_round_trip(home: Path):
 
 
 def test_forget_resolves_a_prefix_and_rejects_an_unknown_handle(home: Path):
-    entry = notes.remember(home, NOTE)
-    assert notes.resolve(home, entry["id"][:8])["id"] == entry["id"]
-    assert notes.resolve(home, notes.short_id(entry["id"]).upper())["id"] == entry["id"]
+    entry = book(home).remember(NOTE)
+    assert book(home).resolve(entry["id"][:8])["id"] == entry["id"]
+    assert book(home).resolve(notes.short_id(entry["id"]).upper())["id"] == entry["id"]
 
     r = invoke(home, "manager", "forget", "nosuch")
     assert r.exit_code == 1
@@ -70,9 +75,9 @@ def test_forget_resolves_a_prefix_and_rejects_an_unknown_handle(home: Path):
 
 def test_an_expired_note_retires_itself(home: Path):
     now = fsio.utc_now()
-    notes.remember(home, "the codex harness is rate-limited today", ttl_days=2, now=now)
-    assert len(notes.active(home, now=now + timedelta(days=1))) == 1
-    assert notes.active(home, now=now + timedelta(days=3)) == []
+    book(home).remember("the codex harness is rate-limited today", ttl_days=2, now=now)
+    assert len(book(home).active(now=now + timedelta(days=1))) == 1
+    assert book(home).active(now=now + timedelta(days=3)) == []
 
 
 def test_a_task_or_another_agent_may_not_write_the_managers_notebook(
@@ -109,7 +114,7 @@ def test_the_manager_actor_and_an_untagged_human_both_write(
     monkeypatch.delenv("QUORUM_ACTOR_RUN")
     assert invoke(home, "manager", "remember", "keep at most two tasks running").exit_code == 0
 
-    written = notes.active(home)
+    written = book(home).active()
     assert [e["sender"] for e in written] == ["manager", "user"]
     assert written[0]["run_id"] == "01TESTRUN"
 
@@ -123,14 +128,14 @@ def test_a_note_is_capped_per_run_like_any_other_agent_action(
     assert invoke(home, "manager", "remember", "first").exit_code == 0
     r = invoke(home, "manager", "remember", "second")
     assert r.exit_code == 1 and "action cap (1) reached" in r.output
-    assert [e["text"] for e in notes.active(home)] == ["first"]
+    assert [e["text"] for e in book(home).active()] == ["first"]
 
 
 def test_over_its_cap_the_notebook_keeps_the_newest_and_says_what_it_dropped(home: Path):
     for i in range(notes.NOTES_MAX_ENTRIES + 3):
-        notes.remember(home, f"standing fact {i}")
+        book(home).remember(f"standing fact {i}")
 
-    section = notes.digest_section(home)
+    section = book(home).render()
     assert section[0] == notes.SECTION_HEADER
     assert "3 older note(s) dropped" in section[1]
     assert "consolidate" in section[1]  # the manager is told what to do about it
@@ -141,10 +146,10 @@ def test_over_its_cap_the_notebook_keeps_the_newest_and_says_what_it_dropped(hom
 
 def test_the_newest_note_survives_however_long_the_others_are(home: Path):
     for i in range(6):
-        notes.remember(home, f"{i} " + "x" * notes.NOTE_MAX_CHARS)
-    notes.remember(home, "the one that matters")
+        book(home).remember(f"{i} " + "x" * notes.NOTE_MAX_CHARS)
+    book(home).remember("the one that matters")
 
-    section = notes.digest_section(home)
+    section = book(home).render()
     body = "\n".join(section[1:])
     assert "the one that matters" in section[-1]
     assert len(body) <= notes.NOTES_MAX_BYTES
@@ -153,12 +158,12 @@ def test_the_newest_note_survives_however_long_the_others_are(home: Path):
 
 
 def test_an_empty_notebook_teaches_the_command(home: Path):
-    assert notes.digest_section(home) == [notes.SECTION_HEADER, notes.EMPTY_LINE]
+    assert book(home).render() == [notes.SECTION_HEADER, notes.EMPTY_LINE]
     assert "quorum manager remember" in notes.EMPTY_LINE
 
 
 def test_agent_detail_carries_the_notebook_for_the_views(home: Path):
-    notes.remember(home, NOTE)
+    book(home).remember(NOTE)
     detail = views.agent_detail(home, "manager")
     assert [e["text"] for e in detail["notes"]] == [NOTE]
     assert NOTE in detail["notes_text"]
@@ -168,7 +173,7 @@ def test_agent_detail_carries_the_notebook_for_the_views(home: Path):
 def test_a_torn_or_foreign_line_never_breaks_a_reader(home: Path):
     """A digest build must survive anything on that file: the alternative is
     one hand-edited line failing every manager tick, forever."""
-    notes.remember(home, NOTE)
+    book(home).remember(NOTE)
     with open(notes_path(home), "a", encoding="utf-8") as f:
         f.write(json.dumps({"no": "id"}) + "\n")
         f.write(json.dumps({"id": 7, "ts": "2026-09-01T00:00:00Z", "text": "int id"}) + "\n")
@@ -177,13 +182,13 @@ def test_a_torn_or_foreign_line_never_breaks_a_reader(home: Path):
         f.write('{"id": "01BROKEN", "ts": "not-a-date", "text": "x", "ttl_days": 1}\n')
         f.write("{half a line\n")
 
-    section = "\n".join(notes.digest_section(home))
+    section = "\n".join(book(home).render())
     assert NOTE in section
     assert "int id" not in section and "null id" not in section
     # every reader over the same file, not just the digest ("01BROKEN" keeps
     # its note: an unparseable ttl loses the expiry, never the text)
-    assert [e["text"] for e in notes.active(home)] == [NOTE, "x"]
-    assert notes.resolve(home, notes.short_id(notes.active(home)[0]["id"]))["text"] == NOTE
+    assert [e["text"] for e in book(home).active()] == [NOTE, "x"]
+    assert book(home).resolve(notes.short_id(book(home).active()[0]["id"]))["text"] == NOTE
     r = invoke(home, "manager", "notes")
     assert r.exit_code == 0 and NOTE in r.output
     assert views.agent_detail(home, "manager")["notes_text"].count(NOTE) == 1
@@ -205,39 +210,39 @@ def test_a_notebook_owner_is_a_valid_agent_name(home: Path):
 
 
 def test_an_empty_handle_is_refused_rather_than_matching_everything(home: Path):
-    notes.remember(home, NOTE)
-    notes.remember(home, "and another")
+    book(home).remember(NOTE)
+    book(home).remember("and another")
     with pytest.raises(notes.NotebookError, match="handle is required"):
-        notes.resolve(home, "   ")
+        book(home).resolve("   ")
     r = invoke(home, "manager", "forget", "")
     assert r.exit_code == 1 and "handle is required" in r.output
-    assert len(notes.active(home)) == 2
+    assert len(book(home).active()) == 2
 
 
 def test_forget_honours_the_clock_it_is_given(home: Path):
     """`forget` resolves through `active`, which filters on `now`; a note that
     has expired by the caller's clock is no longer forgettable."""
     now = fsio.utc_now()
-    entry = notes.remember(home, "rate-limited today", ttl_days=1, now=now)
+    entry = book(home).remember("rate-limited today", ttl_days=1, now=now)
     handle = notes.short_id(entry["id"])
     with pytest.raises(notes.NotebookError, match="no note matching"):
-        notes.forget(home, handle, now=now + timedelta(days=2))
-    notes.forget(home, handle, now=now)
-    assert notes.active(home, now=now) == []
+        book(home).forget(handle, now=now + timedelta(days=2))
+    book(home).forget(handle, now=now)
+    assert book(home).active(now=now) == []
 
 
 def test_a_notebook_past_the_scan_window_says_what_it_could_not_read(home: Path):
     """The tail is bounded, so a big enough file hides its oldest notes —
     permanent ones included. The manager is told, and left to judge."""
-    notes.remember(home, "the oldest standing fact")
+    book(home).remember("the oldest standing fact")
     padding = {"id": "01PADPADPAD", "ts": "2026-01-01T00:00:00Z", "retired": True,
                "pad": "x" * 4000}
-    while notes.unscanned_bytes(home) == 0:
+    while book(home).unscanned_bytes() == 0:
         fsio.append_jsonl(notes_path(home), padding)
-    notes.remember(home, "today's fact")
+    book(home).remember("today's fact")
 
-    assert notes.unscanned_bytes(home) > 0
-    section = notes.digest_section(home)
+    assert book(home).unscanned_bytes() > 0
+    section = book(home).render()
     assert section[0] == notes.SECTION_HEADER
     assert "not scanned" in section[1] and "invisible" in section[1]
     assert "the oldest standing fact" not in "\n".join(section)  # what it warns about
@@ -247,9 +252,9 @@ def test_a_notebook_past_the_scan_window_says_what_it_could_not_read(home: Path)
 
 
 def test_a_small_notebook_says_nothing_about_the_scan_window(home: Path):
-    notes.remember(home, NOTE)
-    assert notes.unscanned_bytes(home) == 0
-    assert "not scanned" not in "\n".join(notes.digest_section(home))
+    book(home).remember(NOTE)
+    assert book(home).unscanned_bytes() == 0
+    assert "not scanned" not in "\n".join(book(home).render())
 
 
 def test_a_refused_write_is_journaled_too(home: Path, monkeypatch: pytest.MonkeyPatch):
