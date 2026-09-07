@@ -27,6 +27,18 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
 
+These three do not move with model capability, and neither do the smaller
+stances recorded per layer below: no decisions in Python, observations are
+never rails, a dropped signal is a bug. The settings that *do* move are
+dials that record how far the human trusts the model today: how many tasks
+run at once, the per-run action cap, the budget, the manager's cadence, who
+launches, who decomposes, who merges. They are listed with their loosening
+conditions in [guide.md](guide.md#loosening-the-rails-as-trust-is-earned),
+facing the list of what does not move, and `dials.py` is the registry
+behind that table (`quorum doctor` reads the current values from it). A
+change to either list is argued there and recorded here and in `CLAUDE.md`
+in the same commit.
+
 ## Process model
 
 ```
@@ -104,7 +116,7 @@ messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
                                   (+ journal.jsonl, notes.jsonl,
-                                  transcript.jsonl and usage.jsonl for
+                                  transcript.jsonl, usage.jsonl and runs/ for
                                   harness-driven agents other than the
                                   manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
@@ -114,6 +126,14 @@ state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent and how it went ({at, run,
                                   usage|null, outcome, duration_seconds})
+state/manager/runs/<run>.md       what that run was given: the situation
+                                  digest (an agent's rendered prompt), written
+                                  before its harness starts. Bounded twice —
+                                  head-truncated at SNAPSHOT_MAX_BYTES, only
+                                  the newest SNAPSHOT_KEEP files kept — and
+                                  read by nothing that decides anything: it
+                                  exists so `quorum manager log` can show what
+                                  a tick saw (see "Reading a run")
 state/notify.json                 the [notify] hook's private board cursors
                                   (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
@@ -917,6 +937,77 @@ that would stay unarchived because of it. A prune journals one entry through
 entries would burn an agent's action cap mid-sweep and leave the tidy
 half-finished.
 
+### Exporting a task: one archive for sharing a run
+
+Everything about a task is on disk, in three places: `tasks/<id>/` (the
+record, reports, transcript, runner log, and whatever a later feature puts
+next to them), `messages/inbox/task-<id>/` (guidance waiting or claimed)
+and — once a run has acked it — `messages/archive/YYYY-MM.jsonl.gz`, where
+delivered guidance sits mixed with every other message. Sharing a run, or
+attaching it to a bug report, used to mean knowing that layout. `quorum
+task export <id> [--out <path>] [--with-worktree-diff] [--redact]` writes
+one `.tar.gz` instead:
+
+```
+quorum-task-<short-id>/
+  export.json            task id, when, options, the member list
+  task.json, reports.jsonl, transcript.jsonl, runner.log, attached.json,
+  <subdir>/…             the task directory whole (tmp files skipped)
+  inbox/new/*.json       guidance waiting to be claimed
+  inbox/cur/*.json       guidance a run claimed and has not acked
+  inbox/delivered.jsonl  archived messages addressed to this task, oldest
+                         first — read back out of messages/archive/ (only
+                         the months from the task's creation onward are
+                         opened, since an ack can only land at or after it)
+  worktree.diff          --with-worktree-diff only
+```
+
+It is a reader of the same class as `prune.py`'s plan half, and the theme's
+stances (#88) hold: **no new state** — the archive is built from what is
+there, the manifest and `delivered.jsonl` are composed in memory, and the
+home's layout gains nothing; **read-only** apart from the output file,
+which defaults to `./quorum-task-<short-id>.tar.gz` and is *refused* inside
+the home (an archive under `tasks/<id>/` would be swept into the next export
+of that task, and nothing under the home should exist that the layout above
+does not document) and refused over an existing file; **nothing from the
+project directory**. That last one is why the diff is refused, loudly, for
+an attached or `--no-worktree` task: its workdir is the user's checkout, and
+the person asked for the diff, so silently omitting it would be the wrong
+kind of quiet. For a task with a quorum-made worktree, `worktree.diff` is
+`git diff` against the merge base with the same base `worktree_changed_paths`
+uses (`tasks._worktree_base`: the checkout's branch, else `origin/HEAD`, else
+the upstream), plus one `git diff --no-index` per untracked file so
+uncommitted new files are in the patch too — read-only plumbing, no fetch,
+no `add -N`. `runner.lock` is the one file in the task directory left out:
+it is a pid on this machine, not a fact about the task, and an unpacked
+archive must not look like it holds a live run. Member ownership is
+stripped (uid/gid 0, empty names) because the archive is meant to leave the
+machine. The archive is written beside its final name and renamed into
+place, so a failure mid-way leaves no half-file.
+
+`--redact` exists because tool results are where transcripts carry file
+contents, command output and secrets read off disk. It rewrites
+`transcript.jsonl` in the archive (never on disk) keeping the assistant's
+text, its thinking, and every tool *call* — name and arguments, which is
+how a reader follows what the run did — and replacing each tool *result*
+with a marker. The walk is structural and loose in the mold of
+`loop_signal`'s tool-call extraction: a dict tagged `tool_result` /
+`function_call_output` / `tool_call_output` has its output fields
+(`content`, `output`, `stdout`, …) replaced and its identity
+(`tool_use_id`, `is_error`, `call_id`) kept, while its remaining keys are
+walked rather than copied, so a payload filed under a name this module
+does not know is still reached; a tool-call item that carries its own
+output (codex's `command_execution` and `mcp_tool_call`, or any dict with
+a string `tool_name` — the same widening `_tool_fingerprints` makes) loses
+only the output fields;
+a `tool_use_result` field anywhere goes whole; past a depth bound a node is
+replaced rather than kept, because a redaction's failure direction has to
+be "dropped". A plain-text harness's `line` entries have no structure to
+redact and are kept verbatim — the command says how many, so nobody
+mistakes a `--redact` of an opencode transcript for a clean one. Counts of
+what was redacted come back with the archive path; there is no `--redact`
+of reports or guidance, which are what people wrote.
+
 ## The manager
 
 (User-facing how-to: [guide.md](guide.md#the-manager).)
@@ -1570,6 +1661,57 @@ the message it already queued. This revises the earlier "the views are pure
 readers whose one write affordance is nudging a task" stance (issue #11) —
 the invariant that survived it is *thin, shared, no view-local write logic*.
 
+### Reading a run
+
+A transcript is complete and illegible: a claude run is a few hundred events
+of nested `tool_use` payloads and echoed tool output, and answering "what did
+it try, what came back, why did it stop" took `jq`. `transcript.py` renders
+those files as a narrative, and it is the *only* renderer — `quorum task tail`
+/ `task log`, `quorum manager log` / `manager tail`, `agent log` / `agent
+tail`, the TUI's transcript pane and the web dashboard's task detail all call
+it, so the surfaces cannot drift into different readings of one file.
+
+What it renders: the run's start (session id, working directory), assistant
+text in full, one line per tool call with its first argument trimmed, each
+tool result collapsed to `N lines · size` (plus an exit code or an error's
+first line), quorum's own `quorum:` transcript notes, and a closing `result`
+line whose numbers come from `usage.usage_from_event` rather than a second
+reading of the same event. Reasoning blocks and the events that carry no
+story — the init banner's tool list, progress pings, token estimates, an
+allowed rate-limit notice — are folded away; `-v` unfolds all of it plus the
+full payload of every line.
+
+Three properties fence it:
+
+- **One place for harness shapes.** `tool_call`, `session_id` and `normalize`
+  are the only code that knows how each harness spells an event, on the seam
+  `usage.py` already owns for result events. `manager.loop_signal` reads
+  `transcript.tool_call` and the runner reads `transcript.session_id`, so
+  teaching quorum a new harness is one file.
+- **Fail-soft, always.** An unrecognized event renders as its raw JSON line
+  and a malformed entry as its `repr`; `normalize` catches everything. This
+  runs in a dashboard refresh loop and in `-f` tails, where a raise is a dead
+  surface.
+- **`--raw` is a promise.** It prints what `task tail` printed before the
+  renderer existed, byte for byte, so anything grepping a transcript keeps
+  working.
+
+`quorum manager log [--last N | --run <id>]` reads one *tick* rather than one
+file, out of the four the tick leaves behind: the digest snapshot it was
+given (`state/manager/runs/<run>.md`), its transcript entries, the actions the
+CLI journaled for it — each with the then-vs-now target status the next digest
+would show — and the usage-ledger line saying how it ended. `agent log <name>`
+is the same reader over a prompt agent, whose snapshot is its rendered prompt.
+Every section degrades to a note rather than an error: a run whose snapshot
+has aged out of the bounded directory, or that died before writing a ledger
+line, still renders everything else.
+
+The snapshot is the one thing here that writes, and it is deliberately not
+state: nothing reads it back to decide anything, it is head-truncated on write
+and only the newest `SNAPSHOT_KEEP` files are kept, and losing one costs a
+reader some history and the system nothing. Without it a tick's reasoning was
+unreconstructable — the digest was rendered, sent to the harness and dropped.
+
 ## Projects
 
 Canonical record: `projects/<slug>.json`. A `.quorum.toml` marker inside the
@@ -1687,7 +1829,11 @@ Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
 `forge.auth_status` (the module that owns every forge-CLI subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
-seeds by), sandbox support through `sandbox.availability()`. The
+seeds by), sandbox support through `sandbox.availability()`, the trust dials
+through `dials.current` (the registry the guide's table is tested
+against, rendered as `dial.*` lines that are `–` by construction: a
+cautious default and a deliberately loosened value are both facts, not
+faults). The
 `[notify]` line is static (argv[0] on PATH, `{text}` in the template);
 actually running the template is `quorum notify test`, which is loud
 where the supervisor's delivery is deliberately not.

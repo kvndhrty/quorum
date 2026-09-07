@@ -227,12 +227,19 @@ home: /Users/you/.quorum
     is running last release's policy
       → run `quorum init`: it upgrades unedited seeds in place
   ✓ supervisor running (pid 40680, since 2026-08-31T23:40:50Z)
+  – dial concurrent launches: house rule in prompts/manager.local.md (not parsed)
+      → dials explained: docs/guide.md#loosening-the-rails-as-trust-is-earned
+  – dial actions per agent run: manager 20 (default)
+  – dial manager cadence: every 5m
 ```
 
-`✓` is fine, `✗` is a problem, and `–` means there was nothing to check —
-something you switched off, never configured, or that could not answer
-(a `gh` that timed out is `–`, not a failure: offline says nothing about
-whether you are logged in). Only `✗` affects the exit code, so a `–` never
+`✓` is fine, `✗` is a problem, and `–` is everything that is neither. Most
+`–` lines mean there was nothing to check: something you switched off,
+never configured, or that could not answer (a `gh` that timed out is `–`,
+not a failure: offline says nothing about whether you are logged in). The
+`dial` lines are the other kind — they report a current setting rather
+than check it, and a cautious default and a value you loosened on purpose
+are both facts, not faults. Only `✗` affects the exit code, so a `–` never
 trains you to ignore the output — a freshly `init`ed home with no harness
 chosen yet says so in one `–` line and exits 0. Doctor **diagnoses and
 never repairs**: every `✗` names the fix, and applying it stays your call.
@@ -250,7 +257,11 @@ seed `quorum init` would upgrade / your own edit over a default that has
 since moved); and the state earlier runs left behind — a supervisor lock
 whose pid is gone or whose heartbeat stopped, an installed version newer
 than the running supervisor's, orphaned `runner.lock`s, inbox messages
-claimed and never acked, agents with a failure streak.
+claimed and never acked, agents with a failure streak. It ends with the
+current value of every trust dial (launch cap, action cap, budget, cadence,
+who launches, decomposes and merges), one `–` line each, so the posture
+described under [the trust dials](#loosening-the-rails-as-trust-is-earned)
+is read from the same command as the home's health; a dial is never a `✗`.
 
 **`--smoke` is the one thing doctor does actively**, and the only one that
 spends tokens: it runs your harness once, in a scratch directory, through
@@ -532,9 +543,13 @@ at stays where it is.
 ```bash
 quorum task list                  # every task, one line each (cost too, when reported)
 quorum task show a3f2k9           # what/where/how it stands (--json: raw record)
-quorum task tail a3f2k9 -f        # live transcript (the harness's stdout)
+quorum task tail a3f2k9 -f        # live transcript, rendered as a story
+quorum task log a3f2k9            # the whole run, same rendering
 quorum status                     # tasks alongside agents and projects
 ```
+
+What `tail` and `log` print is described under "Reading a run and reading a
+tick" below.
 
 Each section is a table fitted to the terminal: the report and flags
 columns are the ones cut with `…` where the window runs out, so the id,
@@ -717,8 +732,12 @@ journal:
 ```bash
 quorum manager tell "prioritize the api task; park the docs work"   # steer it
 quorum manager journal                    # audit everything it has done, and why
+quorum manager log                        # one tick end to end: saw, said, did, cost
 quorum manager notes                      # its notebook: what it remembers
 ```
+
+`journal` is the flat list of actions; `log` reads one whole tick, digest
+included — see [Watching](#watching-reading-a-run-and-reading-a-tick).
 
 A `tell` is normally read at the start of the next tick. If the manager's
 harness sets `inject = "stream-json"` (see [Harnesses](#harnesses)), a
@@ -813,6 +832,100 @@ The same file exists for every agent (`quorum manager remember --agent
 own notebook — and the same self-observation lines above it — wherever its
 template writes `{notes}`. Both dashboards show an
 agent's notebook when you select it.
+
+## Loosening the rails as trust is earned
+
+Quorum's constraints are of two kinds, and the difference matters when a
+better model arrives. Some encode distrust of the *environment*: rate
+limits, money, a laptop with no root and no open ports, a signal that must
+never be dropped silently. Those do not change with model capability, and
+they are listed under "What does not move" below. The rest are dials. Each
+one records how far you currently trust the model, and each should loosen
+as that trust is earned. A dial left at its cautious default forever costs
+throughput for nothing; an invariant loosened by mistake costs the property
+it protected. This table is every dial, where it lives, what an untouched
+home has, and the condition under which moving it is the right call.
+`quorum doctor` prints the current value of each one as a `–` line, so a
+home's trust posture is visible in the same place as its health.
+
+| dial | lives in | default | move it when |
+| --- | --- | --- | --- |
+| concurrent launches | `prompts/manager.local.md` house rule | none | rate-limit headroom, `overlaps=` rare |
+| actions per agent run (`max_actions_per_run`) | `[agents.<name>.settings]` | 20 | `cap.hit` on legitimate work |
+| seconds per agent run (`run_timeout_seconds`) | `[agents.<name>.settings]` | 300 | `TIMEOUT` on runs that progressed |
+| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account; before #43 (not built) |
+| stall watchdog (`run_stall_timeout_seconds`) | `[tasks]` | 0 (off) | a healthy run is silent for longer |
+| manager cadence | `[agents.manager]` `schedule` | `every 5m` (dogfood: `every 1h`) | events carry the facts (#83, not built) |
+| who launches | `prompts/manager.md` | the manager | tasks self-schedule (#83, not built) |
+| who decomposes | a person | a person | a spawn cap exists (#43, not built) |
+| merge gate | a person | a person | never removed; may move later |
+
+Row by row:
+
+- **Concurrent launches.** The packaged manager prompt sets no cap and
+  quorum counts nothing; a cap is a house rule in the manager's overlay
+  (the dogfood home says two). Raise it when the rate limit has headroom
+  and the digest rarely shows `overlaps=` marks.
+- **Actions per agent run.** Raise it when the journal shows `cap.hit` on
+  legitimate work rather than on a repeated intervention. A run that keeps
+  hitting the cap on the same action is the case the cap exists for.
+- **Seconds per agent run.** Raise it when the manager's self-observation
+  line shows `TIMEOUT` on runs that were making progress. A longer run also
+  spends more on a tick that has gone wrong.
+- **Per-run budget.** Set it on a metered account, and before task-spawned
+  tasks (#43, not built) exist. It flags a run and gates the next one; it
+  never stops a run in progress. Raise it as runs come in under it.
+- **Stall watchdog.** This one measures the harness, not trust: it counts
+  silence, not progress. Set it above the longest quiet step a healthy run
+  has (a full test suite, a cold build), and raise it when a healthy run
+  is silent for longer.
+- **Manager cadence.** The scaffold says `every 5m`; the dogfood home runs
+  `every 1h`. Slow it when events carry the facts (wake conditions, #83,
+  not built) and the tick is only a heartbeat. Every tick is one harness
+  run, so cadence is spend.
+- **Who launches.** Today every launch is a manager judgement made from the
+  digest, following `prompts/manager.md`. It moves when tasks can state
+  what they wait for and the supervisor fires them (#83, not built).
+- **Who decomposes.** Today a person queues every task with `task add`. It
+  moves when #43 lands with a spawn cap, and the cap is raised as spawned
+  work merges clean.
+- **Merge gate.** A person merges; quorum has no forge write path. This is
+  never removed. A review agent may later recommend a merge, and performing
+  one stays with a person.
+
+**What does not move.** These are the constraints the dials sit inside.
+They encode the environment, not the model, and a more capable model does
+not change what a laptop, a rate limit or a lost message is.
+
+- **No privileged infrastructure.** One ordinary process hosts the
+  scheduler, task runs are detached child processes, and there is no cron,
+  systemd, root or open port.
+- **All state is plain files** under `QUORUM_HOME`. No database, so `ls`
+  and `cat` remain the debugger and copying the directory remains the
+  migration.
+- **Fail loudly, recover automatically.** Views degrade to reading files.
+  Supervision does not degrade at all: without a working harness the
+  manager's tick raises every time and keeps firing until the service
+  returns. There is no reduced-capability supervisor.
+- **No decisions in Python.** Every launch, nudge, cancel and escalation is
+  the harness reading a digest and typing a command. A threshold in the
+  code is rendered into the digest, never acted on by the code.
+- **Observations are never rails.** `possible-loop`, `BUDGET-EXCEEDED`,
+  `CI-FAILING`, `overlaps=` and `waiting-on=` are data the manager judges.
+  The only rails are rate limits (the action cap, the budget gate) and the
+  substrate refusals that protect a checkout (`runner.lock`, an attached or
+  held task, unfinished dependencies), and none of them second-guesses a
+  decision.
+- **A dropped signal is a bug.** A report, a nudge, a directive or a board
+  message that goes missing is a defect, not acceptable degradation. The
+  notification hook is the one deliberate exception: it loses a message on
+  a crash rather than repeat it every fifteen seconds, and logs that it did.
+
+These two lists are where a change to either is argued: the design record
+([architecture.md](architecture.md)) and the contributor notes (`CLAUDE.md`)
+both point here. To loosen a dial, change the value where the table says it
+lives. To move an invariant, open an issue: that is a design change, and it
+updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 
 ## Prompt customization
 
@@ -995,6 +1108,51 @@ quorum task inbox a3f2k9 --clear         # archive what's waiting, undelivered
 Both take `--dry-run`, and `--clear` only touches unclaimed mail — a message
 some run is already holding is left alone.
 
+## Sharing a run
+
+A task's life is spread over its directory, its inbox and the message
+archive. To hand one run to someone — a colleague, a bug report, an issue
+comment — pack it into one archive:
+
+```bash
+quorum task export a3f2k9                        # ./quorum-task-a3f2k9.tar.gz
+quorum task export a3f2k9 --out ~/Desktop/run.tgz
+quorum task export a3f2k9 --with-worktree-diff   # + a patch of the worktree
+quorum task export a3f2k9 --redact               # drop what the tools returned
+```
+
+The archive unpacks to `quorum-task-<short-id>/` holding the task record,
+its reports, the transcript, the runner log, and the guidance it received:
+what is still waiting (`inbox/new/`), what a run is holding (`inbox/cur/`)
+and what was already delivered (`inbox/delivered.jsonl`, read back out of
+the message archive). An `export.json` at the top says which task, when,
+and which options were on. Anything a task keeps next to its record —
+a notebook or artifacts directory, once those exist — rides along.
+
+**What it never contains.** Nothing from your project directory. The only
+code in an export is `worktree.diff`, and only with
+`--with-worktree-diff`: the task's own worktree against the branch it
+forked from, uncommitted and untracked files included. A task that ran in
+your checkout (`--no-worktree`, or one you adopted) is refused the diff
+outright, with a message, rather than exporting your checkout.
+
+**What it never does.** It is read-only apart from the archive itself,
+which goes to the current directory by default and is refused inside
+`~/.quorum` (an export sitting under `tasks/<id>/` would be swept into the
+next export of that task) and over a file that already exists. Nothing in
+the home changes, and `runner.lock` stays out of the archive — it is a pid
+on this machine, not part of the record.
+
+**`--redact`.** Transcripts carry what the tools *returned* — file
+contents, command output, whatever a `cat` of the wrong file showed the
+model. `--redact` replaces every tool result with a marker and keeps the
+rest: the assistant's text, its thinking, and each tool call with its
+arguments, so a reader can still follow what the run did. The transcript on
+disk is untouched. It understands the structured transcripts claude and
+codex emit; a harness that prints prose has nothing to redact, and the
+command tells you how many plain-text lines it kept verbatim, so read
+those before you share them.
+
 ## Adopting a live session
 
 Sometimes the work is already underway — you're deep in a problem inside an
@@ -1059,6 +1217,91 @@ guidance itself always stays in the task inbox; the session collects it
 with `quorum task inbox <id> --claim`. An optional `[herdr]` table in
 config.toml overrides the socket path (`socket = "..."`) or disables the
 integration (`enabled = false`).
+
+## Watching: reading a run and reading a tick
+
+A transcript is every event the harness emitted, one JSON object per line.
+It is the complete record and it is unreadable — a few hundred lines of
+nested tool payloads and echoed output for one run. `quorum task tail` and
+`quorum task log` render it as a story instead:
+
+```
+$ quorum task log 5yqg9f
+[03:14:08] ▶ run started (session 6a183734 · /Users/you/.quorum/worktrees/01M1JAAX…)
+[03:14:10] 💬 I'll start by reading the issue and orienting in the codebase.
+[03:14:12] 🔧 Bash  gh issue view 82 --comments
+[03:14:13]   ↳ 214 lines · 8.1 kB
+[03:16:41] 🔧 Edit  src/quorum/transcript.py  (+41 −0)
+[03:16:42]   ↳ 1 line · 31 B
+[03:24:11] ■ result: success · 148 turns · 24m13s · $13.79 · 20.2M tok
+```
+
+Assistant text is shown in full — it is the run's reasoning, and the reason
+to read a transcript at all. Each tool call is one line with its first
+argument; each result collapses to a size, an exit code, or an error's first
+line. Reasoning blocks and the events that carry no story (the harness's init
+banner, progress pings, an allowed rate-limit notice) are folded away.
+
+Two flags:
+
+- `-v` unfolds everything: reasoning, full tool arguments, full results, the
+  folded events, and the raw payload behind every line.
+- `--raw` prints the transcript's own JSON lines, exactly as earlier versions
+  of `task tail` did — for grepping and for piping into `jq`.
+
+`task tail` takes `-n` (how many entries) and `-f` (follow a live run);
+`task log` renders the whole file. An event quorum does not recognize prints
+as its raw line rather than disappearing, so a harness it has never seen is
+still readable, just less pretty.
+
+**Reading a manager tick.** The manager's transcript is the same stream, but
+the question is different: not "what did it type" but "why did it do that".
+`quorum manager log` answers it from the four files one tick leaves behind:
+
+```
+$ quorum manager log
+=== manager run 01M1JN0ZB0GZG6WKNG6FH8VKNR — 2026-09-03T03:20:05Z
+
+--- what it saw (01M1JN0ZB0GZG6WKNG6FH8VKNR.md)
+# Situation digest — 2026-09-03T03:15:00Z
+## Active tasks
+- [queued] 5yqg9f readable logs (#82)
+… (48 more lines; -v for all)
+
+--- what it said
+[03:15:02] 💬 5yqg9f is queued, nothing is running, and no dependency is
+           unfinished — launching it.
+[03:15:03] 🔧 Bash  quorum task run 5yqg9f --detach
+
+--- what it did
+[03:15:04] task.run -> 5yqg9f  [queued -> executing]
+
+--- how it ended
+ok · 1m12s · $0.31 · 84.0k tok
+```
+
+"What it saw" is the digest the tick was rendered from, kept per run under
+`state/manager/runs/<run>.md`. "What it did" is the CLI's own journal — the
+actions quorum recorded, not the model's account of them — each with what its
+target's status was then and is now. "How it ended" is the usage ledger line.
+
+```bash
+quorum manager log                # the most recent tick
+quorum manager log --last 5       # the last five, oldest first
+quorum manager log --run 3g785y   # one tick, by id / prefix / suffix
+quorum manager tail -f            # follow the tick that is running now
+quorum agent log babysitter       # the same for a prompt agent
+quorum agent tail babysitter -f
+```
+
+`-v` and `--raw` mean the same things here. A prompt agent has no digest, so
+what it saw is its rendered prompt.
+
+Snapshots are bounded: the newest fifty runs per agent, each head-truncated.
+An older tick still renders — its transcript, journal and ledger lines are
+where they were — with `(no snapshot kept for this run)` where the digest
+would be. Nothing reads a snapshot back to decide anything; it exists only so
+you can see what a tick was looking at.
 
 ## Dashboards
 
@@ -1155,6 +1398,7 @@ quietly ignored.
   scripting). Task lifecycle lands on the `tasks` topic; manager
   escalations on `attention`.
 - `quorum manager journal` — what the manager did and why.
+- `quorum manager log` — one tick end to end, digest included.
 - `quorum manager notes` — what it is carrying forward between runs.
 
 ### What it cost, what it delivered
@@ -1638,6 +1882,9 @@ def test_milestone(tmp_path):
   state/manager/usage.jsonl         what each manager run cost and how it
                                     ended (agents get the same file under
                                     state/agents/<name>/)
+  state/manager/runs/<run>.md       the digest each tick was given, so
+                                    `manager log` can show what it saw
+                                    (newest fifty, head-truncated)
   state/notify.json                 where the [notify] hook is up to, per topic
   logs/supervisor.log, actions.jsonl
   plugins/                          your custom agents
