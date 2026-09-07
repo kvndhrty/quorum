@@ -31,7 +31,8 @@ Three properties it is built around, the same shape `usage.py` has:
   anything grepping a transcript keeps working.
 
 What "narrative" means, concretely: assistant text in full (it is the run's
-reasoning, and the whole point of reading a transcript), each tool call as one
+reasoning, and the whole point of reading a transcript), text that came *in*
+marked as such rather than as something the model said, each tool call as one
 line with its first argument trimmed, each tool result collapsed to a size or
 exit code, and the events that carry no story — a `system` init's tool list, a
 progress ping, an allowed rate-limit notice — folded away. `-v` unfolds all of
@@ -79,16 +80,23 @@ INCREMENTAL_RESULT_TYPES = frozenset({"token_count", "usage"})
 RESULT_EVENT_TYPES = usage.RESULT_EVENT_TYPES - INCREMENTAL_RESULT_TYPES
 
 # Structured events that say nothing a person reading a run needs: progress
-# pings, token estimates, the init banner's tool list, stream deltas.
-NOISE_EVENT_TYPES = frozenset(
-    {
-        "system",
-        "stream_event",
-        "tool_progress",
-        "item.updated",
-        "turn.started",
-        "thread.updated",
-    }
+# pings, token estimates, the init banner's tool list, stream deltas. The
+# incremental result types are folded here rather than merely kept out of
+# RESULT_EVENT_TYPES: codex emits a `token_count` every few seconds, and an
+# event that matches no other branch falls through to a raw line, which
+# prints in the default view.
+NOISE_EVENT_TYPES = (
+    frozenset(
+        {
+            "system",
+            "stream_event",
+            "tool_progress",
+            "item.updated",
+            "turn.started",
+            "thread.updated",
+        }
+    )
+    | INCREMENTAL_RESULT_TYPES
 )
 
 # How much of a session id identifies it on the start line: a uuid by its
@@ -106,9 +114,17 @@ TOOL_SUMMARY_CHARS = 100
 RESULT_PREVIEW_CHARS = 120
 DETAIL_MAX_CHARS = 4000
 
+# What a text block belongs to, when the event or the block says so. Text
+# that came *in* is not text the model produced: an inject-capable harness is
+# steered mid-run by `GuidancePump`, which writes the task prompt and every
+# inbox message as user turns, and a harness that echoes those turns would
+# otherwise render them as if the model had said them.
+USER_TURN_KINDS = frozenset({"user", "user_message"})
+
 KIND_ICONS = {
     "start": "▶",
     "text": "💬",
+    "user": "❯",
     "thinking": "🤔",
     "tool": "🔧",
     "tool_result": "  ↳",
@@ -436,7 +452,10 @@ def _normalize(entry: object) -> list[Line]:
         return [Line("noise", _trim(raw.text, RESULT_PREVIEW_CHARS), at, detail=raw.detail)]
 
     blocks = _content_blocks(event)
-    lines = [line for block in blocks for line in _block_lines(block, at)]
+    # the event's own type is the only place a claude content block's speaker
+    # is recorded — the blocks themselves are all `type: "text"`
+    source = str(event.get("type") or "")
+    lines = [line for block in blocks for line in _block_lines(block, at, source)]
     if lines:
         return lines
     # Blocks that render to nothing are silence, not an unknown shape: an
@@ -465,7 +484,9 @@ def _content_blocks(event: dict) -> list[dict]:
     return []
 
 
-def _block_lines(block: dict, at: str) -> list[Line]:
+def _block_lines(block: dict, at: str, source: str = "") -> list[Line]:
+    """`source` is the type of the event the block came out of, which is where
+    claude records whose turn it was; a codex item says so on the block."""
     kinds = {str(block.get(k)) for k in ("type", "item_type") if block.get(k) is not None}
     if kinds & {"tool_result", "function_call_output", "local_shell_call_output"}:
         return [_tool_result_line(block, at)]
@@ -484,7 +505,8 @@ def _block_lines(block: dict, at: str) -> list[Line]:
         return [Line("thinking", text, at)] if text else []
     text = _text_of(block)
     if text:
-        return [Line("text", text, at)]
+        speaker = "user" if (source in USER_TURN_KINDS or kinds & USER_TURN_KINDS) else "text"
+        return [Line(speaker, text, at)]
     return []
 
 

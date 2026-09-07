@@ -177,6 +177,41 @@ def test_codex_shapes_read_the_same_as_claude():
     assert len(out) == 6
 
 
+def test_codex_incremental_token_counts_are_folded_like_any_other_ping():
+    """codex reports its running total every few seconds. Those events are
+    `usage.py`'s business, not a reader's: they must fold as noise, not fall
+    through to a raw line, which prints in the default view."""
+    entries = [
+        codex({"type": "token_count",
+               "info": {"total_token_usage": {"input_tokens": 900, "output_tokens": 12}}}),
+        codex({"type": "usage", "input_tokens": 900, "output_tokens": 12}),
+    ]
+    assert rendered(entries) == ""
+    # -v still shows them, and the turn's own result line is untouched
+    assert "token_count" in rendered(entries, verbose=True)
+    assert rendered([codex({"type": "turn.completed",
+                            "usage": {"total_tokens": 1500}})]).endswith("■ result: 1.5k tok")
+
+
+def test_text_that_came_in_is_not_text_the_model_said():
+    """A pumped run is steered by user turns (the task prompt itself, then
+    every inbox message). A harness that echoes them must not render them as
+    the model's own output."""
+    entries = [
+        {"at": "2026-09-01T10:00:00Z", "event": {"type": "user", "message": {"content": [
+            {"type": "text", "text": "guidance: stop and report"}]}}},
+        {"at": "2026-09-01T10:00:01Z", "event": {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "understood, reporting now"}]}}},
+        codex({"type": "item.completed",
+               "item": {"item_type": "user_message", "text": "another directive"}},
+              at="2026-09-01T10:00:02Z"),
+    ]
+    out = rendered(entries).splitlines()
+    assert out[0] == "[10:00:00] ❯ guidance: stop and report"
+    assert out[1] == "[10:00:01] 💬 understood, reporting now"
+    assert out[2] == "[10:00:02] ❯ another directive"
+
+
 def test_tool_results_report_errors_and_the_argument_is_the_first_one():
     entries = [
         {"at": "2026-09-01T10:00:00Z", "event": {"type": "assistant", "message": {"content": [

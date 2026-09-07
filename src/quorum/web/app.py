@@ -69,13 +69,16 @@ def create_app(home: Path) -> FastAPI:
         task = TaskStore(home).get(task_id)
         if task is None:
             raise HTTPException(404, f"no task {task_id!r}")
+        # read once: the raw record and the narrative are two renderings of
+        # the same entries, and `render` does not mutate what it is given
+        entries = read_transcript_tail(home, task.id, limit=40)
         return {
             **task.model_dump(),
             "running": runner_alive(home, task.id),
-            "transcript": read_transcript_tail(home, task.id, limit=40),
+            "transcript": entries,
             # the narrative the CLI and the TUI print, rendered here so the
             # browser is not a fourth reading of the transcript format
-            "narrative": transcript.render(read_transcript_tail(home, task.id, limit=40)),
+            "narrative": transcript.render(entries),
             "reports": read_reports(home, task.id, limit=20),
         }
 
