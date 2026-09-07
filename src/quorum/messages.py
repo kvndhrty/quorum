@@ -18,6 +18,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import zlib
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -266,21 +267,33 @@ class MessageBus:
         entries = fsio.sorted_entries(self.inbox_dir / agent / folder)
         return [m for m in (_load(p) for p in entries) if m]
 
-    def archived_direct(self, to: str, since: datetime | None = None) -> list[Message]:
-        """Every archived message that was addressed to `to`, oldest first.
+    def archived_records(self, to: str, since: datetime | None = None) -> list[dict[str, Any]]:
+        """Raw archived records addressed to `to`, oldest first.
 
         The archive (`messages/archive/YYYY-MM.jsonl.gz`) is where a claimed
         inbox message goes when its consumer acks it — so for a task's inbox
         this is the record of guidance that was consumed. `since` bounds the
         read to the monthly files from that month on (the archive is filed by
-        the month the message was archived, never earlier than it was sent).
-        Fail-soft throughout: a file that will not decompress or a line that
-        will not parse is skipped, because this is read by views, and a view
-        that raises over one bad byte of history is worse than one missing
-        line.
+        the month the message was archived, never earlier than it was sent),
+        which is what keeps a home with years of history from being
+        decompressed whole to answer one question.
+
+        The one scanner of the archive: `archived_direct` validates these
+        records into Messages for the views, and `export.delivered_guidance`
+        ships them as they are, so an export keeps a record the current
+        schema would reject.
+
+        Fail-soft throughout, because both callers are readers a bad byte
+        must not take down. A line that will not parse is skipped; so is a
+        whole month that will not decompress, and gzip reports that damage
+        three ways depending on where it is — a bad header as
+        `gzip.BadGzipFile` (an OSError), a stream that stops short as
+        EOFError, and corruption inside the deflate data as `zlib.error`,
+        which is neither. Sorting is by `(created_at, id)` so records sharing
+        a second still come back in a stable order.
         """
         floor = f"{since:%Y-%m}" if since is not None else ""
-        out: list[Message] = []
+        out: list[dict[str, Any]] = []
         for path in sorted(self.archive_dir.glob("*.jsonl.gz")):
             if path.name[:7] < floor:
                 continue
@@ -291,15 +304,26 @@ class MessageBus:
                             record = json.loads(line)
                         except ValueError:
                             continue
-                        if not isinstance(record, dict) or record.get("to") != to:
-                            continue
-                        try:
-                            out.append(Message.model_validate(record))
-                        except ValueError:
-                            continue
-            except (OSError, EOFError, gzip.BadGzipFile):
+                        if isinstance(record, dict) and record.get("to") == to:
+                            out.append(record)
+            except (OSError, EOFError, zlib.error):
                 continue
-        out.sort(key=lambda m: m.created_at)
+        out.sort(key=lambda r: (str(r.get("created_at", "")), str(r.get("id", ""))))
+        return out
+
+    def archived_direct(self, to: str, since: datetime | None = None) -> list[Message]:
+        """`archived_records` as validated Messages, oldest first.
+
+        A record the schema cannot validate is dropped rather than raised:
+        this is read by `views.task_history`, and a view that fails over one
+        old-format line is worse than one missing line.
+        """
+        out: list[Message] = []
+        for record in self.archived_records(to, since):
+            try:
+                out.append(Message.model_validate(record))
+            except ValueError:
+                continue
         return out
 
     # -- on-demand archival ----------------------------------------------

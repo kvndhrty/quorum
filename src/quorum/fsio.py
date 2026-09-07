@@ -21,7 +21,9 @@ import time
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+T = TypeVar("T")
 
 # Crockford base32, as used by ULID.
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -133,6 +135,52 @@ def atomic_write_json(path: Path, obj: Any) -> None:
 def read_json(path: Path) -> Any:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def read_json_or(path: Path, default: T) -> dict[str, Any] | T:
+    """The JSON object in `path`, or `default` when there is not one to read.
+
+    The fail-soft companion to `read_json`, and the one place the rule is
+    written down: a record that is missing, unreadable, not JSON, or JSON
+    that is not an object reads as `default`. Callers used to spell this out
+    themselves and disagreed about which exceptions to catch, which left
+    valid-but-not-an-object JSON (a `runner.lock` holding `[]`) raising
+    TypeError or AttributeError out of a digest build or a view.
+
+    Swallowed: OSError (missing file, permissions, a directory, an I/O
+    error), UnicodeDecodeError (a binary or mis-encoded file — a ValueError,
+    but named here because it is the common one) and json.JSONDecodeError
+    (truncated or malformed text, also a ValueError). Nothing else: a caller
+    passing something that is not a path still gets its TypeError.
+
+    The return is a dict whenever it is not `default`, so callers can use
+    `.get()` without a further isinstance check.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return default
+    return record if isinstance(record, dict) else default
+
+
+def read_pid(path: Path) -> int | None:
+    """The live-process pid recorded in a lock file, or None.
+
+    Every pid lock quorum writes (`runner.lock`, `supervisor.lock`, an
+    agent's `tick.lock`) is a JSON object with a `pid`. This reads it and
+    never raises: a missing, unreadable, malformed or non-object record, a
+    `pid` that is not a number, and a non-positive pid all answer None, so
+    the caller's only question is whether it got an int.
+    """
+    record = read_json_or(path, None)
+    if record is None:
+        return None
+    try:
+        pid = int(record.get("pid", -1))
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
 
 
 def append_jsonl(path: Path, obj: Any) -> None:
@@ -315,12 +363,8 @@ def acquire_pid_lock(path: Path, meta: dict[str, Any] | None = None) -> None:
                 f.write(data)
             return
         except FileExistsError:
-            try:
-                existing = read_json(path)
-                pid = int(existing.get("pid", -1))
-            except (OSError, ValueError):
-                pid = -1
-            if pid > 0 and pid_alive(pid) and pid != os.getpid():
+            pid = read_pid(path)
+            if pid is not None and pid_alive(pid) and pid != os.getpid():
                 raise LockError(
                     f"another instance is running (pid {pid}, lock {path})"
                 ) from None
@@ -336,12 +380,11 @@ def touch_lock(path: Path) -> None:
 
 
 def release_pid_lock(path: Path) -> None:
-    try:
-        existing = read_json(path)
-        if int(existing.get("pid", -1)) == os.getpid():
+    if read_pid(path) == os.getpid():
+        try:
             path.unlink(missing_ok=True)
-    except (OSError, ValueError):
-        pass
+        except OSError:
+            pass
 
 
 def clear_stale_pid_lock(path: Path) -> bool:
@@ -360,17 +403,13 @@ def clear_stale_pid_lock(path: Path) -> bool:
     deliberately avoids; the residue is a run holding a lock file that is
     gone, which the next acquisition simply recreates.
     """
-    try:
-        pid = int(read_json(path).get("pid", -1))
-    except (OSError, ValueError):
+    if read_json_or(path, None) is None:
+        return False  # no lock record to reason about — leave the file alone
+    pid = read_pid(path)
+    if pid is not None and pid_alive(pid):
         return False
-    if pid > 0 and pid_alive(pid):
-        return False
-    try:
-        if int(read_json(path).get("pid", -1)) != pid:
-            return False  # somebody else's lock now — leave it alone
-    except (OSError, ValueError):
-        return False
+    if read_pid(path) != pid:
+        return False  # somebody else's lock now — leave it alone
     try:
         path.unlink(missing_ok=True)
     except OSError:

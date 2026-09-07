@@ -141,12 +141,7 @@ def read_seeded_record(home: Path) -> dict[str, str]:
     """{filename: sha256} of what init last seeded. Fail-soft: a missing,
     unreadable or malformed record reads as empty, which classifies every
     differing copy as "edited" — the direction that never overwrites."""
-    try:
-        data = fsio.read_json(seeded_record_path(home))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = fsio.read_json_or(seeded_record_path(home), {})
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
 

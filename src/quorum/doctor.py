@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import fsio
 from . import home as home_mod
+from .agent import read_heartbeat
 
 if TYPE_CHECKING:
     from .config import Config, HarnessConfig
@@ -544,10 +545,7 @@ def check_prompts(home: Path) -> list[Check]:
 
 
 def _supervisor_lock(home: Path) -> dict[str, Any] | None:
-    try:
-        return fsio.read_json(Path(home) / "supervisor.lock")
-    except (OSError, ValueError):
-        return None
+    return fsio.read_json_or(Path(home) / "supervisor.lock", None)
 
 
 def check_supervisor(home: Path) -> Check:
@@ -636,11 +634,8 @@ def check_runner_locks(home: Path) -> list[Check]:
         lock = runner_lock_path(home, task.id)
         if not lock.exists():
             continue
-        try:
-            pid = int(fsio.read_json(lock).get("pid", -1))
-        except (OSError, ValueError, TypeError):
-            pid = -1
-        if pid > 0 and fsio.pid_alive(pid):
+        pid = fsio.read_pid(lock)
+        if pid is not None and fsio.pid_alive(pid):
             continue
         orphans.append(
             problem(
@@ -689,10 +684,7 @@ def check_heartbeats(home: Path, config: Config) -> list[Check]:
     checks: list[Check] = []
     for name in sorted(config.agents):
         acfg = config.agents[name]
-        try:
-            hb = fsio.read_json(Path(home) / "state" / "agents" / name / "heartbeat.json")
-        except (OSError, ValueError):
-            hb = {}
+        hb = read_heartbeat(home, name)
         if not acfg.enabled:
             checks.append(na(f"agent.{name}", f"agent {name}: disabled in config"))
             continue

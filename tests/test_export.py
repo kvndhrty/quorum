@@ -219,6 +219,25 @@ def test_delivered_guidance_skips_a_corrupt_month(home: Path, repo: Path):
     assert good.exists()  # a pure reader: the archive is untouched
 
 
+def test_delivered_guidance_keeps_a_record_the_schema_would_reject(home: Path, repo: Path):
+    """Both scanners of the archive are the same function; the export takes
+    the raw records, so a message written by an older protocol version still
+    ships even though `archived_direct` (the views' validated face) drops
+    it."""
+    import gzip
+
+    task = add_task(home)
+    archive = home / "messages" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    stamp = f"{fsio.parse_iso(task.created_at):%Y-%m}"
+    with gzip.open(archive / f"{stamp}.jsonl.gz", "wt") as f:
+        # No `from`: today's Message requires a sender.
+        f.write(json.dumps({"to": inbox_name(task.id), "payload": {"text": "from v0"}}) + "\n")
+
+    assert [d["payload"]["text"] for d in export.delivered_guidance(home, task)] == ["from v0"]
+    assert MessageBus(home).archived_direct(inbox_name(task.id)) == []
+
+
 # -- output path ----------------------------------------------------------
 
 

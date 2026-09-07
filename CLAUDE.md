@@ -81,6 +81,16 @@ option with a default has no row.
   (skips dotfiles), and a pid-lock built on `O_EXCL` rather than `flock` so it behaves
   identically under any sandbox-granted filesystem. **Never write state with plain
   `open(...,'w')`** — readers must never observe a partial file.
+  The reads have one shape too: `read_json_or(path, default)` is the fail-soft
+  reader every state file goes through (missing, unreadable, not JSON, or JSON
+  that is not an object → the default; a dict otherwise, so callers `.get()`
+  without an isinstance check), and `read_pid(path)` is the lock-file reader
+  (an int pid or None). **Never hand-roll a `read_json` try/except** — the
+  hand-rolled ones disagreed about the catch tuple, and valid-but-not-an-object
+  JSON in a `runner.lock` raised past three of them. `agent.read_heartbeat`
+  is the same rule for heartbeats, and `tasks.git_runner` / `tasks.git_probe`
+  are the loud and fail-soft faces of `git -C <cwd> ...` (worktree creation
+  and removal raise; the read-only probes answer None).
 - `messages.py` — one `Message` schema over two channels: an append-only board
   (`messages/board/<topic>/`, filenames `<utc-compact>-<ULID>.json` so lexicographic
   order is chronological) and maildir-style inboxes (`new/` → `cur/` claimed by
@@ -93,6 +103,12 @@ option with a default has no row.
   `clear_inbox` on top. Acking is **archival, never a flag**: that is what
   keeps the board free of read-state while still letting a handled
   escalation leave `views.attention_summary`'s seven-day window.
+  `archived_records(to, since)` is the **one** scan of
+  `messages/archive/*.jsonl.gz` — raw dicts, sorted by `(created_at, id)`,
+  fail-soft over OSError/EOFError/`zlib.error` (gzip reports damage all
+  three ways). `archived_direct` is its validated face for the views;
+  `export.delivered_guidance` takes the raw records, so an export keeps a
+  message the current schema would reject.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
   `report()` (the harness's return channel), path helpers shared by runner/manager/
   views/CLI. **Status is a free-form reported string**; only `TERMINAL_STATUSES`

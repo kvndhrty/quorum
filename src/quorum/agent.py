@@ -71,10 +71,7 @@ class AgentContext:
     # -- private state ----------------------------------------------------
 
     def load_state(self) -> dict[str, Any]:
-        try:
-            return fsio.read_json(self._state_path)
-        except (OSError, ValueError):
-            return {}
+        return fsio.read_json_or(self._state_path, {})
 
     def save_state(self, state: dict[str, Any]) -> None:
         fsio.atomic_write_json(self._state_path, state)
@@ -97,6 +94,24 @@ def tick_lock_path(home: Path, name: str) -> Path:
     return Path(home) / "state" / "agents" / name / "tick.lock"
 
 
+def heartbeat_path(home: Path, name: str) -> Path:
+    """Where an agent's heartbeat lives — the one spelling of the path."""
+    return Path(home) / "state" / "agents" / name / "heartbeat.json"
+
+
+def read_heartbeat(home: Path, name: str) -> dict[str, Any]:
+    """An agent's heartbeat, or {} when there is none to read.
+
+    Every reader of a heartbeat goes through here: the supervisor's tick
+    wrapper, `write_heartbeat`'s merge, `views.agent_rows` and `quorum
+    doctor`. A missing, unreadable or hand-edited file (including
+    well-formed JSON that is not an object) reads as {} — a heartbeat is a
+    bookkeeping side channel, never a rail, so it must not raise into an
+    APScheduler job or a dashboard refresh.
+    """
+    return fsio.read_json_or(heartbeat_path(home, name), {})
+
+
 def write_heartbeat(home: Path, name: str, **fields: Any) -> None:
     """Merge `fields` into an agent's heartbeat file.
 
@@ -104,17 +119,8 @@ def write_heartbeat(home: Path, name: str, **fields: Any) -> None:
     supervisor and `quorum agent run-once` write them: an agent exercised by
     hand would otherwise keep reading as never-ran in every dashboard.
     """
-    path = Path(home) / "state" / "agents" / name / "heartbeat.json"
-    current: dict[str, Any] = {}
-    try:
-        loaded = fsio.read_json(path)
-    except (OSError, ValueError):
-        loaded = None
-    # A heartbeat file holding valid-but-not-object JSON (hand-edited, or a
-    # truncated-then-refilled file) must read as "no heartbeat", not crash the
-    # writer: heartbeats are a bookkeeping side channel, never a rail.
-    if isinstance(loaded, dict):
-        current = loaded
+    path = heartbeat_path(home, name)
+    current = read_heartbeat(home, name)
     current.update(fields)
     fsio.atomic_write_json(path, current)
 

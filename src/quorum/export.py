@@ -52,20 +52,26 @@ redact and are kept verbatim, which the command says out loud.
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import os
-import subprocess
 import tarfile
 import tempfile
-import zlib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from . import fsio, installed_version
-from .tasks import Task, _worktree_base, inbox_name, task_dir
+from .messages import MessageBus
+from .tasks import (
+    GIT_TIMEOUT_SECONDS,
+    Task,
+    _worktree_base,
+    git_probe,
+    inbox_name,
+    task_dir,
+)
 
 ARCHIVE_SUFFIX = ".tar.gz"
 # Everything under the archive root is named from the short id: the full
@@ -192,44 +198,18 @@ def delivered_guidance(home: Path, task: Task) -> list[dict]:
 
     An acked inbox message is appended to `messages/archive/<YYYY-MM>.jsonl.gz`
     for the month it was acked in, which can only be the task's creation
-    month or later — so only those files are opened, and a home with years
-    of history is not decompressed whole for one task. A malformed line is
-    skipped: this is a share, not a proof, and one torn line must not stop
-    the archive.
+    month or later — so `MessageBus.archived_records` is given that month as
+    its floor and a home with years of history is not decompressed whole for
+    one task. Records go into the archive as they were read: an export is a
+    share, not a proof, so a record the current schema would reject is still
+    worth shipping (the views' `archived_direct` is the validating view over
+    the same scan).
     """
-    archive = Path(home) / "messages" / "archive"
-    if not archive.is_dir():
-        return []
     try:
-        floor = f"{fsio.parse_iso(task.created_at):%Y-%m}"
+        since: datetime | None = fsio.parse_iso(task.created_at)
     except ValueError:
-        floor = ""
-    wanted = inbox_name(task.id)
-    found: list[dict] = []
-    for path in sorted(archive.glob("*.jsonl.gz")):
-        if path.name[: len(floor)] < floor:
-            continue
-        try:
-            with gzip.open(path, "rt", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(record, dict) and record.get("to") == wanted:
-                        found.append(record)
-        except (OSError, EOFError, zlib.error):
-            # A truncated month is a skipped month, not a failed export.
-            # gzip reports damage three ways depending on where it is: a
-            # bad header is BadGzipFile (an OSError), a stream that stops
-            # short is EOFError, and corruption inside the deflate data
-            # surfaces as zlib.error.
-            continue
-    found.sort(key=lambda r: (str(r.get("created_at", "")), str(r.get("id", ""))))
-    return found
+        since = None
+    return MessageBus(home).archived_records(inbox_name(task.id), since)
 
 
 def worktree_diff(task: Task) -> str:
@@ -253,16 +233,7 @@ def worktree_diff(task: Task) -> str:
     if not workdir.is_dir():
         raise ExportError(f"the worktree {workdir} is gone (pruned?)")
 
-    def git(*args: str) -> subprocess.CompletedProcess | None:
-        try:
-            return subprocess.run(
-                ["git", "-C", str(workdir), *args],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
+    git = git_probe(workdir, GIT_TIMEOUT_SECONDS)
 
     inside = git("rev-parse", "--is-inside-work-tree")
     if inside is None:
