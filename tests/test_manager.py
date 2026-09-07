@@ -1359,3 +1359,18 @@ def test_digest_says_only_that_a_handoff_exists(home: Path, clock):
     assert marked and "handoff=true" in marked[0]
     assert plain and "handoff=true" not in plain[0]
     assert "SECRET-BODY" not in digest
+
+
+def test_the_manager_prompt_explains_the_handoff_mark(home: Path):
+    """Every other mark the digest can carry has a rule that says what it
+    means; `handoff=true` would otherwise be a token with no policy (#92)."""
+    from quorum import prompts
+
+    text = prompts.load(home, "manager")
+    assert "`handoff=true`" in text
+    # unwrapped, so the assertions do not depend on where the lines break
+    rule = " ".join(text.split("`handoff=true`")[1].split("\n14.")[0].split())
+    # what it is, where the body actually goes, and that it asks for nothing
+    assert "every dependent gets it in its own prompt" in rule
+    assert "quorum task show <id>" in rule
+    assert "observation, not an instruction" in rule

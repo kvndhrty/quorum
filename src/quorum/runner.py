@@ -436,8 +436,12 @@ def clip_handoff(text: str, dep_short_id: str, max_bytes: int = HANDOFF_MAX_BYTE
     if len(data) <= max_bytes:
         return text.rstrip()
     kept = data[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    # Measured against what was actually kept rather than against `max_bytes`:
+    # the character straddling the cut and any trailing whitespace go too, so
+    # a count taken from `max_bytes` would understate what is missing.
+    dropped = len(data) - len(kept.encode("utf-8"))
     return (
-        f"{kept}\n[… {len(data) - max_bytes} more bytes — "
+        f"{kept}\n[… {dropped} more bytes — "
         f"`quorum task show {dep_short_id}` prints the whole handoff]"
     )
 

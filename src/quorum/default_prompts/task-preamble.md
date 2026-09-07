@@ -57,9 +57,10 @@ assume gh, glab, or any other forge CLI is installed):
   them on a `dependents:` line — give that final report a handoff: what
   changed, what is not done, what to check first. They will build on your
   finished state, and it is all they see of it beyond your status and PR:
-    quorum task report {task_id} --status done --handoff <file|-> "<summary>"
-  One file per task, replaced by a later --handoff; dependents get it in
-  their prompt (capped), the full text is `quorum task show {task_id}`.
+    quorum task report {task_id} --status done --handoff <file> "<summary>"
+  Write the handoff to a file first and pass its path. One file per task,
+  replaced by a later --handoff; dependents get it in their prompt
+  (capped), the full text is `quorum task show {task_id}`.
 {issue}
 
 {local}

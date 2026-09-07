@@ -1584,8 +1584,10 @@ def test_a_long_handoff_is_clipped_per_dependency_with_a_pointer_at_task_show(
     from quorum.runner import HANDOFF_MAX_BYTES, clip_handoff, dependency_note
 
     store = TaskStore(home)
-    # multi-byte characters, so a byte cap that split one would be visible
-    long_body = ("é" * 100 + "\n") * 200  # 200 * 201 bytes, well over the cap
+    # Multi-byte characters, so a byte cap that split one would be visible. The
+    # leading "x" shifts the alignment by one byte, which puts the cut in the
+    # middle of an "é" — the case the dropped-byte count has to account for.
+    long_body = "x" + ("é" * 100 + "\n") * 200  # 1 + 200 * 201 bytes, over the cap
     chatty = store.add(project="proj", prompt="write a lot", harness="fake")
     tasks.report(home, chatty.id, "done", "done", handoff=long_body)
     terse = store.add(project="proj", prompt="write a little", harness="fake")
@@ -1595,9 +1597,12 @@ def test_a_long_handoff_is_clipped_per_dependency_with_a_pointer_at_task_show(
     note = dependency_note(home, dependent)
     section = note.split(f"## Handoff from {chatty.short_id}\n\n")[1].split("\n\n## ")[0]
     kept, _, tail = section.rpartition("\n")
-    assert len(kept.encode("utf-8")) <= HANDOFF_MAX_BYTES
-    assert kept.startswith("é" * 100)  # cut on a character boundary, nothing mangled
-    dropped = len(long_body.encode("utf-8")) - HANDOFF_MAX_BYTES
+    assert len(kept.encode("utf-8")) < HANDOFF_MAX_BYTES  # the split "é" went too
+    assert kept.startswith("x" + "é" * 100)  # cut on a character boundary, nothing mangled
+    # Counted against what was kept, not against the cap: the character the cut
+    # landed inside is dropped as well, so this is one more than the cap arithmetic.
+    dropped = len(long_body.encode("utf-8")) - len(kept.encode("utf-8"))
+    assert dropped == len(long_body.encode("utf-8")) - HANDOFF_MAX_BYTES + 1
     assert tail == (
         f"[… {dropped} more bytes — `quorum task show {chatty.short_id}` prints the "
         "whole handoff]"
@@ -1618,4 +1623,7 @@ def test_the_preamble_tells_a_task_how_to_leave_a_handoff(home: Path, project: s
     text = transcript_text(home, task.id)
     assert f"quorum task show {task.short_id}" in text
     assert "`dependents:` line" in text
-    assert f"quorum task report {task.short_id} --status done --handoff <file|->" in text
+    # A file, not stdin: an inject-mode harness shares its stdin with the
+    # runner's guidance pump, so `--handoff -` from inside a run would block.
+    assert f"quorum task report {task.short_id} --status done --handoff <file>" in text
+    assert "--handoff <file|->" not in text
