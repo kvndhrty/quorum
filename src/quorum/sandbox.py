@@ -6,8 +6,9 @@ documented in docs/nono.md:
 1. Wrap the world (recommended, zero code): `nono run --profile quorum -- quorum up`.
 2. Self-sandbox: `quorum up --self-sandbox` applies a nono-py CapabilitySet to
    this process (irreversibly, children included) before the scheduler starts.
-3. Child-only: [sandbox].use_nono = true runs LLM CLI subprocesses through
-   nono-py's sandboxed_exec while the supervisor itself stays unsandboxed.
+3. Per-task: [sandbox].use_nono = true makes each task run apply a
+   per-run CapabilitySet to itself before it execs the harness, while the
+   supervisor stays unsandboxed.
 
 This is the only module that imports nono-py, and only inside functions, so
 installations without the [nono] extra never pay for it. If the user asked
@@ -30,15 +31,11 @@ from __future__ import annotations
 
 import json
 import logging
-import shlex
 import shutil
-import subprocess
 import sys
 import sysconfig
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-from . import fsio
 
 if TYPE_CHECKING:
     from .config import Config
@@ -165,26 +162,19 @@ def _apply_profile_file(nono_py, caps, config: Config) -> dict:
     return profile
 
 
-def _llm_executable(config: Config) -> Path | None:
-    """The configured LLM CLI as an absolute path, or None if unset/not found.
-
-    `[llm].executable` is usually a bare name (`claude`, `codex`), so it is
-    resolved against PATH here: the sandbox grants access to paths, and a
-    name the child cannot resolve is a name it cannot run.
-    """
-    if config.llm is None or not config.llm.executable:
-        return None
-    found = shutil.which(config.llm.executable)
-    return Path(found).resolve() if found else None
-
-
 def build_capabilities(home: Path, config: Config):
     """A least-privilege CapabilitySet derived from the resolved config.
 
+    Used by mode 2 (`quorum up --self-sandbox`), which applies it to the
+    supervisor process and therefore to every child it spawns.
+
     Writable: QUORUM_HOME and any watch/dest directories agents declare.
-    Readable: project dirs, the configured LLM executable, this interpreter's
-    tree, and nono's system-read baseline. Network is blocked unless an LLM
-    CLI is configured.
+    Readable: project dirs, this interpreter's tree, and nono's system-read
+    baseline. Network is blocked unless `[sandbox].profile_file` lists a
+    non-empty `network` — so a supervisor sandboxed this way cannot reach the
+    network at all unless the user's own profile grants it, and neither can
+    the harness the manager's tick spawns. Granting it is the user's explicit
+    act, which is what keeps this mode fail-closed rather than fail-open.
     """
     nono_py = _import_nono()
     from .projects import ProjectRegistry
@@ -207,15 +197,9 @@ def build_capabilities(home: Path, config: Config):
     _add_system_reads(nono_py, caps)
     for path in _python_runtime_paths():
         caps.allow_path(path, nono_py.AccessMode.READ)
-    executable = _llm_executable(config)
-    if executable is not None:
-        # allow_file, not allow_path: the latter rejects non-directories, and
-        # granting the whole containing directory would be needlessly wide.
-        caps.allow_file(str(executable), nono_py.AccessMode.READ)
     profile = _apply_profile_file(nono_py, caps, config)
 
-    needs_network = (config.llm is not None and config.llm.executable) or profile.get("network")
-    if not needs_network:
+    if not profile.get("network"):
         caps.block_network()
     caps.deduplicate()
     return caps
@@ -280,69 +264,3 @@ def apply_task_sandbox(home: Path, config: Config, task, workdir: Path) -> None:
     caps = build_task_capabilities(home, config, task, workdir)
     nono_py.apply(caps)
     log.info("task sandbox applied for %s (workdir %s)", task.short_id, workdir)
-
-
-def _text(stream) -> str:
-    """nono-py hands back bytes; the subprocess.run contract we advertise is text."""
-    if isinstance(stream, bytes | bytearray):
-        return bytes(stream).decode("utf-8", "replace")
-    return stream or ""
-
-
-def make_sandboxed_runner(home: Path, config: Config):
-    """A subprocess.run-compatible callable that executes the command under a
-    nono-py child sandbox (nono_py.sandboxed_exec: the parent stays
-    unsandboxed, the child gets Landlock/Seatbelt restrictions).
-
-    nono-py is imported lazily at call time, so a misconfiguration is loud in
-    logs but never causes an unsandboxed execution.
-
-    sandboxed_exec has no stdin piping, so stdin-mode prompts are staged as a
-    private file under QUORUM_HOME and redirected via /bin/sh. argv-mode
-    ([llm].input = "argv") avoids the shell hop and is slightly cheaper.
-
-    cwd is pinned to QUORUM_HOME: sandboxed_exec otherwise inherits the
-    parent's working directory, which is normally outside the capability set,
-    and a shell that cannot getcwd() starts by printing errors to stderr.
-    """
-    home = Path(home)
-
-    def run(argv, input=None, timeout=None, env=None, capture_output=True, text=True):
-        nono_py = _import_nono()
-        caps = build_capabilities(home, config)
-        command = [str(a) for a in argv]
-        prompt_file: Path | None = None
-        try:
-            if input:
-                staging = home / "state" / "llm"
-                staging.mkdir(parents=True, exist_ok=True)
-                # ULID, not pid: scheduler threads share one pid, and two
-                # agents prompting in the same tick window must not clobber
-                # (or unlink) each other's staged prompt.
-                prompt_file = staging / f"prompt-{fsio.ulid()}.txt"
-                prompt_file.write_text(input, encoding="utf-8")
-                command = [
-                    "/bin/sh", "-c",
-                    f'exec "$0" "$@" < {shlex.quote(str(prompt_file))}',
-                    *command,
-                ]
-            if env is None:
-                env_list, inherit = None, True
-            else:
-                env_list, inherit = [(k, str(v)) for k, v in env.items()], False
-            result = nono_py.sandboxed_exec(
-                caps,
-                command,
-                cwd=str(home),
-                timeout_secs=timeout,
-                env=env_list,
-                inherit_env=inherit,
-            )
-        finally:
-            if prompt_file is not None:
-                prompt_file.unlink(missing_ok=True)
-        return subprocess.CompletedProcess(
-            list(argv), result.exit_code, stdout=_text(result.stdout), stderr=_text(result.stderr)
-        )
-
-    return run

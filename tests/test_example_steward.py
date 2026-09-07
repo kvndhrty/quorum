@@ -9,7 +9,7 @@ from pathlib import Path
 
 from quorum import fsio
 from quorum.agent import AgentContext
-from quorum.config import Config, LLMConfig
+from quorum.config import Config
 from quorum.messages import MessageBus
 
 _spec = importlib.util.spec_from_file_location(
@@ -19,10 +19,8 @@ steward = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(steward)
 
 
-def make_steward(home: Path, clock, settings: dict, llm_cfg=None):
-    ctx = AgentContext(
-        home=home, name="steward", settings=settings, config=Config(llm=llm_cfg), now=clock
-    )
+def make_steward(home: Path, clock, settings: dict):
+    ctx = AgentContext(home=home, name="steward", settings=settings, config=Config(), now=clock)
     return steward.Steward(ctx)
 
 
@@ -90,7 +88,7 @@ def test_flip_to_apply_acts_on_already_proposed_file(home: Path, clock, tmp_path
     assert [r["dest"] for r in undo_log] == [str(papers / "paper.pdf")]
 
 
-def test_unmatched_reported_once_without_llm(home: Path, clock, tmp_path: Path):
+def test_unmatched_reported_once(home: Path, clock, tmp_path: Path):
     watch = tmp_path / "dl"
     watch.mkdir()
     (watch / "mystery.xyz").write_text("?")
@@ -100,24 +98,3 @@ def test_unmatched_reported_once_without_llm(home: Path, clock, tmp_path: Path):
     s.tick()
     msgs = [m for m in topic(home) if m.type == "steward.unmatched"]
     assert len(msgs) == 1
-
-
-def test_llm_classification_of_unmatched(home: Path, clock, tmp_path: Path, fake_llm):
-    watch = tmp_path / "dl"
-    watch.mkdir()
-    (watch / "mystery.dat").write_text("?")
-    papers = tmp_path / "papers"
-    llm_cfg = LLMConfig(
-        executable=fake_llm[0],
-        args=fake_llm[1:],
-        env={"FAKE_LLM_MODE": "ok", "FAKE_LLM_OUTPUT": str(papers)},
-    )
-    settings = {
-        "watch": [str(watch)],
-        "apply": True,
-        "rules": [{"match": "*.pdf", "dest": str(papers)}],
-    }
-    make_steward(home, clock, settings, llm_cfg=llm_cfg).tick()
-    assert (papers / "mystery.dat").exists()
-    moved = [m for m in topic(home) if m.type == "steward.moved"]
-    assert moved and moved[0].payload["via_llm"] is True

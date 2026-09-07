@@ -274,7 +274,7 @@ def test_over_its_cap_the_prompt_keeps_the_newest_and_says_what_it_dropped(home:
     for i in range(notes.TASK_NOTES_MAX_ENTRIES + 3):
         book.remember(f"standing fact {i}")
 
-    section = notes.task_section(home, task.id)
+    section = notes.task_notebook(home, task.id).render()
     assert section[0] == notes.TASK_SECTION_HEADER
     assert "3 older note(s) dropped" in section[1] and "prompt budget" in section[1]
     # told what to do about it, with *its* verbs
@@ -292,7 +292,7 @@ def test_the_newest_note_survives_the_byte_budget(home: Path):
         book.remember(f"{i} " + "x" * notes.NOTE_MAX_CHARS)
     book.remember("the one that matters")
 
-    section = notes.task_section(home, task.id)
+    section = notes.task_notebook(home, task.id).render()
     body = "\n".join(section[1:])
     assert "the one that matters" in section[-1]
     assert len(body) <= notes.TASK_NOTES_MAX_BYTES + len(section[1]) + 1  # the drop line
@@ -309,7 +309,7 @@ def test_a_notebook_past_the_scan_window_says_so_even_when_otherwise_empty(home:
     while book.unscanned_bytes() == 0:
         fsio.append_jsonl(book.path, padding)
 
-    section = notes.task_section(home, task.id)
+    section = notes.task_notebook(home, task.id).render()
     assert section[0] == notes.TASK_SECTION_HEADER
     assert "not scanned" in section[1] and len(section) == 2
     assert "not scanned" in invoke(home, "task", "show", task.short_id).output
@@ -330,11 +330,123 @@ def test_a_torn_or_foreign_line_never_breaks_a_run(home: Path):
         f.write(json.dumps(["not", "even", "an", "object"]) + "\n")
         f.write("{half a line\n")
 
-    section = "\n".join(notes.task_section(home, task.id))
+    section = "\n".join(notes.task_notebook(home, task.id).render())
     assert NOTE in section and "int id" not in section
     assert [e["text"] for e in book.active()] == [NOTE]
     r = invoke(home, "task", "show", task.short_id)
     assert r.exit_code == 0 and NOTE in r.output
+
+
+def test_an_unreadable_notebook_reads_as_empty_rather_than_failing_the_run(
+    home: Path, project: str
+):
+    """`compose_prompt` reads the notebook before the harness is spawned, so
+    a notes.jsonl that cannot be read at all — a directory, here — would
+    otherwise fail every run of that task with no run record and no
+    transcript to say why."""
+    harness_config(home)
+    config = load_config(home)
+    task = TaskStore(home).add(project, "build the parser", "fake")
+    notes_file(home, task.id).mkdir(parents=True)
+
+    assert notes.task_notebook(home, task.id).active() == []
+    assert notes.task_notebook(home, task.id).render() == []
+    assert run_task(home, config, task.id) == 0
+    assert notes.TASK_SECTION_HEADER not in prompt_of_run(home, task.id, 0)
+    assert invoke(home, "task", "show", task.short_id).exit_code == 0
+
+
+def test_a_manager_under_another_name_may_still_write_a_tasks_notebook(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The extra writer is "the manager", not the literal name: a manager
+    configured as `[agents.boss]` is tagged QUORUM_ACTOR=boss."""
+    harness_config(
+        home,
+        extra='\n[agents.boss]\ntype = "manager"\nschedule = "every 30m"\n',
+    )
+    task = TaskStore(home).add("proj", "p", "fake")
+    assert notes.task_notebook(home, task.id).writers == {"manager", "boss"}
+
+    monkeypatch.setenv("QUORUM_ACTOR", "boss")
+    r = invoke(home, "task", "remember", task.short_id, NOTE)
+    assert r.exit_code == 0, r.output
+    assert [e["sender"] for e in notes.task_notebook(home, task.id).active()] == ["boss"]
+
+    # a prompt agent is still refused, and an unreadable config still admits
+    # the manager under its default name
+    monkeypatch.setenv("QUORUM_ACTOR", "babysitter")
+    assert invoke(home, "task", "remember", task.short_id, "not mine").exit_code == 1
+    (home / "config.toml").write_text("[[[ not toml\n")
+    assert notes.task_notebook(home, task.id).writers == {"manager"}
+
+
+def test_the_byte_budget_counts_bytes_not_characters(home: Path):
+    """A notebook in a non-Latin script costs up to three bytes a character;
+    counting characters would hand the prompt three times the budget."""
+    task = TaskStore(home).add("proj", "p", "fake")
+    book = notes.task_notebook(home, task.id)
+    for i in range(12):
+        book.remember(f"{i} " + "実" * 400)
+
+    section = notes.task_notebook(home, task.id).render()
+    rendered = section[2:]  # past the header and the drop line
+    assert len(rendered) < 12 and "dropped" in section[1]
+    assert sum(len(line.encode("utf-8")) + 1 for line in rendered) <= (
+        notes.TASK_NOTES_MAX_BYTES
+    )
+    assert "実" in section[-1]
+
+
+def test_task_show_prints_the_notebook_a_run_reads_header_and_all(home: Path):
+    """What `task show` prints is what the harness is handed — the section
+    header included, which is how a reader knows the two agree."""
+    task = TaskStore(home).add("proj", "p", "fake")
+    notes.task_notebook(home, task.id).remember(NOTE)
+
+    shown = invoke(home, "task", "show", task.short_id).output
+    for line in notes.task_notebook(home, task.id).render():
+        assert line in shown
+    assert notes.TASK_SECTION_HEADER in shown
+    assert "keeps state between its runs" not in shown  # it is not empty
+
+
+def test_an_empty_notebook_past_its_scan_window_still_teaches_the_command(home: Path):
+    """The two halves are independent: the file may render a warning and
+    still hold no live note, and the hint belongs to the notes."""
+    task = TaskStore(home).add("proj", "p", "fake")
+    book = notes.task_notebook(home, task.id)
+    padding = {"id": "01PADPADPAD", "ts": "2026-01-01T00:00:00Z", "retired": True,
+               "pad": "x" * 4000}
+    while book.unscanned_bytes() == 0:
+        fsio.append_jsonl(book.path, padding)
+
+    shown = invoke(home, "task", "show", task.short_id).output
+    assert "not scanned" in shown
+    assert f'quorum task remember {task.short_id}' in shown
+
+
+def test_remember_on_an_attached_task_does_not_promise_a_run_will_read_it(
+    home: Path, tmp_path: Path
+):
+    """An adopted session does not go through the runner, so nothing renders
+    its notebook into the session. The note is kept; `task show` reads it."""
+    store = TaskStore(home)
+    plain = store.add("proj", "p", "fake")
+    adopted = store.add("proj", "adopted", "fake")
+    store.update(adopted.id, attached=True, workdir=str(tmp_path))
+
+    ordinary = invoke(home, "task", "remember", plain.short_id, NOTE).output
+    assert "every future run" in ordinary
+
+    r = invoke(home, "task", "remember", adopted.short_id, NOTE)
+    assert r.exit_code == 0, r.output
+    assert "every future run" not in r.output
+    assert f"quorum task show {adopted.short_id}" in r.output
+    assert "attached" in r.output
+    # the write itself is ordinary, and `task show` prints it
+    assert [e["text"] for e in notes.task_notebook(home, adopted.id).active()] == [NOTE]
+    assert NOTE in invoke(home, "task", "show", adopted.short_id).output
 
 
 def test_the_digest_does_not_carry_a_tasks_notebook(home: Path, clock):
@@ -348,8 +460,8 @@ def test_the_digest_does_not_carry_a_tasks_notebook(home: Path, clock):
 
 
 def test_the_manager_notebook_is_the_same_object_with_a_different_face(home: Path):
-    """`agent_notebook` is what every manager-facing function wraps; the
-    difference between the two is carried by the `Notebook`, not by code."""
+    """One class, two constructors: the difference between a manager's
+    notebook and a task's is carried by the `Notebook` value, not by code."""
     task = TaskStore(home).add("proj", "p", "fake")
     mgr = notes.agent_notebook(home)
     mine = notes.task_notebook(home, task.id)
@@ -362,5 +474,5 @@ def test_the_manager_notebook_is_the_same_object_with_a_different_face(home: Pat
     assert (mine.max_entries, mine.max_bytes) == (
         notes.TASK_NOTES_MAX_ENTRIES, notes.TASK_NOTES_MAX_BYTES
     )
-    assert notes.render_section([]) == [notes.SECTION_HEADER, notes.EMPTY_LINE]
+    assert mgr.render_notes([]) == [notes.SECTION_HEADER, notes.EMPTY_LINE]
     assert mine.render() == []

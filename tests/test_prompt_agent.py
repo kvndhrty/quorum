@@ -84,7 +84,9 @@ def test_create_agent_refuses_duplicates_and_reserved_names(home: Path):
     seed_agent(home)
     with pytest.raises(ConfigError, match="already exists"):
         seed_agent(home)
-    for bad in ("manager", "supervisor", "task-abc", "Bad Name"):
+    # "task-" is the whole task namespace, not a prefix with room left over:
+    # an agent by that name would be read as a task actor by `_actor_guard`.
+    for bad in ("manager", "supervisor", "task-abc", "task-", "Bad Name"):
         with pytest.raises(ConfigError):
             validate_agent_name(bad)
 
@@ -265,7 +267,7 @@ def test_a_template_that_asks_for_notes_gets_its_own_notebook(home: Path, clock)
 
     write_config(home)
     seed_agent(home, prompt="check on things\n\n{notes}\n")
-    notes.remember(home, "the flaky test is tracked in #41", owner="standup")
+    notes.agent_notebook(home, "standup").remember("the flaky test is tracked in #41")
 
     make_agent(home, clock).tick()
 

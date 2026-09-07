@@ -50,10 +50,11 @@ below govern nearly every change:
    means adding a file layout, documented in `docs/architecture.md`.
 3. **Fail loudly, recover automatically.** Views/dashboards degrade gracefully (pure
    file readers; work with the supervisor stopped) and a harness that ignores the
-   report protocol is still observed passively — but supervision has **no no-LLM
-   fallback by design**: without a working harness the manager's tick raises every
-   time, and its `auto_pause = false` config keeps the schedule firing so it
-   self-recovers when the LLM service returns. Do not add degraded supervision paths.
+   report protocol is still observed passively — but supervision has **no
+   no-model fallback by design**: without a working harness the manager's tick raises
+   every time, and its `auto_pause = false` config keeps the schedule firing so it
+   self-recovers when the model service returns. Do not add degraded supervision
+   paths.
 
 These are the project's *current* design commitments, not gospel. Quorum is
 evolving: any recorded stance — including the big three above and smaller ones
@@ -317,8 +318,10 @@ option with a default has no row.
   and `--prompt <name>` reuses one — how the shipped `babysitter` example, a
   whole CI-reactive policy written as prompt text, is put to work).
 - `agent.py` — `Agent` (synchronous, idempotent `tick()`) plus `AgentContext`, the single
-  seam through which agents touch the world: `ctx.bus`, `ctx.projects`, `ctx.llm`,
+  seam through which agents touch the world: `ctx.bus`, `ctx.projects`,
   `ctx.prompt()`, `ctx.load_state()/save_state()`, `ctx.log_action()`, `ctx.now()`.
+  There is no `ctx.llm`: a plugin agent that wants a model call runs a harness
+  through `agents/harness_run.run_agent_harness`, the same path the manager uses.
   Agents take a clock as a callable — use `ctx.now()`, never `datetime.now()`.
   `tick_lock_path` is held by both the supervisor wrapper and `agent run-once`.
 - `supervisor.py` — one scheduler job per enabled agent, wrapped by `run_agent_tick`
@@ -376,14 +379,16 @@ option with a default has no row.
   separate buffer from both the journal (a bounded tail of one run's actions,
   which a busy tick scrolls) and the board (which anything may post to).
   Append-only `notes.jsonl`; `quorum manager remember "…" [--ttl N]` writes
-  through `_actor_guard`, `forget` appends a tombstone, and `may_write` refuses
-  any actor that is not the notebook's own agent or an untagged human — tasks
+  through `_actor_guard`, `forget` appends a tombstone, and
+  `Notebook.may_write` refuses any actor that is not the notebook's own
+  agent, one of its extra `writers`, or an untagged human — tasks
   reach the manager with `task report` and the board. That fence reads
   `QUORUM_ACTOR`, so it is a **convention against accidental crowding, not a
   security boundary** (the sandbox is); say so in docs rather than overselling
   it. Reads are owner-checked too (`check_owner`, `--agent` is a path
-  component), and a malformed line is skipped, never raised, so one bad line
-  can't fail every tick. `digest_section` renders it **before** the task
+  component), and a malformed line — or a notes.jsonl that is unreadable or
+  a directory — is skipped, never raised, so one bad line can't fail every
+  tick. `Notebook.render` renders it **before** the task
   section under its own `NOTES_MAX_ENTRIES`/`NOTES_MAX_BYTES` (nothing else
   spends that budget, so noisy tasks can't shrink it), keeps the newest over
   the cap and says how many it dropped — plus how many bytes fell outside
@@ -396,21 +401,24 @@ option with a default has no row.
   admitted as an extra writer, rendered by `runner.compose_prompt` into
   every run's prompt (resume and fresh alike, after the task body, before
   guidance) under `TASK_NOTES_MAX_ENTRIES`/`TASK_NOTES_MAX_BYTES`, nothing
-  when empty, printed by `task show`, **never in the digest**. The
-  module-level functions are the manager-shaped face over `agent_notebook`
-  and their behaviour is unchanged; `quorum task remember|forget` are the
-  task verbs, through `_actor_guard` like the manager's.
+  when empty, printed by `task show`, **never in the digest**. Which names
+  count as "the manager" there comes from config by *type*
+  (`manager_writers`), so a renamed manager is admitted. `agent_notebook`
+  and `task_notebook` are the only entry points — every caller holds a
+  `Notebook` and calls its methods, there are no module-level
+  pass-throughs; `quorum task remember|forget` are the task verbs, through
+  `_actor_guard` like the manager's, sharing one `cli._notebook_write`
+  with `manager remember|forget` so the fence decision, the single
+  journaled refusal and the refusal wording exist once.
 - `registry.py` — resolves an agent `type` string: builtin short name (`manager`,
   `prompt`), else `module:Class` with `QUORUM_HOME/plugins` prepended to `sys.path`.
-- `llm/` — `LLMBackend` is a one-method protocol for *plugin agents'* small
-  completions — neither task harnesses nor the manager go through it. `LLMClient.complete()`
-  **never raises**; `None` means "no LLM today". No module outside `llm/` may assume
-  the `cli` backend (`proxy` is a reserved seam).
 - `sandbox.py` — the *only* module that imports `nono_py`, always lazily and inside
-  functions. It **fails closed**. `build_capabilities` (supervisor/LLM) blocks network
-  unless `[llm]` is set; `build_task_capabilities` (per-run) grants the worktree, the
-  project's `.git` (shared object store), and `[sandbox].task_read/task_write` extras,
-  with network open.
+  functions. It **fails closed**. `build_capabilities` (mode 2, `up --self-sandbox`)
+  blocks network unless `[sandbox].profile_file` lists a non-empty `network`; since
+  mode 2 applies to the supervisor and every child it spawns, a harness-driven
+  manager under it needs that grant. `build_task_capabilities` (per-run) grants the
+  worktree, the project's `.git` (shared object store), and
+  `[sandbox].task_read/task_write` extras, with network open.
 - `herdr.py` — the *only* module that talks to a herdr server (terminal
   multiplexer with agent-aware panes), over its unix-socket newline-JSON API.
   **Fails soft** — the deliberate opposite of sandbox.py's fail-closed: herdr
@@ -578,7 +586,7 @@ announcements through `load_state()/save_state()`, raising is safe.
 ### Testing idioms
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME` in `tmp_path`, exported via
-`$QUORUM_HOME`), `clock` (a `FakeClock` passed as `AgentContext(now=...)`), and `fake_llm`.
+`$QUORUM_HOME`) and `clock` (a `FakeClock` passed as `AgentContext(now=...)`).
 `tests/bin/fake_harness.py` is a fake coding harness (echoes argv/prompt, emits a
 `session_id`; `report` mode calls `python -m quorum task report`; `manager_act` /
 `manager_flood` modes act like a manager — each `[harness.*]` table pins its mode via

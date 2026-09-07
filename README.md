@@ -110,7 +110,7 @@ gets corrected.
   steer it; none of the surveyed tools hand the session to a supervisor.
 - **The supervisor is the same harness, reading a file digest.** Among the
   open-source tools surveyed, "supervision" meant keystroke automation —
-  daemons pressing enter, blind auto-confirmation. An actual LLM supervisor
+  daemons pressing enter, blind auto-confirmation. An actual model-driven supervisor
   showed up only in hosted commercial products (Factory's Mission Control,
   Devin's coordinator), where the inputs and the decisions stay in someone
   else's cloud. Quorum runs that pattern on your disk, and every input and
@@ -171,7 +171,7 @@ and the per-harness adapters under
 - **Guidance is a message, not a keystroke.** Your nudges and the manager's
   pokes travel the same file-based inbox; the next run starts with them in
   its prompt, and a cooperative harness picks them up mid-run.
-- **Failure is loud and recovery is automatic.** If your LLM service goes
+- **Failure is loud and recovery is automatic.** If your model service goes
   down, every harness-driven tick fails visibly — and keeps being scheduled,
   so the first tick after service returns reads the world from files and
   relaunches whatever died. No degraded fallback mode to babysit.
@@ -191,9 +191,7 @@ merged into the template at its `{local}` slot, so your policy rides along
 while `quorum init` keeps upgrading the default underneath it. Edit
 `manager.md` itself only when you mean to fork the whole thing (an edited
 template is never upgraded again; `quorum prompt diff manager` shows what
-you are missing), and delete it to restore the default. (An optional `[llm]`
-section separately gives *plugin* agents a small-completion client — the
-manager and tasks run your full harness directly.)
+you are missing), and delete it to restore the default.
 
 ## Optional sandbox
 

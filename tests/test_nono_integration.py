@@ -32,9 +32,9 @@ if not nono_py.is_supported():
 
 pytestmark = pytest.mark.nono_integration
 
-from quorum.config import Config, LLMConfig
+from quorum.config import Config
 from quorum.projects import ProjectRegistry
-from quorum.sandbox import build_capabilities, make_sandboxed_runner
+from quorum.sandbox import build_capabilities
 
 CAT = shutil.which("cat") or "/bin/cat"
 
@@ -100,37 +100,6 @@ def test_project_dirs_are_readonly(home: Path, tmp_path: Path):
     write_code, _, _ = sh(caps, f"echo tamper > {pdir / 'tampered.txt'}", cwd=home)
     assert write_code != 0
     assert not (pdir / "tampered.txt").exists()
-
-
-def test_runner_stdin_roundtrip_under_real_sandbox(home: Path):
-    """Mode 3 glue end-to-end: stdin prompt staged in QUORUM_HOME, redirected
-    via /bin/sh, executed inside the real sandbox, staging cleaned up."""
-    config = Config(llm=LLMConfig(executable=CAT))
-    runner = make_sandboxed_runner(home, config)
-    proc = runner([CAT], input="real sandbox prompt", timeout=30)
-    assert proc.returncode == 0, proc.stderr
-    # CliBackend is handed this as a subprocess.run stand-in with text=True.
-    assert isinstance(proc.stdout, str) and isinstance(proc.stderr, str)
-    assert proc.stdout == "real sandbox prompt"
-    assert not list((home / "state" / "llm").glob("prompt-*"))
-
-
-def test_llm_backend_completes_under_real_sandbox(home: Path, tmp_path: Path):
-    """The whole mode 3 stack: LLMClient -> CliBackend -> sandboxed runner.
-    Guards the silent-degradation path, where an exec or decode failure is
-    swallowed into a None completion and agents quietly lose their LLM."""
-    from quorum.config import SandboxConfig
-    from quorum.llm import LLMClient
-
-    exe = tmp_path / "fake-llm.sh"
-    exe.write_text("#!/bin/sh\nread -r line\necho \"echoed: $line\"\n")
-    exe.chmod(0o755)
-    llm_cfg = LLMConfig(executable=str(exe))
-    config = Config(llm=llm_cfg, sandbox=SandboxConfig(use_nono=True))
-    client = LLMClient.from_config(
-        llm_cfg, home=home, sandbox_config=config.sandbox, full_config=config
-    )
-    assert client.complete("hello sandbox") == "echoed: hello sandbox"
 
 
 def test_self_sandbox_enforces_in_subprocess(home: Path, tmp_path: Path):

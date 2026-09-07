@@ -22,7 +22,7 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    passively. Supervision itself, however, is deliberately *not*
    degradable: the manager **is** a harness run, and without a working
    harness its tick raises — visibly, every tick — while `auto_pause =
-   false` keeps the schedule firing so the first tick after the LLM
+   false` keeps the schedule firing so the first tick after the model
    service returns reads the situation from files and reinvokes whatever
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
@@ -851,7 +851,7 @@ scheduler. `priority: int = 0` (`task add --priority N`, `task set-priority
   escalating with `board post attention` instead. The prompt is the fence
   here, not a check: `task release` is an ordinary CLI verb and a harness
   that ignores its instructions can call it, which is exactly the
-  convention-not-boundary line `notes.may_write` draws.
+  convention-not-boundary line `Notebook.may_write` draws.
 - **Every verb is an ordinary `TaskStore.update` behind `_actor_guard`**, so
   `task.hold` / `task.release` / `task.set-priority` are journaled and count
   against an agent's per-run action cap like anything else. The TUI's `h`
@@ -887,16 +887,20 @@ task, on the same substrate and under the same rules:
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to a
   one-shot nudge) and an untagged human; any other task and any prompt
-  agent is refused with a pointer to `task nudge`. The same honesty as the
+  agent is refused with a pointer to `task nudge`. "The manager" is read
+  from config by *type* (`notes.manager_writers`), so a manager configured
+  as `[agents.boss] type = "manager"` — tagged `QUORUM_ACTOR=boss` — is
+  admitted; a config quorum cannot parse falls back to the literal name
+  rather than raising, because this is read on every task run. The same honesty as the
   manager's fence applies: it reads `QUORUM_ACTOR`, which any process that
   can run the CLI can set, so it is a **convention against accidental
   crowding, not a security boundary** — the sandbox is. The manager's
   notebook now refuses a task run, which is a change: before the task actor
   tag existed the runner stripped the launcher's tag and set nothing in its
-  place, so a task harness ran as `user` and `notes.may_write` admitted it —
+  place, so a task harness ran as `user` and the fence admitted it —
   a task could write into the manager's notebook. Tagging it `task-<id>`
   closes that; a task reaches the manager with `quorum task report` and the
-  board, as the fence always intended.
+  board.
 - **Reader.** `runner.compose_prompt` renders the notebook into every
   composed prompt — a resumed session and a fresh one alike, because the
   fresh one is the run that needs it — after the task body and the
@@ -909,7 +913,7 @@ task, on the same substrate and under the same rules:
   teaches the command. `quorum task show` prints the same rendering. The
   digest deliberately does not: the manager reads reports, and the
   notebook is the task's own.
-- **Attached tasks are the exception, and it is a real one.** An adopted
+- **Attached tasks are the exception.** An adopted
   session (*Attached tasks* below) does not go through the runner, so
   nothing composes a prompt for it and **its notebook is never rendered
   into the session**; `quorum task show <id>` is the read path there, for
@@ -1227,16 +1231,19 @@ It is a **separate buffer** on both sides, and that is the whole design:
 
 - *Write side.* Not a board topic, so no reporting task or chatty agent
   posts into it in the ordinary course of things. Only the notebook's own
-  agent and an untagged human may write (`notes.may_write`); a call tagged
-  as a task or another agent is refused with a pointer to `task report` and
-  `board post attention`. Be honest about what that fence is: `may_write`
-  reads `QUORUM_ACTOR` from the environment, and any process that can run
-  the quorum CLI can set it. The runner stripping the actor tag from task
-  runs, and this check, are **conventions that keep honest callers out of
-  each other's memory** — they stop accidental crowding, not a harness that
-  decides to impersonate the manager. The real boundary around a notebook
-  is the filesystem the run is given (`sandbox.py`), not this check.
-- *Read side.* `notes.digest_section` renders the notebook **before** the
+  agent and an untagged human may write (`Notebook.may_write`); a call
+  tagged as a task or another agent is refused with a pointer to
+  `task report` and `board post attention`. Be honest about what that fence
+  is: `may_write` reads `QUORUM_ACTOR` from the environment, and any process
+  that can run the quorum CLI can set it. The check is a **convention that
+  keeps honest callers out of each other's memory** — it stops accidental
+  crowding, not a harness that decides to impersonate the manager. The real
+  boundary around a notebook is the filesystem the run is given
+  (`sandbox.py`), not this check. The runner does not protect the manager's
+  notebook by stripping the actor tag: it strips the launcher's tag and then
+  sets the task's own (`task-<id>`, see *Task notebooks* above), and that is
+  the name the check reads.
+- *Read side.* `Notebook.render` renders the notebook **before** the
   task section, under `NOTES_MAX_ENTRIES` / `NOTES_MAX_BYTES`, which nothing
   else in the digest spends. Ten live tasks with long report tails cannot
   shrink it. Over the cap the newest notes are kept and the digest says how
@@ -1909,23 +1916,20 @@ Two files in a project directory are quorum's by convention, both read-only:
 the `.quorum.toml` marker above, and `.quorum/task-preamble.local.md`, which
 fills the task preamble's `{project}` slot (see [Prompts](#prompts)).
 
-## LLM layer
+## Model calls
 
-`LLMBackend` is a one-method protocol: prompt in, completion out. The `cli`
-backend shells out to any configured executable; `[llm].input` selects stdin
-piping or argv substitution. `LLMClient.complete()` never raises — `None`
-means "no LLM today" and every caller has a deterministic fallback. Prompts
-come from user-editable templates in `prompts/` (`quorum.prompts`). Note the
-LLM layer is for *plugin agents'* small completions; neither task harnesses
-nor the manager's harness go through it — both are invoked directly as
-subprocesses via the `[harness.*]` templates.
+There is one way to reach a model: a `[harness.<name>]` argv template, run as
+a subprocess. Task runs go through `quorum.runner`; the manager and prompt
+agents go through `agents/harness_run.run_agent_harness`, and a plugin agent
+that wants a model call uses the same function — it takes the agent's
+`AgentContext`, resolves the agent's harness, and returns the run id after
+streaming the harness output to the agent's transcript.
 
-### Design seam: managed auth proxy
-
-`[llm].backend = "proxy"` is reserved: a supervisor-managed localhost proxy
-injecting API credentials so subprocesses never see raw keys — most likely
-over nono-py's `start_proxy`. Everything goes through `LLMBackend`, so no
-other module may assume the `cli` backend.
+There used to be a second way: a `[llm]` table and an `LLMClient` for plugin
+agents' small completions, with a `proxy` backend reserved for a
+supervisor-managed credential proxy. Nothing in shipped code called it, so it
+was removed. A leftover `[llm]` table in config.toml is an unknown table and
+pydantic ignores it.
 
 ## Sandbox (optional)
 
@@ -1942,7 +1946,7 @@ nono-py, always lazily:
    quorum package dir — derived at runtime from `sys`/`sysconfig`) is granted
    read; nono's `system_read_*` policy groups supply the loader/libc baseline
    without which no child can exec at all.
-3. **Per-task / per-LLM-call**: `[sandbox].use_nono = true`. Each task run
+3. **Per-task**: `[sandbox].use_nono = true`. Each task run
    applies `build_task_capabilities` to itself (runner process + harness
    children): write on `QUORUM_HOME`, the worktree, the project's `.git`,
    and `[sandbox].task_write` extras (harness state dirs like `~/.claude`);
@@ -1956,10 +1960,14 @@ quorum functional), a non-empty `network` list keeps mode 2's network open,
 and an unreadable profile raises `SandboxUnavailable` — never a narrower
 sandbox than the user asked for. The same file works verbatim with the nono
 binary in mode 1.
-   Plugin agents' LLM subprocess calls go through `sandboxed_exec` with the
-   narrower `build_capabilities` set (network blocked unless `[llm]` is
-   configured; stdin prompts staged as ULID-named files under
-   `state/llm/` since `sandboxed_exec` cannot pipe stdin).
+
+Mode 2's network rule is worth stating plainly: `build_capabilities` blocks
+the network unless the profile file grants it. Mode 2 applies to the
+supervisor process and therefore to every child it spawns, so under
+`quorum up --self-sandbox` the manager's harness has no network either, and
+a harness-driven manager needs a `profile_file` whose `network` list is
+non-empty. Blocking by default is what keeps the mode fail-closed: opening
+the network is the user's explicit act, not an inference quorum makes.
 
 The asymmetry is the design: a sandboxed quorum can *see* the machine, but
 the only durable marks it can leave are `QUORUM_HOME`, the worktrees, and
@@ -2037,8 +2045,8 @@ half of the seeding logic `quorum init` acts on.
 ## Testing strategy
 
 `tests/conftest.py` provides `home` (scaffolded `QUORUM_HOME`), `clock`
-(injectable `FakeClock`), and `fake_llm`. Three purpose-built fake CLIs live
-in `tests/bin/`: `fake_llm.py` (canned completions), `fake_gh.py` (a GitHub
+(injectable `FakeClock`). Two purpose-built fake CLIs live
+in `tests/bin/`: `fake_gh.py` (a GitHub
 CLI installed onto a PATH stripped down to real git, so the CI probe's
 no-gh / no-auth / no-PR / garbage / hung branches are all reachable — and
 so a developer's real `gh` can never reach the network from a test), and

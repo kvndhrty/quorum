@@ -422,7 +422,7 @@ def test_selecting_an_agent_shows_its_notebook(home: Path):
     file reader, working with the supervisor stopped."""
     from quorum import notes
 
-    notes.remember(home, "the user wants at most two tasks running")
+    notes.agent_notebook(home).remember("the user wants at most two tasks running")
     populate(home)
 
     async def script(app, pilot):

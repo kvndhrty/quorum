@@ -576,7 +576,7 @@ def compose_prompt(
     # session is exactly the run that needs it. Its own budget, its own
     # drop count (`notes.TASK_NOTES_MAX_BYTES`), nothing when empty: the
     # preamble already teaches `task remember`.
-    kept = notes.task_section(home, task.id)
+    kept = notes.task_notebook(home, task.id).render()
     if kept:
         parts.append("\n".join(kept))
     if guidance:
