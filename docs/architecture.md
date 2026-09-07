@@ -27,6 +27,18 @@ harnesses (claude, codex, opencode, …), built around three commitments:
    needs reinvoking. There is no dumbed-down fallback supervisor by
    design.
 
+These three do not move with model capability, and neither do the smaller
+stances recorded per layer below: no decisions in Python, observations are
+never rails, a dropped signal is a bug. The settings that *do* move are
+dials that record how far the human trusts the model today: how many tasks
+run at once, the per-run action cap, the budget, the manager's cadence, who
+launches, who decomposes, who merges. They are listed with their loosening
+conditions in [guide.md](guide.md#loosening-the-rails-as-trust-is-earned),
+facing the list of what does not move, and `dials.py` is the registry
+behind that table (`quorum doctor` reads the current values from it). A
+change to either list is argued there and recorded here and in `CLAUDE.md`
+in the same commit.
+
 ## Process model
 
 ```
@@ -107,7 +119,7 @@ messages/inbox/<name>/new|cur/    direct mail (task-<id>, supervisor, agents)
 messages/archive/YYYY-MM.jsonl.gz compacted history
 state/agents/<name>/              heartbeat.json + state.json + tick.lock
                                   (+ journal.jsonl, notes.jsonl,
-                                  transcript.jsonl and usage.jsonl for
+                                  transcript.jsonl, usage.jsonl and runs/ for
                                   harness-driven agents other than the
                                   manager)
 state/manager/journal.jsonl       auto-recorded manager actions (per-run tagged)
@@ -117,6 +129,14 @@ state/manager/transcript.jsonl    the manager harness's own stdout
 state/manager/usage.jsonl         one line per manager harness run: what it
                                   spent and how it went ({at, run,
                                   usage|null, outcome, duration_seconds})
+state/manager/runs/<run>.md       what that run was given: the situation
+                                  digest (an agent's rendered prompt), written
+                                  before its harness starts. Bounded twice —
+                                  head-truncated at SNAPSHOT_MAX_BYTES, only
+                                  the newest SNAPSHOT_KEEP files kept — and
+                                  read by nothing that decides anything: it
+                                  exists so `quorum manager log` can show what
+                                  a tick saw (see "Reading a run")
 state/notify.json                 the [notify] hook's private board cursors
                                   (last filename delivered, per topic)
 logs/supervisor.log, actions.jsonl
@@ -393,6 +413,68 @@ transcript. So capture is one more look at each parsed event
   usually the largest. `usage.agent_runs` reads the outcomes back over the
   same bounded tail, separately from `agent_usage` (which stays `None` when
   no run in the window reported spend, and a timed-out run never does).
+
+**Usage and delivery statistics (`stats.py`, `quorum usage`).** The
+per-task and per-agent figures above answer "what did this run cost"; the
+questions asked after a week are aggregate — what did this project cost,
+is one harness cheaper than another per merged PR, how long from queue to
+merge, how many tasks needed a rerun — and until #96 each was a
+hand-written script over `task.json` files. `quorum usage [--by
+project|harness|week|agent] [--since 7d] [--json]` is that script, kept to
+the rules of theme #88:
+
+- **A pure reader, no cache.** It opens `tasks/<id>/task.json`, each task's
+  `reports.jsonl` and the agent ledgers, and nothing else — no network, no
+  state of its own, recomputed on every call, so it works with the
+  supervisor stopped and an archived task leaves the figures the moment
+  `task prune` moves it. `reports.jsonl` is read for exactly one fact: the
+  instant a task last said `done`, which `task.json` does not hold
+  (`updated_at` moves on every edit — a hold, a priority change, the run
+  record written after the report). Only a task whose *current* status is
+  `done` has a done time, so a task relaunched after a premature `done` is
+  not delivered however often it said so; a hand-edited `done` with no
+  report behind it is counted as done and has no queue-to-done figure.
+- **The reduction is reused, not re-derived.** A row's spend is one
+  `usage.total` over every run in the group — max within a run was applied
+  when the run was recorded, sum across runs is `total`'s own rule — and
+  `--by agent` reads every ledger line through the same call (the whole
+  file, not the bounded tail the views take: a report may spend the read a
+  tick may not). A task whose runs reported nothing is counted in `tasks`
+  and `runs` and adds nothing to `cost` or `tokens`; `tasks_with_usage`
+  says how many reported anything and `tasks_with_cost` how many reported a
+  cost, so a total over three reporting tasks out of ten is never read as
+  the cost of ten. A harness that reports tokens but no cost gets a token
+  figure and an empty cost cell — which makes the two counts differ in any
+  group mixing harnesses, and is why the `reported` column renders
+  `tasks_with_cost` wherever a cost is shown and `tasks_with_usage` only
+  where there is none: the `$` is the figure a reader takes for the whole
+  row, so the column has to be the `$`'s own coverage. It is shown only
+  when the count differs from `tasks`. Nothing is estimated.
+- **Delivery figures come only from the merged observation.** `merged` is
+  `pr_state == "merged"` on the record, and `share_merged` is measured over
+  the tasks with *any* `pr_state` — the PRs the manager observed — never
+  over every done task, because absence of a `pr_state` means no `gh`,
+  `[ci]` off or a supervisor that was never up while the PR was open, and
+  must not read as "not merged" (*The merged observation*, below).
+  `done_to_merged` runs from the `done` report to `pr_state_at`, the tick
+  that first saw the merge: late by up to one tick, never early, and a
+  merge seen before the harness said done is a zero wait rather than a
+  negative one. `queue_to_run` is queueing to the first run's `started_at`
+  (an attached task has none). Each is reported as a median with the mean
+  and count behind it in `--json`; `_build_table` drops the columns no row
+  fills, so a home without a forge shows no delivery columns at all.
+- **A task belongs to the moment it was queued.** `--since` and the `week`
+  dimension (ISO week, `2026-W36`) both read `created_at`: a task is in
+  exactly one week and a window is a set of tasks, never runs sliced
+  mid-task. Agent runs have no such anchor and filter on the ledger
+  line's own `at`. Unreadable timestamps degrade to "no figure" per field
+  and never fail the report, the same way a malformed usage dict degrades
+  in `usage.total`.
+
+Rendering lives in `cli.py` beside the other table builders
+(`_task_usage_table`, `_agent_usage_table`, right-aligned numeric columns,
+a `total` row when there is more than one), through the same `_print_table`
+as every listing — fitted on a terminal, plain text piped.
 
 **Mid-run guidance (`inject = "stream-json"`).** A harness whose CLI speaks
 the Claude Code stream-json protocol (`--input-format stream-json`
@@ -897,6 +979,77 @@ that would stay unarchived because of it. A prune journals one entry through
 `_actor_guard`, not one per task: it is a single decision, and per-task
 entries would burn an agent's action cap mid-sweep and leave the tidy
 half-finished.
+
+### Exporting a task: one archive for sharing a run
+
+Everything about a task is on disk, in three places: `tasks/<id>/` (the
+record, reports, transcript, runner log, and whatever a later feature puts
+next to them), `messages/inbox/task-<id>/` (guidance waiting or claimed)
+and — once a run has acked it — `messages/archive/YYYY-MM.jsonl.gz`, where
+delivered guidance sits mixed with every other message. Sharing a run, or
+attaching it to a bug report, used to mean knowing that layout. `quorum
+task export <id> [--out <path>] [--with-worktree-diff] [--redact]` writes
+one `.tar.gz` instead:
+
+```
+quorum-task-<short-id>/
+  export.json            task id, when, options, the member list
+  task.json, reports.jsonl, transcript.jsonl, runner.log, attached.json,
+  <subdir>/…             the task directory whole (tmp files skipped)
+  inbox/new/*.json       guidance waiting to be claimed
+  inbox/cur/*.json       guidance a run claimed and has not acked
+  inbox/delivered.jsonl  archived messages addressed to this task, oldest
+                         first — read back out of messages/archive/ (only
+                         the months from the task's creation onward are
+                         opened, since an ack can only land at or after it)
+  worktree.diff          --with-worktree-diff only
+```
+
+It is a reader of the same class as `prune.py`'s plan half, and the theme's
+stances (#88) hold: **no new state** — the archive is built from what is
+there, the manifest and `delivered.jsonl` are composed in memory, and the
+home's layout gains nothing; **read-only** apart from the output file,
+which defaults to `./quorum-task-<short-id>.tar.gz` and is *refused* inside
+the home (an archive under `tasks/<id>/` would be swept into the next export
+of that task, and nothing under the home should exist that the layout above
+does not document) and refused over an existing file; **nothing from the
+project directory**. That last one is why the diff is refused, loudly, for
+an attached or `--no-worktree` task: its workdir is the user's checkout, and
+the person asked for the diff, so silently omitting it would be the wrong
+kind of quiet. For a task with a quorum-made worktree, `worktree.diff` is
+`git diff` against the merge base with the same base `worktree_changed_paths`
+uses (`tasks._worktree_base`: the checkout's branch, else `origin/HEAD`, else
+the upstream), plus one `git diff --no-index` per untracked file so
+uncommitted new files are in the patch too — read-only plumbing, no fetch,
+no `add -N`. `runner.lock` is the one file in the task directory left out:
+it is a pid on this machine, not a fact about the task, and an unpacked
+archive must not look like it holds a live run. Member ownership is
+stripped (uid/gid 0, empty names) because the archive is meant to leave the
+machine. The archive is written beside its final name and renamed into
+place, so a failure mid-way leaves no half-file.
+
+`--redact` exists because tool results are where transcripts carry file
+contents, command output and secrets read off disk. It rewrites
+`transcript.jsonl` in the archive (never on disk) keeping the assistant's
+text, its thinking, and every tool *call* — name and arguments, which is
+how a reader follows what the run did — and replacing each tool *result*
+with a marker. The walk is structural and loose in the mold of
+`loop_signal`'s tool-call extraction: a dict tagged `tool_result` /
+`function_call_output` / `tool_call_output` has its output fields
+(`content`, `output`, `stdout`, …) replaced and its identity
+(`tool_use_id`, `is_error`, `call_id`) kept, while its remaining keys are
+walked rather than copied, so a payload filed under a name this module
+does not know is still reached; a tool-call item that carries its own
+output (codex's `command_execution` and `mcp_tool_call`, or any dict with
+a string `tool_name` — the same widening `_tool_fingerprints` makes) loses
+only the output fields;
+a `tool_use_result` field anywhere goes whole; past a depth bound a node is
+replaced rather than kept, because a redaction's failure direction has to
+be "dropped". A plain-text harness's `line` entries have no structure to
+redact and are kept verbatim — the command says how many, so nobody
+mistakes a `--redact` of an opencode transcript for a clean one. Counts of
+what was redacted come back with the archive path; there is no `--redact`
+of reports or guidance, which are what people wrote.
 
 ## The manager
 
@@ -1525,6 +1678,8 @@ write logic that lives in a view:
   the TUI needs no task-add form: the manager runs `task add` itself,
   journaled and capped), start a detached run (`s`), cancel a task (`c`),
   hold/release a task (`h`) and nudge its priority (`+` / `-`).
+  `t` is a read, not a write: the detail pane's second tab, the task's
+  history (below), sticky across tasks the way a tab is.
   `s` refuses an attached task, a held task and a task whose runner is
   alive, mirroring the runner's own substrate rails; `c` is the one
   destructive binding, so
@@ -1550,6 +1705,115 @@ invention; a dashboard that vanishes mid-keystroke leaves nothing behind but
 the message it already queued. This revises the earlier "the views are pure
 readers whose one write affordance is nudging a task" stance (issue #11) —
 the invariant that survived it is *thin, shared, no view-local write logic*.
+
+### Task history
+
+`views.task_history(home, task)` is the first of the post-hoc readers
+(#88): one list, oldest first, of everything that happened to a task,
+assembled from the files that already record it and nothing else. Every
+row is `{at, at_text, kind, text, ...}` — `at` the ISO-8601 UTC stamp as it
+was written, `at_text` that stamp as a surface prints it, `kind` one of
+`queued`, `action`, `guidance`, `run.started`, `report`, `run.ended`,
+`pr_state`, `archived`, and `text` the rest of the line every surface
+prints (`views.history_line`: `[at_text] text`), with the kind's raw fields
+beside it for `--json`. `quorum task history`, the TUI's `t` tab and the web task
+page (`history` on `/api/tasks/{id}`) all render the same rows, so they
+cannot disagree. The sources, and what each contributes:
+
+| file | rows |
+| --- | --- |
+| `task.json` | `queued` (`created_at`, with issue and `depends_on`); a `run.started` / `run.ended` pair per run — exit code, `usage` as the harness reported it, `stopped` (with the signal `task stop` sent), `stalled`, `fresh_session`, the `auto_commit` note; `pr_state` from `pr_state_at`, the one materialized probe |
+| `runner.lock` | a `run.started` marked `live` for the run in progress, which has no record yet (the runner writes one when it ends); only while the pid is alive |
+| `reports.jsonl` | one `report` per line: status, text, pr_url |
+| `messages/inbox/task-<id>/new` and `cur` | `guidance` still `waiting` (unclaimed) or `claimed` (a run is injecting it, or its consumer crashed and the janitor has not yet returned it) |
+| `messages/archive/*.jsonl.gz` | `guidance` that was consumed: what a run acks after injecting it (`MessageBus.archived_direct`, read from the task's own month on). `task inbox --clear` archives without delivering and leaves an identical record, so the row cannot tell the two apart; it says so in the guide |
+| `state/manager/journal.jsonl` and every `state/agents/<name>/journal.jsonl` | `action`: entries whose `target` is the task's short id, plus a `task.prune` whose args list it (a prune journals once per command). Read over `HISTORY_JOURNAL_BYTES` — a completeness bound well past the digest's tail, not a tail |
+| `tasks/.archive/<id>/` | `archived`, stamped from the directory's ctime — the one event with no record of its own; a rename updates ctime, and nothing else touches a pruned directory |
+
+The transcript contributes no row: everything the runner notes there (a
+stop, a stall, an auto-commit, a fresh session) is also on the run record,
+and the harness's own events are #82's renderer and #83's `event received`
+row, which does not exist yet and is deliberately not stubbed.
+
+What the reader does *not* do is as much the design as what it does. It
+records nothing: guidance is stamped when it was sent because delivery
+writes no time, and the honest fix for a missing fact is to record it
+where it happens (as `pr_state_at` was, #79), never to compute and cache
+it here. It is bounded and fail-soft in the read model's way — the
+journals over a byte budget, the archive from the task's own month on, a
+torn line or an undecodable archive file costs the rows it held and never
+the list. A stamp that will not parse sorts after every real row instead of
+by string comparison, and `at_text` marks it with a `?`, so an event quorum
+cannot place in time is visible rather than silently misfiled. Guidance is
+deduplicated by message id, furthest-along state winning, because `ack()`
+archives before it unlinks the `cur/` copy and a consumer that dies between
+the two leaves the message in both places for good.
+
+Even bounded it is too expensive for a polling loop: on a home with four
+agents' journals at the byte budget and a year of archives it takes about
+four tenths of a second. So the TUI's tab is a snapshot, not a follower —
+rebuilt on `t`, on `r`, on opening a different task and after any write the
+dashboard itself made, and reused on the two-second tick. The web page
+builds it once per request for one task, which is the same bound.
+
+And it outlives pruning: `quorum task history` resolves a handle
+out of `tasks/.archive/` (`prune.resolve_archived`, the same
+full-id/prefix/suffix grammar as `TaskStore.resolve`) when the live
+listing has nothing, because archival is the last thing that happens to a
+task and the answer to "what happened to it" must not vanish with the
+move. That is the one reader that looks into the dot-prefixed directory on
+purpose; every listing, view and digest keeps skipping it.
+
+### Reading a run
+
+A transcript is complete and illegible: a claude run is a few hundred events
+of nested `tool_use` payloads and echoed tool output, and answering "what did
+it try, what came back, why did it stop" took `jq`. `transcript.py` renders
+those files as a narrative, and it is the *only* renderer — `quorum task tail`
+/ `task log`, `quorum manager log` / `manager tail`, `agent log` / `agent
+tail`, the TUI's transcript pane and the web dashboard's task detail all call
+it, so the surfaces cannot drift into different readings of one file.
+
+What it renders: the run's start (session id, working directory), assistant
+text in full, one line per tool call with its first argument trimmed, each
+tool result collapsed to `N lines · size` (plus an exit code or an error's
+first line), quorum's own `quorum:` transcript notes, and a closing `result`
+line whose numbers come from `usage.usage_from_event` rather than a second
+reading of the same event. Reasoning blocks and the events that carry no
+story — the init banner's tool list, progress pings, token estimates, an
+allowed rate-limit notice — are folded away; `-v` unfolds all of it plus the
+full payload of every line.
+
+Three properties fence it:
+
+- **One place for harness shapes.** `tool_call`, `session_id` and `normalize`
+  are the only code that knows how each harness spells an event, on the seam
+  `usage.py` already owns for result events. `manager.loop_signal` reads
+  `transcript.tool_call` and the runner reads `transcript.session_id`, so
+  teaching quorum a new harness is one file.
+- **Fail-soft, always.** An unrecognized event renders as its raw JSON line
+  and a malformed entry as its `repr`; `normalize` catches everything. This
+  runs in a dashboard refresh loop and in `-f` tails, where a raise is a dead
+  surface.
+- **`--raw` is a promise.** It prints what `task tail` printed before the
+  renderer existed, byte for byte, so anything grepping a transcript keeps
+  working.
+
+`quorum manager log [--last N | --run <id>]` reads one *tick* rather than one
+file, out of the four the tick leaves behind: the digest snapshot it was
+given (`state/manager/runs/<run>.md`), its transcript entries, the actions the
+CLI journaled for it — each with the then-vs-now target status the next digest
+would show — and the usage-ledger line saying how it ended. `agent log <name>`
+is the same reader over a prompt agent, whose snapshot is its rendered prompt.
+Every section degrades to a note rather than an error: a run whose snapshot
+has aged out of the bounded directory, or that died before writing a ledger
+line, still renders everything else.
+
+The snapshot is the one thing here that writes, and it is deliberately not
+state: nothing reads it back to decide anything, it is head-truncated on write
+and only the newest `SNAPSHOT_KEEP` files are kept, and losing one costs a
+reader some history and the system nothing. Without it a tick's reasoning was
+unreconstructable — the digest was rendered, sent to the harness and dropped.
 
 ## Projects
 
@@ -1668,7 +1932,11 @@ Doctor asks other modules rather than reimplementing them, which is what
 keeps its answers from drifting from the code it reports on: `gh` through
 `forge.auth_status` (the module that owns every forge-CLI subprocess), prompt
 staleness through `home.classify_prompt` (the classification `quorum init`
-seeds by), sandbox support through `sandbox.availability()`. The
+seeds by), sandbox support through `sandbox.availability()`, the trust dials
+through `dials.current` (the registry the guide's table is tested
+against, rendered as `dial.*` lines that are `–` by construction: a
+cautious default and a deliberately loosened value are both facts, not
+faults). The
 `[notify]` line is static (argv[0] on PATH, `{text}` in the template);
 actually running the template is `quorum notify test`, which is loud
 where the supervisor's delivery is deliberately not.

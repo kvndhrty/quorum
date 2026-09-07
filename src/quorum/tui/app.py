@@ -16,7 +16,6 @@ dashboard down when QUORUM_HOME turns unwritable."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from rich.text import Text
@@ -27,7 +26,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
-from .. import views
+from .. import transcript, views
 from ..messages import MessageBus
 from ..tasks import (
     Task,
@@ -177,6 +176,7 @@ class QuorumTUI(App):
         ("plus", "raise_priority", "priority +1"),
         ("minus", "lower_priority", "priority -1"),
         ("a", "attention", "ack attention"),
+        ("t", "history", "history"),
         ("escape", "show_board", "board"),
     ]
     CSS = """
@@ -202,6 +202,19 @@ class QuorumTUI(App):
         # the task a "task" nudge is aimed at, pinned when the box was opened
         self._input_task: str | None = None
         self._log_lines: list[str] | None = None  # last rendered log content
+        # Which tab of an open task's detail the pane shows: its transcript
+        # tail (the default) or its history — the one chronological list of
+        # what happened to it (views.task_history). `t` switches; the choice
+        # sticks across tasks the way a tab does.
+        self._task_view = "transcript"
+        # The history tab's last content, and the task it was built for.
+        # `views.task_history` reads every agent's journal and the message
+        # archive, which is far more work than the two-second tick can carry,
+        # so the tab is a snapshot rather than a follower: `t`, `r`, a write
+        # this dashboard made, and opening a different task rebuild it, and
+        # nothing else does.
+        self._history_lines: list[str] | None = None
+        self._history_for: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -235,6 +248,7 @@ class QuorumTUI(App):
     # -- actions -----------------------------------------------------------
 
     def action_refresh(self) -> None:
+        self._invalidate_history()
         self.refresh_data()
 
     def action_show_board(self) -> None:
@@ -246,6 +260,24 @@ class QuorumTUI(App):
             return
         self.selected_task = None
         self.selected_agent = None
+        self.refresh_data()
+
+    def action_history(self) -> None:
+        """Show the highlighted (or open) task's history in the detail pane;
+        pressed again on an open task, switch back to its transcript. A read,
+        like `enter` — it arms nothing. Pressing `t` is also what rebuilds
+        the tab, so a second press on a task already showing its history
+        both closes the tab and drops what it was holding."""
+        task_id = self._highlighted_task() or self.selected_task
+        if task_id is None:
+            self.notify("no task to show", severity="warning")
+            return
+        if self.selected_task == task_id and self._task_view == "history":
+            self._task_view = "transcript"
+        else:
+            self._task_view = "history"
+        self._invalidate_history()
+        self.selected_task, self.selected_agent = task_id, None
         self.refresh_data()
 
     def action_nudge(self) -> None:
@@ -443,6 +475,10 @@ class QuorumTUI(App):
         That surfaces as the KeyError/ValueError board resolution raises, not
         as OSError, and it is the same class of disappointment: say so and keep
         the view up."""
+        # Every write here is an event in some task's life, so the history
+        # tab must not go on showing the list from before it. Dropping it on
+        # a write that then fails costs one rebuild and nothing else.
+        self._invalidate_history()
         try:
             return do()
         except (OSError, KeyError, ValueError) as e:
@@ -650,19 +686,28 @@ class QuorumTUI(App):
         mode = self.query_one("#logmode", Static)
         if self.selected_task:
             short = self.selected_task[-6:].lower()
-            mode.update(
-                f"task {short} — transcript tail   "
-                "(esc: board · n: nudge · m: manager · s: run · c: cancel · a: ack)"
-            )
-            lines = self._task_log_lines(self.selected_task)
+            if self._task_view == "history":
+                mode.update(
+                    f"task {short} — history, oldest first   "
+                    "(t: transcript · r: rebuild · esc: board · n: nudge · m: manager · "
+                    "s: run · c: cancel)"
+                )
+                lines = self._history_pane_lines(self.selected_task)
+            else:
+                mode.update(
+                    f"task {short} — transcript tail   "
+                    "(t: history · esc: board · n: nudge · m: manager · s: run · c: cancel)"
+                )
+                lines = self._task_log_lines(self.selected_task)
         elif self.selected_agent:
             mode.update(f"agent {self.selected_agent} — notebook & journal   (esc: board)")
             lines = self._agent_log_lines(self.selected_agent)
         else:
             mode.update(
                 "board — recent messages   "
-                "(enter on a task or agent: its detail · n/s/c act on the highlighted row · "
-                "m: tell manager · a: ack #attention · ⚭ attached · ▶ running)"
+                "(enter on a task or agent: its detail · t: a task's history · "
+                "n/s/c act on the highlighted row · m: tell manager · a: ack #attention · "
+                "⚭ attached · ▶ running)"
             )
             lines = [
                 f"[{m['at'].replace('T', ' ').rstrip('Z')}] #{m['topic']} <{m['from']}> {m['text']}"
@@ -676,14 +721,34 @@ class QuorumTUI(App):
             for line in lines:
                 log.write(line)
 
+    def _invalidate_history(self) -> None:
+        """Drop the history tab's snapshot; the next render rebuilds it."""
+        self._history_lines = None
+
+    def _history_pane_lines(self, task_id: str) -> list[str]:
+        """What the history tab shows, rebuilt only when something asked for
+        it — `t`, `r`, a write this dashboard made, or a different task being
+        opened. The two-second tick reuses what is here, because building the
+        list reads every agent's journal and the message archive and would
+        otherwise hold up the interface for a fifth of every tick on a home
+        with any history behind it."""
+        if self._history_lines is None or self._history_for != task_id:
+            self._history_for = task_id
+            self._history_lines = self._task_history_lines(task_id)
+        return self._history_lines
+
+    def _task_history_lines(self, task_id: str) -> list[str]:
+        """The task's life as `quorum task history` prints it — the same
+        rows, the same line per row."""
+        task = TaskStore(self.home).get(task_id)
+        if task is None:
+            return ["that task is gone"]
+        return [views.history_line(row) for row in views.task_history(self.home, task)]
+
     def _task_log_lines(self, task_id: str) -> list[str]:
-        lines: list[str] = []
-        for entry in read_transcript_tail(self.home, task_id, limit=25):
-            at = str(entry.get("at", "")).replace("T", " ").rstrip("Z")
-            if "line" in entry:
-                lines.append(f"[{at}] {entry['line']}")
-            else:
-                lines.append(f"[{at}] {json.dumps(entry.get('event'), ensure_ascii=False)[:200]}")
+        # the same renderer `quorum task tail` and the web dashboard use, so
+        # the three surfaces cannot drift into three readings of one file
+        lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
         reports = read_reports(self.home, task_id, limit=8)
         if reports:
             lines.append("— reports —")

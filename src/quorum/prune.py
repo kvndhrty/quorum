@@ -53,6 +53,7 @@ from .tasks import (
     Task,
     TaskStore,
     runner_alive,
+    short_handle,
     task_dir,
     tasks_dir,
     workdir_git_state,
@@ -73,6 +74,39 @@ def archive_root(home: Path) -> Path:
 
 def archived_task_dir(home: Path, task_id: str) -> Path:
     return archive_root(home) / task_id
+
+
+def resolve_archived(home: Path, handle: str) -> Task:
+    """Find a *pruned* task by full id, unique prefix or unique suffix — the
+    grammar of `TaskStore.resolve`, over `tasks/.archive/` instead of
+    `tasks/`, raising the same `KeyError` (nothing) and `ValueError`
+    (ambiguous).
+
+    The one reader that looks into the archive on purpose: `quorum task
+    history` answers "what happened to this task" and archival is the last
+    thing that happens to one, so the answer must not vanish with the move.
+    Everything else (`task list`, every view, the digest) keeps skipping the
+    dot-prefixed directory, which is the point of it.
+    """
+    handle = handle.strip().upper()
+    root = archive_root(home)
+    if not root.is_dir():
+        raise KeyError(handle)
+    names = sorted(p.name for p in root.iterdir() if p.is_dir() and not fsio.is_tmp(p.name))
+    matches = [n for n in names if n == handle] or [
+        n for n in names if n.startswith(handle) or n.endswith(handle)
+    ]
+    if not matches:
+        raise KeyError(handle)
+    if len(matches) > 1:
+        raise ValueError(
+            f"archived task handle {handle!r} is ambiguous: "
+            + ", ".join(short_handle(n) for n in matches)
+        )
+    try:
+        return Task.model_validate(fsio.read_json(archived_task_dir(home, matches[0]) / "task.json"))
+    except (OSError, ValueError):
+        raise KeyError(handle) from None
 
 
 def archived_ids(home: Path) -> list[str]:

@@ -254,6 +254,54 @@ class MessageBus:
                 continue
             yield ClaimedMessage(msg, target, self.archive_dir)
 
+    # -- reading an inbox without claiming --------------------------------
+
+    def inbox_messages(self, agent: str, folder: str = "new") -> list[Message]:
+        """The messages sitting in one folder of `agent`'s inbox — `new/`
+        (unclaimed) or `cur/` (claimed by a consumer that has not acked yet)
+        — oldest first, without touching them. A peek for readers (`task
+        history`); an unreadable file is skipped, never raised."""
+        if folder not in ("new", "cur"):
+            raise ValueError(f"inbox folder must be 'new' or 'cur', not {folder!r}")
+        entries = fsio.sorted_entries(self.inbox_dir / agent / folder)
+        return [m for m in (_load(p) for p in entries) if m]
+
+    def archived_direct(self, to: str, since: datetime | None = None) -> list[Message]:
+        """Every archived message that was addressed to `to`, oldest first.
+
+        The archive (`messages/archive/YYYY-MM.jsonl.gz`) is where a claimed
+        inbox message goes when its consumer acks it — so for a task's inbox
+        this is the record of guidance that was consumed. `since` bounds the
+        read to the monthly files from that month on (the archive is filed by
+        the month the message was archived, never earlier than it was sent).
+        Fail-soft throughout: a file that will not decompress or a line that
+        will not parse is skipped, because this is read by views, and a view
+        that raises over one bad byte of history is worse than one missing
+        line.
+        """
+        floor = f"{since:%Y-%m}" if since is not None else ""
+        out: list[Message] = []
+        for path in sorted(self.archive_dir.glob("*.jsonl.gz")):
+            if path.name[:7] < floor:
+                continue
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            record = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(record, dict) or record.get("to") != to:
+                            continue
+                        try:
+                            out.append(Message.model_validate(record))
+                        except ValueError:
+                            continue
+            except (OSError, EOFError, gzip.BadGzipFile):
+                continue
+        out.sort(key=lambda m: m.created_at)
+        return out
+
     # -- on-demand archival ----------------------------------------------
     #
     # The janitor's per-message path, exposed for `quorum board ack`,
