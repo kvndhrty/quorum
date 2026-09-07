@@ -92,6 +92,15 @@ option with a default has no row.
   is the same rule for heartbeats, and `tasks.git_runner` / `tasks.git_probe`
   are the loud and fail-soft faces of `git -C <cwd> ...` (worktree creation
   and removal raise; the read-only probes answer None).
+  Four more one-per-codebase helpers live here because more than one layer
+  needs them: `resolve_handle(handle, candidates)` is the **only**
+  implementation of the id grammar (full id, then unique prefix or suffix,
+  case-insensitive; `KeyError` for nothing, `ValueError` for more than one)
+  behind tasks, board messages, notes, archived tasks and agent runs;
+  `parse_window` is the **only** window grammar (a positive count and one of
+  `s m h d w`) behind `usage --since`, `board read --since`, `board clear
+  --before` and `task prune --older-than`; `parse_iso_or` is the fail-soft
+  `parse_iso`; `display_ts` is the one way a stored stamp is printed.
 - `messages.py` — one `Message` schema over two channels: an append-only board
   (`messages/board/<topic>/`, filenames `<utc-compact>-<ULID>.json` so lexicographic
   order is chronological) and maildir-style inboxes (`new/` → `cur/` claimed by
@@ -165,7 +174,7 @@ option with a default has no row.
   for real under node, skipped when node is absent). The adapters ship
   inside the wheel (hatch force-include → `quorum/integrations`) so
   `quorum integration list|install` works from a package install;
-  `cli._integrations_root()` falls back to the repo dir in a checkout.
+  `cli.integration._integrations_root()` falls back to the repo dir in a checkout.
 - `prune.py` — on-demand cleanup, and the same "archive, never delete" rule
   the bus follows: `quorum task prune` **moves** `tasks/<id>/` to
   `tasks/.archive/<id>/` (dot-prefixed, so `TaskStore.list` and therefore
@@ -271,7 +280,7 @@ option with a default has no row.
   over tasks with *any* `pr_state`, never over done tasks (absence is not
   "not merged"), and `done_to_merged` ends at `pr_state_at`, the tick that
   first saw the merge. `--since` and `week` both read `created_at`.
-  Rendering (`_task_usage_table` / `_agent_usage_table`) lives in `cli.py`
+  Rendering (`_task_usage_table` / `_agent_usage_table`) lives in `cli/_common.py`
   beside the other table builders.
 - `transcript.py` — the **one** renderer of a transcript, and the one place
   that knows how each harness spells an event (`tool_call`, `session_id`,
@@ -355,7 +364,15 @@ option with a default has no row.
   read it and nothing else. `agent_rows` estimates a stale
   `next_run` from the schedule (`next_run_estimated`); `agent_detail` adds journal +
   per-agent actions. Write affordances stay thin bus/store/config calls shared with
-  the CLI — never view-local write logic. `task_history` (#95) is the post-hoc reader: one
+  the CLI — never view-local write logic. It also renders a task row's
+  marks, once, for every surface (the `usage_text` precedent): `task_marker`
+  (`⚭ ▶ ✓ ✗ ·`, before the short id), `task_badges` (`∞`, then `✔`/`⊘` for
+  the PR), `task_flags` (`⚠` stranded work, `waiting-on`, `DEP-*`) and
+  `usage_badge` (spend plus `$!` / `$! GATED`) — called by the CLI table,
+  the TUI table and `task show`, and described by `quorum status --legend`.
+  A surface may choose *where* it puts them (the TUI has no flags column, so
+  it appends them to the status cell); it may not spell them differently.
+  `task_history` (#95) is the post-hoc reader: one
   oldest-first list per task (`{at, at_text, kind, text, …}`, rendered everywhere by
   `history_line`) over task.json, `runner.lock` (the live run), reports.jsonl, the
   inbox `new/`/`cur/` plus the message archive (`MessageBus.archived_direct`), every
@@ -379,6 +396,14 @@ option with a default has no row.
   aimed at the banner rather than a task: `AttentionScreen` is a picker (the
   banner is a count and the board pane is a log, so neither can be pointed
   at) that dismisses with a message id, and the app acks it through `_write`.
+- `cli/` — one module per command group (`task`, `agent`, `manager`, `board`,
+  `project`, `prompt`, `integration`, `notify`, and `root` for
+  `init/up/down/status/doctor/tui/usage`) over `_common.py`, which holds the
+  typer apps, `get_home`, `_actor_guard`, `_resolve_task`, the table
+  builders and every option object more than one command declares.
+  `cli/__init__.py` re-exports `app` and the helpers callers and tests
+  import. `--home` is one option on the **root** app — `quorum --home <dir>
+  <command>` — read by `get_home` and by nothing else.
 - `actor.py` — the actor-identity env protocol: who a quorum CLI call is acting
   as, name-generic over harness-driven agents. An agent tags the harness it
   spawns (`actor_env(name, run_id, cap)`), the CLI resolves `current_actor()`

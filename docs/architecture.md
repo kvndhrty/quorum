@@ -75,7 +75,12 @@ interleaving.
 ## QUORUM_HOME
 
 Resolution: `--home` flag > `$QUORUM_HOME` > `./quorum-home` (if it exists) >
-`~/.quorum`.
+`~/.quorum`. `--home` is one option on the root app and goes before the
+subcommand (`quorum --home /path task list`); it was declared on all sixty
+commands until #102, which is a third of the CLI's option surface for one
+path. Every process quorum spawns is handed the resolved home in
+`$QUORUM_HOME`, so a detached run and a manager harness read the same tree
+without repeating the flag.
 
 ```
 config.toml                       user-owned; quorum never rewrites it
@@ -482,7 +487,10 @@ the rules of theme #88:
   (an attached task has none). Each is reported as a median with the mean
   and count behind it in `--json`; `_build_table` drops the columns no row
   fills, so a home without a forge shows no delivery columns at all.
-- **A task belongs to the moment it was queued.** `--since` and the `week`
+- **A task belongs to the moment it was queued.** `--since` (one window
+  grammar, `fsio.parse_window`: a positive count and one of `s m h d w`,
+  shared with `board read --since`, `board clear --before` and `task prune
+  --older-than`) and the `week`
   dimension (ISO week, `2026-W36`) both read `created_at`: a task is in
   exactly one week and a window is a set of tasks, never runs sliced
   mid-task. Agent runs have no such anchor and filter on the ledger
@@ -490,7 +498,7 @@ the rules of theme #88:
   and never fail the report, the same way a malformed usage dict degrades
   in `usage.total`.
 
-Rendering lives in `cli.py` beside the other table builders
+Rendering lives in `cli/_common.py` beside the other table builders
 (`_task_usage_table`, `_agent_usage_table`, right-aligned numeric columns,
 a `total` row when there is more than one), through the same `_print_table`
 as every listing — fitted on a terminal, plain text piped.
@@ -535,7 +543,12 @@ any harness that can run shell commands can cooperate — and one that can't
 still gets passive monitoring (transcript mtimes, lock liveness, exit
 codes). Task ids are ULIDs; the human-facing `short_id` is the ULID's
 *random tail* (the head is a timestamp shared by same-instant tasks), and
-`TaskStore.resolve` accepts any unique prefix or suffix.
+`TaskStore.resolve` accepts any unique prefix or suffix. That grammar is
+`fsio.resolve_handle` — full id first, then a unique prefix or suffix,
+case-insensitive, `KeyError` for nothing and `ValueError` for more than one
+— and it is the same call behind board messages, notes, archived tasks and
+agent runs, so a person who has learned to type six characters at a task
+has learned them all.
 
 **Where the prompt comes in.** `task add` takes the prompt from one place:
 the positional argument, which is `-` to read stdin instead. A file goes in
@@ -1572,8 +1585,9 @@ One `Message` schema serves two channels:
   archives that one message, which drops it from every view (they are all
   pure readers of the live topic) while the history keeps it with its
   original `created_at`. `resolve_board_message` accepts a full message id, a
-  unique prefix, or the unique suffix `Message.short_id` prints — the grammar
-  `TaskStore.resolve` already taught — and raises `KeyError`/`ValueError` for
+  unique prefix, or the unique suffix `Message.short_id` prints — one call
+  into `fsio.resolve_handle`, the grammar `TaskStore.resolve` already
+  taught — and raises `KeyError`/`ValueError` for
   unknown and ambiguous, because a silently-wrong ack archives someone else's
   escalation. `board read` prints that short id so there is something to type.
   The affordance is one shared bus call in the TUI with no view-local write
@@ -1696,10 +1710,21 @@ The CLI's listings (`quorum status`, `task list`, `agent list`, `project
 list`) render that model as Rich tables (rich is already typer's dependency)
 rather than concatenated lines — the shape that grew a clause per feature
 until a row with a report and a PR URL wrapped mid-cell past column 80
-(#52). One table builder per row kind in `cli.py` (`_task_table`,
+(#52). One table builder per row kind in `cli/_common.py` (`_task_table`,
 `_agent_table`, `_project_table`) turns the `views.*_rows` dicts into cells
 — rendering only, never re-deriving — and one `_print_table` renders the
-result two ways. On a terminal the table is fitted to the window: the
+result two ways.
+
+The marks *inside* those cells are views', not the CLI's: `task_marker`
+(the character before the short id — `⚭` attached, `▶` running, `✓` done,
+`✗` blocked, `·` anything else), `task_badges` (`∞` perpetual, then `✔` or
+`⊘` for what the forge last said about the PR), `task_flags` (`⚠` stranded
+work, `waiting-on <ids>`, `DEP-FAILED` / `DEP-MISSING` / `DEP-CYCLE`) and
+`usage_badge` (the spend plus `$!` or `$! GATED`). The CLI table, the TUI
+table and `task show` all call them, which is what stopped the two tables
+from disagreeing about where a dependency mark goes; `quorum status
+--legend` describes exactly that set and nothing else. The TUI has no
+flags column of its own, so it appends the flags to the status cell. On a terminal the table is fitted to the window: the
 report and flags (agents: error; projects: tags) columns absorb the
 shortfall with an ellipsis, so the id, status, harness, pr and usage
 columns stay whole down to the width at which the give-way column has
