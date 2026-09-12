@@ -72,11 +72,16 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
                              its own task, "tell" sends `manager tell`
   FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
+
+Every mode that calls back into the CLI prints the command first, as
+`RUN| quorum <argv>`, the way a real harness's transcript carries the shell
+line it ran.
 """
 
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -103,6 +108,11 @@ def usage_block() -> dict | None:
 
 
 def quorum(*args) -> subprocess.CompletedProcess:
+    # Announce the command on stdout before running it, the way a real
+    # harness's transcript shows the shell line it executed. That line is
+    # what anything reading a transcript for "which quorum verbs did this
+    # run reach for" has to work from (scripts/evidence.py).
+    print("RUN| quorum " + " ".join(shlex.quote(a) for a in args), flush=True)
     return subprocess.run(
         [sys.executable, "-m", "quorum", *args], capture_output=True, text=True
     )
