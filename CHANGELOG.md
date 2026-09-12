@@ -21,6 +21,20 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- A run can read its own record (#94): `quorum task show self` and
+  `quorum agent show self` resolve the actor tag the runner and the agents
+  set (`QUORUM_ACTOR`) and print the record any reader would see plus a
+  `this run:` section of the facts that only exist inside the run — the
+  per-run budget stated as a limit rather than as the refusal `task run`
+  raises once it is exceeded, what the last run spent, how full the notebook
+  is, whether a handoff is owed, and (for an agent) how much of
+  `max_actions_per_run` this run has used. `--json` dumps the same rows
+  under `detail`. `quorum agent show <name>` is the same record for a
+  person, the manager included. Read-only throughout: nothing here changes a
+  cap or a budget, and reading one is not a way around it. The task preamble
+  names the two moments worth a call — before a long tool-heavy step, and
+  before reporting `done`. Outside a tagged run, `self` is an error naming
+  the fix.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,

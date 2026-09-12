@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import fsio, prune, usage
+from .actor import SelfRun
 from .agent import read_heartbeat
 from .config import Config, load_config_or_default, parse_schedule
 from .messages import MessageBus
@@ -345,7 +346,9 @@ def usage_badge(row: dict[str, Any]) -> str:
 # printed `dependents:` and the handoff body, the JSON printed neither.
 
 #: the sections of a task record, in the order `task_detail` emits them.
-_DETAIL_SECTIONS = ("record", "reports", "notebook", "handoff", "more")
+#: `self` is the one a record only has when it is read from inside the run it
+#: describes (`task_self_detail`); everything else is there for any reader.
+_DETAIL_SECTIONS = ("record", "self", "reports", "notebook", "handoff", "more")
 
 #: how many of a task's reports the record shows, newest last.
 DETAIL_REPORTS = 10
@@ -588,6 +591,286 @@ def task_detail(
         "",
         f"more: `quorum task log {task.short_id}` for the transcript, "
         "`--json` for these rows and the raw record",
+    )
+    return rows
+
+
+# -- what a run can read about itself (#94) ---------------------------------
+#
+# `show self` is the record a person reads plus the run-scoped facts a run
+# cannot see from outside itself: what its per-run budget actually is before
+# it is refused for exceeding it, how much of its action cap is left, how
+# full its notebook is, and whether anything is waiting on it. Every fact is
+# already on disk or already in the run's own environment — nothing is
+# measured, nothing is recorded, and reading a cap is not a way around it.
+#
+# Resolving *who* is asking lives in actor.py and the facts arrive here as
+# an `actor.SelfRun`, which is what keeps this module a pure file reader.
+
+
+def _budget_rows(config: Config, task: Task) -> list[tuple[str, str, dict[str, Any]]]:
+    """The per-run budget as two facts — the limits and what the last run
+    spent against them — rather than as the refusal `task run` raises once
+    they are exceeded. `(label, text, fields)` each, for the caller to add.
+    """
+    budget = config.tasks
+    cost = usage.format_cost(budget.max_cost_per_run) if budget.max_cost_per_run > 0 else "off"
+    tokens = (
+        usage.format_tokens(budget.max_tokens_per_run) if budget.max_tokens_per_run > 0 else "off"
+    )
+    limits = (
+        f"max_cost_per_run {cost}, max_tokens_per_run {tokens}"
+        " — `task run` refuses the next run when the last one exceeds either"
+        if budget.max_cost_per_run > 0 or budget.max_tokens_per_run > 0
+        else "max_cost_per_run off, max_tokens_per_run off — no run is refused for spend"
+    )
+    rows = [
+        (
+            "limits",
+            limits,
+            {
+                "max_cost_per_run": budget.max_cost_per_run,
+                "max_tokens_per_run": budget.max_tokens_per_run,
+            },
+        )
+    ]
+    # What the last run spent, and the caveat that makes the number readable:
+    # a run's usage is written when it ends, so the run doing the reading has
+    # no figure of its own yet.
+    last = task.runs[-1] if task.runs else None
+    spent = usage.describe(getattr(last, "usage", None))
+    text = f"last run {spent}" if spent else "no run has reported what it spent"
+    if last is not None and last.ended_at is None:
+        text += "; this run's own spend is recorded when it ends"
+    rows.append(
+        (
+            "spent",
+            text,
+            {"last_run_usage": getattr(last, "usage", None), "total": usage.total(
+                r.usage for r in task.runs
+            )},
+        )
+    )
+    return rows
+
+
+def _notebook_text(size: dict[str, int], remember_cmd: str) -> str:
+    """One line of the numbers behind a notebook's rendering, so a run can
+    consolidate before the budget starts dropping its oldest notes."""
+    text = (
+        f"{size['notes']} note(s), {size['bytes']} of {size['max_bytes']} bytes "
+        f"and {size['shown']} of {size['max_entries']} entries"
+    )
+    if size["dropped"]:
+        text += (
+            f" — {size['dropped']} older note(s) are already being dropped; consolidate "
+            f'with one superseding `{remember_cmd} "…"`'
+        )
+    if size["unscanned"]:
+        text += f" — {size['unscanned']} bytes are past the read window and invisible"
+    return text
+
+
+def task_self_detail(
+    home: Path, task: Task, run: SelfRun, config: Config | None = None
+) -> list[dict[str, Any]]:
+    """`task_detail` with the run-scoped facts spliced in after the record's
+    own fields: the actor tag, the action cap (a task has none), the per-run
+    budget, the notebook's fill, and whether a handoff is owed.
+
+    The same rows in the same shape as the rest of the record, so one
+    surface prints both and `--json` dumps both.
+    """
+    from . import notes as notes_mod
+    from .tasks import read_handoff
+
+    home = Path(home)
+    if config is None:
+        config = load_config_or_default(home)
+    rows = task_detail(home, task, config=config)
+    extra: list[dict[str, Any]] = []
+
+    def add(kind: str, label: str, text: str, **fields: Any) -> None:
+        extra.append(
+            {
+                "section": "self",
+                "kind": kind,
+                "label": label,
+                "text": text,
+                "style": fields.pop("style", ""),
+                **fields,
+            }
+        )
+
+    add("heading", "", "this run:", actor=run.actor)
+    add("field", "actor", run.actor, actor=run.actor)
+    # A task run carries identity and no cap (actor.py), so the honest answer
+    # to "how many actions have I left" is that nothing is counting. Said
+    # rather than omitted: a run that cannot find the number otherwise
+    # assumes there is one.
+    add(
+        "field",
+        "actions",
+        "not capped for a task run — the runner is the rail, and reports.jsonl "
+        "plus the transcript are the record of what this run did",
+        capped=False,
+    )
+    for label, text, fields in _budget_rows(config, task):
+        add("field", label, text, **fields)
+    book = notes_mod.task_notebook(home, task.id)
+    size = book.size()
+    add(
+        "field",
+        "notebook",
+        _notebook_text(size, f"quorum task remember {task.short_id}"),
+        notebook=size,
+    )
+    # The check the preamble sends a task here for before it reports done:
+    # who is waiting, and whether they have been left anything.
+    dependents = [t.short_id for t in TaskStore(home).list() if task.id in t.depends_on]
+    handoff = read_handoff(home, task.id)
+    if not dependents:
+        text = "no task depends on this one — no handoff is owed"
+    elif handoff is None:
+        text = (
+            f"{len(dependents)} task(s) depend on this one ({', '.join(dependents)}) and no "
+            f"handoff is written — `quorum task report {task.short_id} --status done "
+            "--handoff <file>`"
+        )
+    else:
+        text = (
+            f"{len(dependents)} task(s) depend on this one ({', '.join(dependents)}); a "
+            f"handoff of {len(handoff.encode('utf-8'))} bytes is written"
+        )
+    add(
+        "field",
+        "handoff",
+        text,
+        dependents=dependents,
+        handoff_written=handoff is not None,
+        style="warning" if dependents and handoff is None else "",
+    )
+    # Straight after the record's own fields, which is where
+    # `_DETAIL_SECTIONS` says the section goes: these are more of what this
+    # task is, not a postscript under its reports.
+    at = next(i for i, row in enumerate(rows) if row["section"] != "record")
+    return rows[:at] + extra + rows[at:]
+
+
+def agent_detail_rows(
+    home: Path, name: str, run: SelfRun | None = None, config: Config | None = None
+) -> list[dict[str, Any]] | None:
+    """One agent's record as rows, in `task_detail`'s shape — None when no
+    agent of that name is configured.
+
+    `run` is the actor tag of the process asking, when it is this agent's
+    own run: it adds the `self` section (`quorum agent show self`), which is
+    the one place an agent can read how much of its action cap it has left.
+    """
+    from . import notes as notes_mod
+
+    home = Path(home)
+    if config is None:
+        config = load_config_or_default(home)
+    row = next((r for r in agent_rows(home, config) if r["name"] == name), None)
+    if row is None:
+        return None
+    acfg = config.agents.get(name)
+    settings = dict(acfg.settings) if acfg else {}
+    rows: list[dict[str, Any]] = []
+
+    def add(section: str, kind: str, label: str, text: str, **fields: Any) -> None:
+        rows.append(
+            {
+                "section": section,
+                "kind": kind,
+                "label": label,
+                "text": text,
+                "style": fields.pop("style", ""),
+                **fields,
+            }
+        )
+
+    add("record", "heading", "", f"agent {name}  ({row['type']})", name=name, type=row["type"])
+    add("record", "field", "status", row["status"], status=row["status"], error=row["error"])
+    if row["error"]:
+        add("record", "field", "error", row["error"], style="warning", error=row["error"])
+    add(
+        "record",
+        "field",
+        "schedule",
+        row["schedule"] if row["enabled"] else f"{row['schedule']} (disabled)",
+        schedule=row["schedule"],
+        enabled=row["enabled"],
+    )
+    if row["next_run"]:
+        add(
+            "record",
+            "field",
+            "next run",
+            row["next_run"] + (" (estimated)" if row["next_run_estimated"] else ""),
+            next_run=row["next_run"],
+            next_run_estimated=row["next_run_estimated"],
+        )
+    if row["last_end"]:
+        add(
+            "record",
+            "field",
+            "last run",
+            f"{row['last_start']} → {row['last_end']}",
+            last_start=row["last_start"],
+            last_end=row["last_end"],
+            duration_ms=row["duration_ms"],
+        )
+    harness = settings.get("harness") or config.tasks.default_harness
+    if harness:
+        add("record", "field", "harness", str(harness), harness=str(harness))
+    if row["usage_text"]:
+        add(
+            "record",
+            "field",
+            "usage",
+            f"{row['usage_text']} (as reported by the harness)",
+            usage=row["usage"],
+        )
+    recent = usage.agent_runs(home, name)
+    if outcomes := usage.describe_runs(recent):
+        add("record", "field", "runs", outcomes, runs=recent)
+    if run is not None:
+        add("self", "heading", "", "this run:", actor=run.actor)
+        add("self", "field", "actor", f"{run.actor} (run {run.run})", actor=run.actor, run=run.run)
+        left = max(0, run.cap - run.actions)
+        add(
+            "self",
+            "field",
+            "actions",
+            f"{run.actions} of {run.cap} used this run, {left} left — a refused action "
+            "waits for your next scheduled run",
+            actions=run.actions,
+            cap=run.cap,
+            remaining=left,
+            style="warning" if left == 0 else "",
+        )
+        book = notes_mod.agent_notebook(home, name)
+        size = book.size()
+        add(
+            "self",
+            "field",
+            "notebook",
+            _notebook_text(size, f"quorum {'manager' if name == 'manager' else f'agent {name}'} remember"),
+            notebook=size,
+        )
+    book = notes_mod.agent_notebook(home, name)
+    if kept := book.render():
+        add("notebook", "heading", "", "notebook:", count=len(book.active()))
+        for line in kept[1:]:  # the rendering's own header is this heading
+            add("notebook", "body", "", line)
+    add(
+        "more",
+        "heading",
+        "",
+        f"more: `quorum agent log {name}` for the transcript, "
+        "`--json` for these rows and the agent's row",
     )
     return rows
 

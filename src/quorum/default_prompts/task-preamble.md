@@ -28,6 +28,17 @@ your environment:
 - If you cannot proceed without human input, say exactly what you need:
     quorum task report {task_id} --status blocked "<what you need>"
 
+Self-knowledge — `quorum task show self` prints your own record: the
+budget your runs are held to, how full your notebook is, and which tasks
+are waiting on you. Two moments make it worth a call. Before a long,
+tool-heavy step, read the `limits:` and `spent:` lines: a run that ends
+over `max_cost_per_run` or `max_tokens_per_run` means the *next* run of
+this task is refused until a person forces it, so a step you expect to be
+expensive is better split across runs than discovered at the gate. Before
+you report done, read the `handoff:` line: it says whether anything
+depends on you and whether you have left it anything. Reading a limit is
+not a way around it — nothing about this command changes a budget.
+
 Memory protocol — your session is not durable: it can be compacted, resumed
 days later, or replaced by a fresh one that knows nothing. The working
 directory survives that; your context does not. Keep what a restart would

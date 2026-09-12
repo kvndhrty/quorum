@@ -671,7 +671,9 @@ generalized to a task, on the same substrate and under the same rules:
   run id, no journal and no action cap, because reports.jsonl and the
   transcript are a task's record and the runner is its rail. One side
   effect: a task's `task nudge` and `board post` carry `task-<id>` as
-  sender, not `user`.
+  sender, not `user`. The tag is also what a task reads *itself* back
+  through: `quorum task show self`
+  ([Reading your own record](#reading-your-own-record-show-self)).
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to
   one-shot guidance) and an untagged human; any other task and any prompt
@@ -1450,6 +1452,52 @@ both display.
 and still render their own lines; they are tables over `views.*_rows`, where
 the cells are already views', so the drift this closes is not the one they
 have.
+
+### Reading your own record (`show self`)
+
+A run acts as itself through `QUORUM_ACTOR`; `self` is the read side of the
+same tag (#94). `quorum task show self` and `quorum agent show self` resolve
+who is asking from the environment, print the record any reader would see,
+and add one section of the facts that exist only inside the run.
+
+The split is deliberate and is what keeps `views.py` a pure file reader:
+
+- **`actor.py` resolves.** `self_task_id()` and `self_agent_name()` split the
+  tag — exactly one of them answers, which is what lets a mistyped `self`
+  be told which command it wanted. `self_run(home)` returns a `SelfRun`
+  (`actor`, `run`, `cap`, `actions`), where `cap` comes from
+  `QUORUM_ACTOR_CAP` through the one fallback `_actor_guard` also uses, and
+  `actions` is `actions_used`, counted back out of the journal because the
+  CLI calls that spend the cap are separate processes. A task's tag carries
+  no run id and no cap (identity only), so `SelfRun.capped` is False for
+  one and the rendering says so instead of naming a number a task is not
+  held to.
+- **`views.py` renders what it is handed.** `task_self_detail` is
+  `task_detail` with the `self` section spliced in after the record's own
+  fields, so every other line is byte-identical to what `task show <id>`
+  prints; `agent_detail_rows` is the agent-side record in the same row shape,
+  with the `self` section added only when a `SelfRun` is passed.
+- **The CLI joins them.** `SELF` is the one spelling of the handle, and an
+  unresolvable `self` is a typer error naming the fix rather than a
+  traceback.
+
+What the sections hold is chosen by one rule: a fact the run cannot get from
+outside itself, or cannot get before it is refused for it. For a task that is
+the per-run budget stated as a limit rather than as the refusal `task run`
+raises once it is exceeded, what the last run spent, how full the notebook is
+(`notes.Notebook.size`, the numbers behind the rendering, which only reports
+a dropped note once it has already dropped it), and whether a handoff is owed
+— the check the preamble sends a task here for before it reports `done`. For
+an agent it is how much of `max_actions_per_run` this run has used.
+
+It is **read-only, and that is a rule rather than an omission**: nothing here
+changes a cap, a budget, a schedule or a rail, and `show` is not a mutating
+command, so it writes no journal line and reading the cap does not spend it.
+Reading a rail is not a way around it — the gate still refuses the next run.
+The counterpart on the agent side already existed in the prompt rather than
+the CLI: `harness_run.self_observations` puts the same three facts at the top
+of a tick's digest, and `agent show self` is how a run asks again mid-tick,
+once the `0 of <cap>` the header was rendered with has stopped being true.
 
 ### Task history
 
