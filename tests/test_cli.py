@@ -675,6 +675,88 @@ def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
     assert "cannot be read" in _plain(r.output)
     assert "Traceback" not in r.output
 
+    # ...and neither does it take doctor down: the classifier both commands
+    # read must report such a file, not raise on it
+    r = runner.invoke(app, ["doctor", "--json"])
+    checks = {c["name"]: c for c in json.loads(r.output)["checks"]}
+    assert checks["prompts.manager"]["status"] == "problem"
+    assert "cannot be read" in checks["prompts.manager"]["summary"]
+
+    # init says so and leaves the file alone: it cannot know what it holds
+    from quorum import home as home_mod
+
+    r = runner.invoke(app, ["init"])
+    assert r.exit_code == 0, r.output
+    assert "prompts/manager.md: cannot be read" in _plain(r.output)
+    assert (home / "prompts" / "manager.md").read_bytes() == b"\xff\xfe not utf-8\n"
+    assert home_mod.classify_prompts(home)["manager.md"] == "unreadable"
+
+
+@pytest.mark.parametrize(
+    ("edit", "state", "listed", "doctor_status", "doctor_says"),
+    [
+        pytest.param(
+            False, "default", "seeded, matches the packaged default", "ok", "matches", id="default"
+        ),
+        pytest.param(
+            False,
+            "upgradable",
+            "seeded by an older quorum, never edited — `quorum init` upgrades it",
+            "problem",
+            "older packaged default, never edited",
+            id="upgradable",
+        ),
+        pytest.param(
+            True,
+            "edited",
+            "edited — `quorum prompt diff manager`",
+            "na",
+            "is edited",
+            id="edited",
+        ),
+    ],
+)
+def test_prompt_list_and_doctor_agree_on_every_state(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: bool,
+    state: str,
+    listed: str,
+    doctor_status: str,
+    doctor_says: str,
+):
+    """`prompt list` classified with `text == default`, so a copy an older
+    `quorum init` seeded and nobody ever touched read as "edited" there while
+    doctor called it an upgradable seed — and the fix init was offering stayed
+    hidden (#126). Both read `home.classify_prompts` now, so all three states
+    agree."""
+    from quorum import home as home_mod
+    from quorum import prompts as prompts_mod
+
+    copy = home / "prompts" / "manager.md"
+    seeded = copy.read_text(encoding="utf-8")
+    if edit:
+        copy.write_text("my own manager policy\n", encoding="utf-8")
+    if state != "default":
+        # A later release of quorum ships a changed manager prompt. Two
+        # functions read the packaged defaults, and both readers under test go
+        # through one of them, so the fake has to cover both.
+        packaged = dict(home_mod.packaged_prompts())
+        packaged["manager.md"] = seeded + "\nA rule a later release added.\n"
+        monkeypatch.setattr(home_mod, "packaged_prompts", lambda: packaged)
+        monkeypatch.setattr(prompts_mod, "packaged", lambda name: packaged.get(f"{name}.md"))
+    assert home_mod.classify_prompts(home)["manager.md"] == state
+
+    r = runner.invoke(app, ["prompt", "list"])
+    assert r.exit_code == 0, r.output
+    row = next(line for line in _plain(r.output).splitlines() if line.split()[:1] == ["manager"])
+    assert listed in row
+
+    r = runner.invoke(app, ["doctor", "--json"])
+    check = {c["name"]: c for c in json.loads(r.output)["checks"]}["prompts.manager"]
+    assert check["status"] == doctor_status
+    assert doctor_says in check["summary"]
+
 
 def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     """The babysitter example ships as a packaged prompt; creating an agent

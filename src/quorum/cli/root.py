@@ -61,6 +61,13 @@ def init() -> None:
                 f"(merged in at the default's {{local}} slot, never touched by init), "
                 f"then delete prompts/{name} and re-run `quorum init`"
             )
+        elif outcome == "unreadable":
+            typer.secho(
+                f"prompts/{name}: cannot be read (not UTF-8, or no permission) — left alone, "
+                f"and every render of it fails; delete it and re-run `quorum init` to seed "
+                f"the packaged default again",
+                fg="yellow",
+            )
         elif outcome == "seeded" and not fresh:
             typer.echo(f"prompts/{name}: seeded from the packaged default")
 
