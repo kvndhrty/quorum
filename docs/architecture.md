@@ -379,13 +379,22 @@ picks up at its next turn boundary. Stdin is the whole prompt channel here —
 a stream-json CLI ignores an argv prompt and blocks until a turn arrives, so
 an inject harness that only got its prompt via argv would hang silently
 until the run timeout. Because such a harness runs until stdin closes, the
-pump also owns ending the run: the protocol emits one `result` event per
-completed user turn (the prompt turn is the first), so the pump closes stdin
-once every delivered turn has its result and `new/` is empty — a run extends
-while guidance keeps arriving and ends at the first idle turn boundary. The
-claim of a message and its count as a delivered turn happen under the same
-lock the close check takes, so a `result` arriving mid-claim sees the
-message either still pending or already owed an answer, never neither.
+pump also owns ending the run, and the close rule counts *turns*, not
+deliveries: a turn written to an idle harness gets a `result` event of its
+own, while a turn written into a turn that is still running is drained into
+it and shares that turn's single result. The pump therefore tracks whether a
+turn is in flight and closes stdin at the first `result` that leaves no turn
+open, nothing claimed but unwritten, and `new/` empty — a run extends while
+guidance keeps arriving and ends at the first idle turn boundary. Expecting
+one result per *delivery* was the #109 hang: a nudge answered inside the
+running turn left the run one result short of its own close condition, and
+stdin stayed open on an idle harness — `runner.lock` held on a task that had
+already reported done, until someone ran `task stop`. The claim of a message
+and its write happen across the same lock the close check takes, so a
+`result` arriving mid-claim sees the message either still pending in `new/`
+or claimed and not yet written, never neither; whether a write folded into a
+running turn or opened a new one is settled under that lock right after the
+write, when the CLI has actually been handed the bytes.
 Guidance that arrives after close, or that lands on a harness without
 `inject`, waits in `new/` for the next run start; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgement: a message
