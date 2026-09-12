@@ -1,0 +1,83 @@
+# The config.toml of the home that builds quorum. Copy it to ~/.quorum/
+# config.toml (or `quorum init` first and replace the scaffold with it), then
+# change `quorum` in the examples to your own project slug. See README.md in
+# this directory for the loop these settings serve.
+#
+# There are no secrets here and there is nothing to fill in: the claude CLI
+# carries its own auth, and quorum stores none.
+
+[tasks]
+default_harness = "claude"
+worktree = true           # each task runs in its own git worktree, so two
+                          # tasks editing the same repo never see each other
+
+# A harness is any coding-agent CLI; {prompt} and {session} are substituted
+# element-wise. Runs are unattended — the flags below let the harness act
+# without asking, otherwise it stalls silently at its first permission prompt.
+# Workers run on opus: cheaper than the top model, plenty for well-specified
+# issues, and the main lever against burning through rate limits.
+[harness.claude]
+start  = ["claude", "-p", "{prompt}", "--model", "opus", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(uv:*)", "Bash(gh:*)"]
+resume = ["claude", "-p", "{prompt}", "--model", "opus", "--resume", "{session}", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
+          "--allowedTools", "Edit", "Write", "Read", "Bash(git:*)", "Bash(quorum:*)", "Bash(uv:*)", "Bash(gh:*)"]
+inject = "stream-json"   # delivers the prompt and mid-run nudges over stdin
+                         # (a stream-json CLI ignores an argv prompt)
+
+# Why each --allowedTools entry is there. The list is an allowlist, not a
+# bypass: anything not named here still stops and asks, which under an
+# unattended run means the task hangs until its next relaunch. Grant what the
+# work needs and nothing else.
+#
+#   Edit, Write, Read   the work itself — the harness changes files in its
+#                       worktree. Without these there is no task.
+#   Bash(git:*)         commit, rebase and push the task branch. The delivery
+#                       protocol in the task preamble is all git.
+#   Bash(quorum:*)      the return channel: `quorum task report`, `task inbox`,
+#                       `task remember`. Without it a run is invisible — the
+#                       manager sees a live runner and no status forever.
+#   Bash(uv:*)          this project's test and lint runner (`uv run pytest`,
+#                       `uv run ruff check .`). Swap in whatever yours is:
+#                       Bash(cargo:*), Bash(npm:*), Bash(make:*).
+#   Bash(gh:*)          open the draft PR and read the issue back. Drop it if
+#                       your harness should not touch the forge; the pushed
+#                       branch is then the deliverable and you open the PR.
+#
+# Note that Bash(git:*) and Bash(gh:*) are what let a run push and open a PR.
+# The rail underneath them is the worktree, not the allowlist: a task commits
+# on its own `quorum/<short-id>` branch and never on yours.
+
+# The manager checks on everything every hour, driven by the same harness.
+# The scaffold's default is `every 5m`; an hour is deliberate pacing for a
+# home whose tasks run for hours and whose rate limits are shared with the
+# workers. Its policy is a prompt you can edit: prompts/manager.md, plus the
+# house rules in prompts/manager.local.md next to this file.
+[agents.manager]
+type = "manager"
+schedule = "every 1h"
+auto_pause = false        # keep trying while the model service is down:
+                          # supervision has no no-model fallback, so the tick
+                          # raising every hour is how it self-recovers
+
+[quorum]
+retention_days = 30       # board messages older than this are archived
+
+[sandbox]
+use_nono = false          # these runs need network (gh, uv, the model API)
+                          # and the worktree is the isolation that matters here
+
+[ci]
+enabled = true            # let the manager's digest observe PR and check state
+                          # through `gh` — this is how it learns a PR went red
+                          # (one network call per digested task per tick)
+
+# Reach a person: an argv template run once per new message on the listed
+# board topics ({text}, {from}, {topic}, {type}, {id} substituted per element,
+# no shell). `attention` is the manager's ask-a-human channel, and in this
+# loop it is the only thing that should interrupt you. Uncomment one; the
+# macOS version below is what this home runs. Try it with
+# `quorum notify test "hello"`.
+#[notify]
+#command = ["osascript", "-e", "on run argv", "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run", "{text}", "quorum {topic} · {from}"]
+#topics = ["attention"]
+#timeout_seconds = 10

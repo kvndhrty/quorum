@@ -1659,4 +1659,9 @@ session capture. Sandbox glue is pinned by injecting a fake `nono_py` into
 `sys.modules`; real kernel enforcement runs under `-m nono_integration`,
 with a dedicated CI job asserting platform support so it can never silently
 skip. The example plugin is loaded by file path and tested in
-`test_example_steward.py`, so the worked example in the guide stays true.
+`test_example_steward.py`, so the worked example in the guide stays true;
+the example home in `examples/dogfood-home/` is installed into a scaffolded
+home and put through `load_config` and `prompts.render` in
+`test_example_home.py`, for the same reason — a config key or a `{local}`
+slot that moved must break the example loudly rather than in someone's
+first hour.

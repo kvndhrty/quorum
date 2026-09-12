@@ -21,6 +21,17 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- The dogfood home as a worked example (#64): `examples/dogfood-home/`
+  ships the home that builds quorum — its real `config.toml` (the
+  `[harness.claude]` block with a comment on why each `--allowedTools` entry
+  is there, the hourly manager, a commented `[notify]` hook), the two prompt
+  overlays it runs on (`manager.local.md`: two tasks at a time, oldest
+  first, the human owns PRs; `task-preamble.local.md`: the delivery
+  conventions), and a README with the issue-driven loop in ten lines and
+  what a cycle cost, read off `quorum usage`. `tests/test_example_home.py`
+  installs it into a scaffolded home, loads the config and renders both
+  overlays, so a renamed option, prompt slot or CLI command cannot leave the
+  example quietly wrong. Linked from the README and the guide's setup.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,

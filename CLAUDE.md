@@ -279,6 +279,12 @@ Each entry says what the module owns and the rules a change must respect.
 - `examples/steward.py` — the one shipped example plugin (a file organizer with
   undo), loaded by path in `tests/test_example_steward.py` so the worked example in
   the guide stays true. Not a builtin; users copy it into `plugins/`.
+- `examples/dogfood-home/` — the shipped example *home*: the config, the two
+  prompt overlays and the issue-driven loop that build quorum itself, minus all
+  machine-written state. `tests/test_example_home.py` installs it into a
+  scaffolded home and runs it through `load_config` and `prompts.render`, so a
+  renamed option, slot or command cannot leave it quietly wrong. Keep it a
+  *copy* of the live home's person-written parts, never a second scaffold.
 
 ### Adding an agent
 
