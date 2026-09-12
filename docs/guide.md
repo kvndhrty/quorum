@@ -371,6 +371,11 @@ this guide all use.
 - **dependency** — a task listed with `task add --after <id>`, which must
   finish before this one starts.
 - **perpetual task** — one queued with `--perpetual`, not meant to finish.
+- **spawned task** — a task created by another task's run (`task add` from
+  inside a task queued with `--allow-spawn`). It records its **parent**: the
+  full id of the task whose run created it. An ordinary queued task in every
+  other respect — nothing cascades from parent to child, and the manager or
+  you still launch it.
 - **attached task** — a task whose work is a live interactive session you are
   driving, created with `quorum task adopt`. Quorum observes it and never runs
   it.
@@ -780,6 +785,72 @@ The common recipe is a review task queued behind an implementation task
 `gh pr diff`, fix what you find on its branch, and report done"). The reviewer
 cannot start before the PR exists, so it never spends a run reviewing nothing.
 
+### Letting tasks create work
+
+A run often finds work it should not do here: something out of scope that
+needs its own branch, a follow-up someone should do once this lands, an
+experiment worth running separately. By default a task cannot queue that — it
+can only say so in a report. `--allow-spawn` lets it queue the work instead:
+
+```bash
+quorum task add my-api "migrate the test suite to pytest" --allow-spawn
+```
+
+Inside such a task's run, the preamble gains a section teaching `task add`,
+and the CLI does the rest:
+
+```bash
+quorum task add my-api "delete the unittest compatibility shims"
+# → queued task c4d8e1 on my-api
+#   spawned by task a3f2k9: it is queued like any other task, and only the
+#   manager or a human starts it
+
+quorum task add my-api "benchmark the new suite" --after self
+```
+
+`--after self` is the post-task: it names the task making the call, so the new
+work waits for that task to finish and reads its
+[handoff](#dependencies-and-handoffs) when it runs. It only means something
+inside a run — outside one it is an error, not a guess.
+
+**What the new task is.** An ordinary queued task, with one extra field:
+`parent`, the full id of the task whose run created it. It inherits that
+task's harness unless `--harness` says otherwise, it is *not* itself allowed
+to spawn unless `--allow-spawn` was passed again, and nobody launches it — the
+manager decides, under the same house rules as everything else, and you still
+merge. Every view shows the link: `parent c4d8e1` in the flags column,
+`⇗` beside the status of a task that may spawn, `parent:` and `spawned:` lines
+in `quorum task show`, and `parent=` / `spawned=` on the manager's digest
+lines.
+
+**The three refusals.** `quorum task add` run from inside a task is refused
+when the task was not queued with `--allow-spawn`, when the parent has already
+created `[tasks].max_spawn_per_task` tasks (5 by default), and when the chain
+is already `[tasks].max_spawn_depth` deep (1 by default, so a spawned task may
+not spawn again). They are rate limits, of the same family as the action cap
+and the budget gate: they never judge the work, and each refusal tells the
+harness to put the idea in its report instead, where the manager and you will
+see it. A refused spawn — and every spawn — is journalled, so the next digest
+carries it, and a parent that hit its cap is flagged `SPAWN-CAP` for the
+manager to read.
+
+**Nothing cascades.** Cancelling a parent does not touch its children: once
+queued they are independent work, and whether a child still makes sense
+without its parent is a judgement, which means it belongs to the manager or to
+you, not to Python. A child queued `--after self` behind a cancelled parent
+shows `DEP-FAILED` like any other unsatisfiable dependency.
+
+```toml
+[tasks]
+allow_spawn = true        # every task queued here may spawn (default: false)
+max_spawn_per_task = 5    # children per parent, across all its runs
+max_spawn_depth = 1       # 1 = a spawned task may not spawn; 0 = nobody may
+```
+
+Start with it off, turn it on for one task, and read what it queues before
+raising anything — see
+[Loosening the rails](#loosening-the-rails-as-trust-is-earned).
+
 ### Notebooks
 
 A session is not durable: models compact their own context, a resumed session
@@ -978,11 +1049,12 @@ home's posture is visible in the same place as its health.
 | concurrent launches | `prompts/manager.local.md` house rule | none | rate-limit headroom, `overlaps=` rare |
 | actions per agent run (`max_actions_per_run`) | `[agents.<name>.settings]` | 20 | `cap.hit` on legitimate work |
 | seconds per agent run (`run_timeout_seconds`) | `[agents.<name>.settings]` | 300 | `TIMEOUT` on runs that progressed |
-| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account; before #43 (not built) |
+| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account, and before letting tasks spawn tasks |
 | stall watchdog (`run_stall_timeout_seconds`) | `[tasks]` | 0 (off) | a healthy run is silent for longer |
+| tasks that spawn tasks (`allow_spawn` / `max_spawn_per_task` / `max_spawn_depth`) | `[tasks]` | off, 5, 1 | spawned tasks earn their keep; deeper chains stay legible |
 | manager cadence | `[agents.manager]` `schedule` | `every 5m` (dogfood: `every 1h`) | events carry the facts (#83, not built) |
 | who launches | `prompts/manager.md` | the manager | tasks self-schedule (#83, not built) |
-| who decomposes | a person | a person | a spawn cap exists (#43, not built) |
+| who decomposes | a person, the manager, and spawn-enabled tasks | a person | the queue a run grows is worth running |
 | merge gate | a person | a person | never removed; may move later |
 
 Four of the rows need a word more than the table has room for. Quorum counts
@@ -990,11 +1062,12 @@ no **concurrent launches** at all — the cap is a house rule you write into the
 manager's overlay, and the dogfood home says two. The **stall watchdog**
 measures the harness rather than your trust in it, since it counts silence and
 not progress, so it belongs above the longest quiet step a healthy run has.
-**Manager cadence** is spend: every tick is one harness run. And the last three
-rows are not settings at all — who launches is a sentence in
-`prompts/manager.md`, and who decomposes and who merges are conventions a
-person keeps, the merge gate permanently so, because quorum has no forge write
-path.
+**Manager cadence** is spend: every tick is one harness run. **Who decomposes**
+is half a setting: a person and the manager always may, and a task may only
+where it was queued with `--allow-spawn` (or the home defaults that on), within
+the two caps beside it. Who launches is a sentence in `prompts/manager.md`, and
+who merges is a convention a person keeps, permanently so, because quorum has
+no forge write path.
 
 **What does not move.** These are the constraints the dials sit inside. They
 encode the environment, not the model, and a more capable model does not
@@ -1029,7 +1102,8 @@ updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 
 Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
 policy (`manager.md`), the task preamble (`task-preamble.md`), the perpetual
-block (`task-perpetual.md`), and one per prompt agent. `quorum init` seeds
+block (`task-perpetual.md`), the spawn block (`task-spawn.md`), and one per
+prompt agent. `quorum init` seeds
 them, and deleting one restores the packaged default. Re-run `quorum init`
 after upgrading quorum: a prompt you never edited is refreshed to the new
 packaged default (init keeps a record of what it seeded, so an untouched copy

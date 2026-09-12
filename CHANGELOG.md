@@ -21,6 +21,19 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Tasks that spawn tasks (#43): a task queued with `task add --allow-spawn`
+  (or in a home with `[tasks].allow_spawn`) may run `quorum task add` itself,
+  and `--after self` inside a run queues the new work behind the task that
+  asked for it. The child records its `parent`, inherits the parent's
+  harness, and is queued like any other task — only the manager or a person
+  launches it, and nothing cascades when a parent is cancelled. The one new
+  decision in Python is a rate limit: `task add` from a task is refused
+  unless the task is spawn-enabled, over `[tasks].max_spawn_per_task` (5) or
+  beyond `[tasks].max_spawn_depth` (1), each refusal naming its setting and
+  telling the harness to put the idea in its report instead. Spawns and
+  refusals are journaled for the manager, whose digest lines gain
+  `parent=` / `spawned=` / `SPAWN-CAP`; `quorum status`, `task list`, the
+  TUI and `task show` show the link and a `⇗` badge.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,

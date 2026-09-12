@@ -51,7 +51,7 @@ from pathlib import Path
 
 from . import fsio, notes, prompts, usage
 from .actor import strip_actor_env, task_actor_env
-from .config import Config, HarnessConfig, TasksConfig
+from .config import Config, HarnessConfig, TasksConfig, load_config_or_default
 from .messages import Message, MessageBus
 from .projects import ProjectRegistry
 from .tasks import (
@@ -502,6 +502,7 @@ def dependency_note(home: Path, task: Task) -> str | None:
 
 _PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
 _ISSUE_SLOT = re.compile(r"(?<!\{)\{issue\}(?!\})")
+_SPAWN_SLOT = re.compile(r"(?<!\{)\{spawn\}(?!\})")
 
 
 def issue_note(task: Task) -> str:
@@ -552,6 +553,22 @@ def compose_prompt(
         if task.perpetual
         else ""
     )
+    # The same story for a spawn-enabled task (`task add --allow-spawn`): the
+    # one section that teaches `task add` is rendered *only* for a task that
+    # may actually call it, so an ordinary task is never told about a command
+    # that would refuse it. The cap goes in because knowing it up front is
+    # cheaper than a refused call.
+    spawn = (
+        prompts.render(
+            home,
+            "task-spawn",
+            task_id=task.short_id,
+            project=task.project,
+            cap=load_config_or_default(home).tasks.max_spawn_per_task,
+        ).strip()
+        if task.allow_spawn
+        else ""
+    )
     issue = issue_note(task)
     preamble = prompts.render(
         home,
@@ -559,6 +576,7 @@ def compose_prompt(
         task_id=task.short_id,
         project_path=str(workdir),
         perpetual=perpetual,
+        spawn=spawn,
         issue=issue,
         project=project_block(home, task) if project is None else project,
     )
@@ -576,6 +594,9 @@ def compose_prompt(
     # where the task came from.
     if issue and not _ISSUE_SLOT.search(template):
         preamble = f"{preamble.rstrip()}\n\n{issue}"
+    # And for the spawn section, the youngest of the three.
+    if spawn and not _SPAWN_SLOT.search(template):
+        preamble = f"{preamble.rstrip()}\n\n{spawn}"
     parts = [
         re.sub(r"\n{3,}", "\n\n", preamble).strip(),
         f"# Task\n\n{task.prompt}",

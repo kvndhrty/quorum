@@ -36,6 +36,13 @@ whole in `handoff.md` (`write_handoff`, atomic, last write wins) and read
 back by `read_handoff` for the dependent's prompt (capped there), `task
 show` (in full) and the digest (existence only).
 
+A task run may also create tasks (`task add --allow-spawn`): the child
+records `parent`, the full id of the task whose run queued it, and the
+`spawn_*` readers below derive the rest of a family from the listing.
+`spawn_refusal` is the only decision this module makes about that, and it is
+a rate limit — who may, how many, how deep — never a judgement about the
+work.
+
 Ordering is not quorum's job: no reader here sorts tasks, and the manager
 decides what to launch from the digest.
 """
@@ -141,6 +148,19 @@ class Task(BaseModel):
     # prompt is told to relaunch it forever and never call a long run count
     # stuck. See docs/architecture.md ("Perpetual tasks").
     perpetual: bool = False
+    # Tasks that spawn tasks (#43). `allow_spawn` is the opt-in written once
+    # at `add` (`task add --allow-spawn`, defaulted by `[tasks].allow_spawn`):
+    # only a task whose harness carries it may create tasks of its own.
+    # `parent` is the one link a spawned task stores — the full id of the
+    # task whose run created it, also written once at `add`. Everything else
+    # about a family is *read* from the listing rather than stored: the
+    # children of a task are the tasks pointing at it (`spawn_children`), its
+    # depth is the walk up the `parent` chain (`spawn_depth`), so there is no
+    # second field to keep true. Nothing cascades: cancelling a parent leaves
+    # its children exactly where they were, because they are ordinary queued
+    # tasks and the manager judges them like any other.
+    allow_spawn: bool = False
+    parent: str | None = None
     # What the forge last said about this task's pull request: one of
     # `PR_STATES`, and when it was observed. Quorum's **one** materialized
     # probe result — written only from the manager tick's digest build
@@ -247,6 +267,8 @@ class TaskStore:
         issue_url: str | None = None,
         depends_on: list[str] | None = None,
         perpetual: bool = False,
+        allow_spawn: bool = False,
+        parent: str | None = None,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -263,6 +285,8 @@ class TaskStore:
             issue_url=issue_url,
             depends_on=list(depends_on or []),
             perpetual=perpetual,
+            allow_spawn=allow_spawn,
+            parent=parent,
             created_at=created,
             updated_at=created,
         )
@@ -490,6 +514,121 @@ def dependency_states(all_tasks: list[Task]) -> dict[str, dict[str, Any]]:
     full task id — one listing, one pass, for readers that render many rows."""
     by_id = {t.id: t for t in all_tasks}
     return {t.id: dependency_state(t, by_id) for t in all_tasks if t.depends_on}
+
+
+# -- tasks that spawn tasks (#43) ------------------------------------------
+#
+# A task run may queue work of its own (`task add` under its own actor tag,
+# see actor.py). The link a child stores is `parent`; everything else about a
+# family is read back from the listing here, so nothing has to be kept true
+# twice. `spawn_refusal` is the one decision quorum makes in Python about
+# this: it is a rate limit of the action cap's family — how many, and how
+# deep — never a judgement about the work itself, and what it refuses it
+# points back at the report channel, which every task already has.
+
+#: What a refused spawn is told to do instead. The idea does not disappear:
+#: it goes where the manager and the human already read, and they decide.
+SPAWN_FALLBACK = (
+    "say what you wanted (and why) in your report instead: "
+    "`quorum task report {short} --status <status> \"<what needs doing>\"`"
+)
+
+
+def spawn_children(task_id: str, all_tasks: Iterable[Task]) -> list[Task]:
+    """The tasks whose runs this task created, in listing order."""
+    return [t for t in all_tasks if t.parent == task_id]
+
+
+def spawn_depth(task: Task, by_id: Mapping[str, Task]) -> int:
+    """How many spawns deep this task is: 0 for a task a person queued, 1 for
+    one spawned by such a task, and so on.
+
+    Total, like every reader here: a `parent` naming a task whose record is
+    gone still counts as one link (it was spawned by *something*), and a
+    chain that loops back on itself — only reachable by hand-editing
+    task.json — stops rather than spinning.
+    """
+    depth = 0
+    seen = {task.id}
+    current: Task | None = task
+    while current is not None and current.parent:
+        depth += 1
+        if current.parent in seen:
+            break
+        seen.add(current.parent)
+        current = by_id.get(current.parent)
+    return depth
+
+
+def spawn_states(all_tasks: list[Task], max_per_task: int) -> dict[str, dict[str, Any]]:
+    """How every task in a spawn family stands, keyed by full task id — one
+    listing, one pass, for the views and the digest.
+
+    Only tasks that have a parent or children get an entry; a home where
+    nothing spawns anything has an empty dict and every reader's `.get`
+    answers with nothing.
+
+      parent    the short id of the task that spawned this one, or ""
+      children  short ids of the tasks this one spawned
+      capped    True when this task has reached `[tasks].max_spawn_per_task`
+                — an observation for the digest (SPAWN-CAP) and the views,
+                since a task that wanted more work than the cap allows is
+                exactly what a supervisor should see
+      depth     how many spawns deep this task is (`spawn_depth`)
+    """
+    by_id = {t.id: t for t in all_tasks}
+    children: dict[str, list[str]] = {}
+    for t in all_tasks:
+        if t.parent:
+            children.setdefault(t.parent, []).append(t.short_id)
+    states: dict[str, dict[str, Any]] = {}
+    for t in all_tasks:
+        kids = children.get(t.id, [])
+        if not kids and not t.parent:
+            continue
+        states[t.id] = {
+            "parent": short_handle(t.parent) if t.parent else "",
+            "children": kids,
+            "capped": len(kids) >= max_per_task,
+            "depth": spawn_depth(t, by_id),
+        }
+    return states
+
+
+def spawn_refusal(
+    parent: Task, all_tasks: list[Task], max_per_task: int, max_depth: int
+) -> str | None:
+    """Why this task may not create another one, or None when it may.
+
+    The three refusals, in the order a reader should think about them: the
+    opt-in, the depth of the chain, and the parent's own total across all its
+    runs. Each message names the setting behind it and ends with the fallback
+    — a refused idea is still an idea, and the report channel is where it
+    belongs. Nothing here looks at *what* the new task would be.
+    """
+    short = parent.short_id
+    fallback = SPAWN_FALLBACK.format(short=short)
+    if not parent.allow_spawn:
+        return (
+            f"task {short} may not create tasks: it was not queued with "
+            "`--allow-spawn` (and this home's `[tasks].allow_spawn` is not on). "
+            f"Nothing is lost — {fallback}"
+        )
+    depth = spawn_depth(parent, {t.id: t for t in all_tasks})
+    if depth >= max_depth:
+        return (
+            f"task {short} is itself a spawned task {depth} deep, and this home's "
+            f"`[tasks].max_spawn_depth` is {max_depth} — a chain that long may not "
+            f"grow further, so {fallback}"
+        )
+    count = len(spawn_children(parent.id, all_tasks))
+    if count >= max_per_task:
+        return (
+            f"task {short} has already created {count} task(s), which is this home's "
+            f"`[tasks].max_spawn_per_task` ({max_per_task}) — a rate limit on one "
+            f"task's share of the queue, not a judgement about this idea — {fallback}"
+        )
+    return None
 
 
 def write_handoff(home: Path, task_id: str, text: str) -> Path:

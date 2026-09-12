@@ -204,6 +204,7 @@ agent table prints the status word itself.
           ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
   after its status:
           ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
+          ⇗ may queue tasks of its own (`task add --allow-spawn`)
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
              means nothing was ever observed (no PR yet, or no `gh` here)
@@ -212,6 +213,9 @@ agent table prints the status word itself.
              runner refuses to start it. DEP-FAILED / DEP-MISSING / DEP-CYCLE
              name dependencies that can never finish — nothing waits on those,
              they are yours (or the manager's) to decide about
+          parent <id> the task whose run queued this one (`--allow-spawn`);
+             SPAWN-CAP on that parent means it has queued as many as
+             [tasks].max_spawn_per_task allows and wanted more
   spend:  $! a run went over [tasks].max_cost_per_run / max_tokens_per_run;
              $! GATED means the last one did, so the next run needs --force.
              cost/tokens are shown when the harness reported them, summed over runs

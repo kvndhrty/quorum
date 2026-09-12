@@ -39,6 +39,79 @@ from ._common import (
     task_app,
 )
 
+#: `--after self`: the task asking for the new work. Spelled as a word rather
+#: than as the id the harness would have to copy out of its own prompt,
+#: because the whole point is a follow-up the *current* run queues.
+SELF_HANDLE = "self"
+
+
+def _spawner(store):
+    """The task whose run is making this call, or None when a person or an
+    agent is.
+
+    The actor tag is identity only (`task-<id>`, actor.py), so a tag naming a
+    task whose record is gone is a call quorum cannot attribute: refuse it
+    rather than queue an unparented task, which would look user-created.
+    """
+    from ..actor import TASK_ACTOR_PREFIX, is_task_actor
+
+    actor = current_actor()
+    if not is_task_actor(actor):
+        return None
+    task = store.get(actor[len(TASK_ACTOR_PREFIX) :])
+    if task is None:
+        raise _fail(
+            f"{actor} names no task record — nothing can be attributed to it "
+            "(is QUORUM_ACTOR set by hand?)"
+        )
+    return task
+
+
+def _journal_spawn_refusal(home: Path, spawner, refusal: str) -> None:
+    """Record a refused spawn for the manager — once per streak, not once per
+    attempt.
+
+    A task actor journals nothing ordinarily (actor.py); a refused spawn is
+    the exception, because work the queue *did not* get is a fact the next
+    digest has to carry. But a harness that does not read the error retries,
+    and the journal is read back as a bounded tail: one refusal repeated
+    twenty times would push the manager's own actions out of the window. So
+    the line is written only when it is not already the last thing recorded
+    about this task — the same reasoning as the action cap's single
+    `cap.hit` entry per run, with "since this task last did something" in
+    place of a run id it does not have.
+    """
+    from ..actor import journal_path
+
+    mine = [
+        e
+        for e in fsio.read_jsonl_tail(journal_path(home))
+        if isinstance(e, dict) and e.get("target") == spawner.short_id
+    ]
+    if mine and mine[-1].get("action") == "task.add.refused" and mine[-1].get("args") == refusal:
+        return
+    _actor_guard(
+        home, "task.add.refused", target=spawner.short_id,
+        target_status=spawner.status, args=refusal, always_journal=True,
+    )
+
+
+def _self_handles(after: list[str], spawner) -> list[str]:
+    """`--after self` resolved to the calling task's id; every other handle
+    passed through to `resolve_dependencies` untouched.
+
+    Outside a task run there is no "self" to name, and guessing one would
+    queue work behind the wrong task — so it is an error, not a no-op.
+    """
+    if not any(h.strip().lower() == SELF_HANDLE for h in after):
+        return after
+    if spawner is None:
+        raise _fail(
+            "`--after self` names the task making the call, so it only means "
+            "something inside a task run — pass the id you meant"
+        )
+    return [spawner.id if h.strip().lower() == SELF_HANDLE else h for h in after]
+
 
 @task_app.command("add")
 def task_add(
@@ -47,8 +120,9 @@ def task_add(
     issue: str | None = typer.Option(None, "--issue", help="Queue this forge issue (number or URL): its title and body become the prompt."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
-    after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
+    after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids, or `self` inside a task run)."),
     perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
+    allow_spawn: bool = typer.Option(False, "--allow-spawn", help="Let this task's harness queue tasks of its own (capped by \\[tasks].max_spawn_per_task / max_spawn_depth)."),
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
     yourself with `quorum task run`.
@@ -73,25 +147,55 @@ def task_add(
     preamble tells it to deliver every cycle and never report done, the
     manager relaunches it whenever its runner dies, and `quorum task cancel`
     is the only way it ends.
+
+    With --allow-spawn the task may queue work of its own: its preamble gains
+    a section about it, and `quorum task add` run from inside that task (and
+    only from inside a task queued that way) records the new task's `parent`.
+    `[tasks].allow_spawn = true` makes that the home's default. A spawned
+    task is an ordinary queued task — nobody launches it but the manager or
+    you — and `--after self` inside a task chains the new work behind the
+    task that asked for it.
     """
     from ..projects import ProjectRegistry
-    from ..tasks import TaskStore, resolve_dependencies, short_handle
+    from ..tasks import TaskStore, resolve_dependencies, short_handle, spawn_refusal
 
     target = get_home()
     config = _load_config(target)
+    # Who is queuing this, before anything about the task itself is looked
+    # at. A task run is tagged `task-<id>` (actor.py), and that tag is the
+    # whole difference: a person or an agent queues freely, a task may queue
+    # only what the spawn rails allow, and only a task can say `--after self`.
+    store = TaskStore(target)
+    spawner = _spawner(store)
+    if spawner is not None:
+        refusal = spawn_refusal(
+            spawner,
+            store.list(),
+            config.tasks.max_spawn_per_task,
+            config.tasks.max_spawn_depth,
+        )
+        if refusal is not None:
+            # Journalled before the exit, and journalled at all *because* the
+            # actor is a task: a refused spawn is the one thing about a task's
+            # own CLI calls the manager has to see — SPAWN-CAP on the parent's
+            # digest line is the same fact from the other side.
+            _journal_spawn_refusal(target, spawner, refusal)
+            raise _fail(f"spawn refused: {refusal}")
     known_project = ProjectRegistry(target).get(project)
     if known_project is None:
         known = ", ".join(p.slug for p in ProjectRegistry(target).list()) or "none"
         raise _fail(f"no project {project!r} (registered: {known}) — `quorum project add <dir>` first")
-    name = harness or config.tasks.default_harness
+    # A spawned task inherits the harness its parent is running under unless
+    # `--harness` says otherwise: the work came out of that run, so the tool
+    # that found it is the sensible default for doing it.
+    name = harness or (spawner.harness if spawner else "") or config.tasks.default_harness
     if not name:
         raise _fail("no harness given and [tasks].default_harness is unset — pass --harness or edit config.toml")
     if name not in config.harness:
         known = ", ".join(sorted(config.harness)) or "none configured"
         raise _fail(f"no [harness.{name}] in config.toml (known: {known})")
-    store = TaskStore(target)
     try:
-        depends_on = resolve_dependencies(store, after or [])
+        depends_on = resolve_dependencies(store, _self_handles(after or [], spawner))
     except ValueError as e:
         raise _fail(str(e)) from None
     # The prompt is read *last*, after everything that can be checked without
@@ -115,7 +219,17 @@ def task_add(
         # Any prompt given as well is extra instructions *about* the issue,
         # so it follows the issue rather than framing it.
         text = issue_prompt(fetched) + (f"\n\n{text}" if text.strip() else "")
-    _actor_guard(target, "task.add", args=f"{project}: {text[:80]}")
+    _actor_guard(
+        target,
+        "task.add",
+        target=spawner.short_id if spawner else None,
+        target_status=spawner.status if spawner else None,
+        args=f"{project}: {text[:80]}",
+        # A spawn journals for a task actor, which normally journals nothing:
+        # work entering the queue from a run is the fact the next digest has
+        # to carry, and the child's own `parent` is the other half of it.
+        always_journal=spawner is not None,
+    )
     task = store.add(
         project=project,
         prompt=text,
@@ -123,6 +237,8 @@ def task_add(
         use_worktree=config.tasks.worktree and not no_worktree,
         depends_on=depends_on,
         perpetual=perpetual,
+        allow_spawn=allow_spawn or config.tasks.allow_spawn,
+        parent=spawner.id if spawner else None,
         issue_url=issue_url,
     )
     kind = "perpetual task" if perpetual else "task"
@@ -136,6 +252,13 @@ def task_add(
         typer.echo(
             f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
         )
+    if spawner is not None:
+        typer.echo(
+            f"spawned by task {spawner.short_id}: it is queued like any other task, and "
+            "only the manager or a human starts it"
+        )
+    if task.allow_spawn:
+        typer.echo("it may queue tasks of its own (`--allow-spawn`)")
     typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
 
 
@@ -393,6 +516,7 @@ def task_show(
         read_reports,
         runner_alive,
         short_handle,
+        spawn_children,
     )
 
     target = get_home()
@@ -452,6 +576,19 @@ def task_show(
         typer.echo(
             f"  dependents: {', '.join(dependents)}  (leave them a handoff: "
             f"`task report {task.short_id} --status done --handoff <file|->`)"
+        )
+    # Lineage, both directions, read off the same listing: who asked for this
+    # task, and what it asked for itself. Cancelling either end changes
+    # nothing about the other.
+    if task.parent:
+        typer.echo(f"  parent:   {short_handle(task.parent)}  (this task was spawned by it)")
+    children = spawn_children(task.id, all_tasks)
+    if children:
+        typer.echo(f"  spawned:  {', '.join(t.short_id for t in children)}")
+    if task.allow_spawn:
+        config = load_config_or_default(target)
+        typer.echo(
+            f"  spawn:    allowed — {len(children)}/{config.tasks.max_spawn_per_task} used"
         )
     if task.runs:
         last = task.runs[-1]
