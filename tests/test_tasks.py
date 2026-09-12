@@ -1575,3 +1575,111 @@ def test_the_preamble_tells_a_task_how_to_leave_a_handoff(home: Path, project: s
     # runner's guidance pump, so `--handoff -` from inside a run would block.
     assert f"quorum task report {task.short_id} --status done --handoff <file>" in text
     assert "--handoff <file|->" not in text
+
+
+# -- the task record as rows (#127) ------------------------------------------
+
+
+def detail_by_label(rows: list[dict]) -> dict[str, dict]:
+    return {r["label"]: r for r in rows if r["kind"] == "field"}
+
+
+def test_task_detail_covers_every_section_of_a_task_that_has_everything(
+    home: Path, project: str
+):
+    """The record as `task show` prints it: fields, both directions of the
+    dependency graph, the runs and what they spent, the reports, the
+    notebook and the handoff — each row carrying its fact as well as its
+    line, so a consumer never parses the text back."""
+    from quorum import notes, views
+
+    harness_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "build it", "fake", issue_url=ISSUE_URL)
+    dependent = store.add(project, "review it", "fake", depends_on=[upstream.id])
+    tasks.report(home, upstream.id, "pr", "opened", pr_url="https://x/pr/7")
+    tasks.record_pr_state(home, store.get(upstream.id), "merged")
+    tasks.write_handoff(home, upstream.id, "Changed: the thing.\nCheck first: tests/\n")
+    notes.task_notebook(home, upstream.id).remember("the auth fixture is the slow one")
+
+    rows = views.task_detail(home, store.get(upstream.id))
+    fields = detail_by_label(rows)
+    assert fields["project"]["project"] == project
+    assert fields["status"]["status"] == "pr" and fields["status"]["running"] is False
+    assert fields["issue"]["issue_url"] == ISSUE_URL
+    assert fields["pr"]["pr_url"] == "https://x/pr/7"
+    assert fields["pr state"]["pr_state"] == "merged"
+    # the reverse read of `depends_on`, which the JSON used to omit entirely
+    assert fields["dependents"]["dependents"] == [dependent.short_id]
+    assert fields["updated"]["updated_at"] == store.get(upstream.id).updated_at
+
+    sections = {r["section"] for r in rows}
+    assert sections == {"record", "reports", "notebook", "handoff", "more"}
+    reports = [r for r in rows if r["section"] == "reports" and r["kind"] == "body"]
+    assert [r["status"] for r in reports] == ["pr"]
+    assert reports[0]["pr_url"] == "https://x/pr/7"
+    # the handoff body in full, on the heading row and line by line under it
+    handoff = [r for r in rows if r["section"] == "handoff"]
+    assert handoff[0]["handoff"] == "Changed: the thing.\nCheck first: tests/\n"
+    assert [r["text"] for r in handoff[1:]] == ["Changed: the thing.", "Check first: tests/"]
+    assert any("the auth fixture" in r["text"] for r in rows if r["section"] == "notebook")
+
+    # the other direction: the dependent names what it waits on
+    waiting = detail_by_label(views.task_detail(home, store.get(dependent.id)))["after"]
+    assert waiting["waiting_on"] == [upstream.short_id]
+    assert waiting["depends_on"] == [upstream.short_id]
+
+
+def test_task_detail_omits_the_sections_a_bare_task_has_nothing_for(
+    home: Path, project: str
+):
+    """The failing half of every optional row: a task queued and left alone
+    has no session, no issue, no PR, no dependencies, no runs and no
+    handoff, and prints none of those lines — an empty notebook is the one
+    absence that still says something, because it names the command."""
+    from quorum import views
+
+    task = TaskStore(home).add(project, "do it", "fake")
+    rows = views.task_detail(home, task)
+    labels = set(detail_by_label(rows))
+    assert labels == {"project", "status", "harness", "prompt", "workdir", "updated", "notebook"}
+    assert {r["section"] for r in rows} == {"record", "notebook", "more"}
+    assert "task remember" in detail_by_label(rows)["notebook"]["text"]
+
+
+def test_task_detail_is_fail_soft_over_a_torn_reports_file(home: Path, project: str):
+    """Views degrade rather than fail: a half-written reports line costs its
+    own row, never the record — `task show` is how a person finds out what
+    happened to a task whose files are in a bad way."""
+    from quorum import views
+
+    task = TaskStore(home).add(project, "do it", "fake")
+    tasks.report(home, task.id, "executing", "working")
+    with open(tasks.reports_path(home, task.id), "a", encoding="utf-8") as f:
+        f.write('{"at": "2026-01-01T00:00:00Z", "status": "do')
+
+    rows = views.task_detail(home, task)
+    reports = [r for r in rows if r["section"] == "reports" and r["kind"] == "body"]
+    assert [r["status"] for r in reports] == ["executing"]
+
+
+def test_task_detail_marks_the_budget_rows_for_the_surface_to_colour(
+    home: Path, project: str
+):
+    from quorum import views
+    from quorum.config import load_config
+
+    harness_config(home)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[tasks]", "[tasks]\nmax_cost_per_run = 0.10"))
+    store = TaskStore(home)
+    task = store.add(project, "spendy", "fake")
+    run = tasks.TaskRun(started_at=fsio.iso(fsio.utc_now()), usage={"cost_usd": 0.42})
+    task = store.update(task.id, runs=[run])
+
+    rows = views.task_detail(home, task, config=load_config(home))
+    fields = detail_by_label(rows)
+    assert fields["usage"]["usage"]["cost_usd"] == 0.42
+    assert fields["budget"]["style"] == "warning"
+    # the last run is the one over budget, so the runner will refuse the next
+    assert fields["gated"]["budget_gated"] is True

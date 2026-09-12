@@ -180,9 +180,11 @@ Each entry says what the module owns and the rules a change must respect.
   and the TUI read it and nothing else, which is why they cannot disagree. It also
   renders a task row's marks once for every surface (`task_marker`, `task_badges`,
   `task_flags`, `usage_badge`), described by `status --legend`: a surface chooses
-  where to put them, never how to spell them. `task_history` is the post-hoc reader
-  over every file that records part of a task's life — bounded, fail-soft, records
-  nothing. Write affordances (TUI `n`, `m`, `s`, `c`, `a`) are thin calls into the
+  where to put them, never how to spell them. `task_detail` is the one assembly of
+  a task's whole record — `task show` prints its rows through `detail_line` and
+  `--json` dumps them, so text and JSON cannot disagree — and `task_history` is the
+  post-hoc reader over every file that records part of a task's life; both are
+  bounded, fail-soft and record nothing. Write affordances (TUI `n`, `m`, `s`, `c`, `a`) are thin calls into the
   same code the CLI uses — **never view-local write logic** — and all go through
   `_write`, so an unwritable home notifies instead of taking the dashboard down.
 - `cli/` — one module per command group (`task`, `agent`, `manager`, `board`,

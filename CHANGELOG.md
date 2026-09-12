@@ -315,6 +315,16 @@ minute it is posted.
   could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
+- One renderer for a task's record (#127): `views.task_detail(home, task)`
+  assembles every section `quorum task show` prints — the fields, both
+  directions of the dependency graph, the runs and their spend, the recent
+  reports, the notebook, the handoff — as rows, `views.detail_line` prints
+  one, and `task show --json` dumps them under `detail` beside the raw
+  record. The text is unchanged apart from its last line; the `--json`
+  omissions the #110 review found (`dependents:` and the handoff body,
+  printed but never dumped) are closed by construction, and the TUI's
+  transcript tab now lists reports through the same rows. `quorum status`
+  and the agent listing were left alone.
 - Docs restructured; one name per concept; glossary added (#102). The guide
   opens with a five-step path (install, register a project, queue a task,
   start the supervisor, read status), then Watching and Steering, then a
@@ -478,6 +488,12 @@ minute it is posted.
   unaffected: `build_task_capabilities` leaves the network open as before.
 
 ### Fixed
+- A message archive that decompresses to bytes which are not UTF-8 no longer
+  takes `quorum task history` (and the TUI tab that renders it) down: the
+  archive scan already treated a bad gzip header, a truncated stream and
+  corrupt deflate data as a skipped month, and a `UnicodeDecodeError` off the
+  text wrapper is the fourth shape of the same damage. Found by the existing
+  random-deflate test, which hits it a fraction of the time.
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
   stall readings called `.get()` / `["started_at"]` on whatever the file

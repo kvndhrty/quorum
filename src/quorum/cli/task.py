@@ -9,7 +9,7 @@ from pathlib import Path
 
 import typer
 
-from .. import fsio, usage
+from .. import fsio
 from .. import home as home_mod
 from .. import prune as prune_mod
 from .. import transcript as transcript_mod
@@ -379,135 +379,28 @@ def task_list(
 @task_app.command("show")
 def task_show(
     task_id: str,
-    json_out: bool = typer.Option(False, "--json", help="Dump the full task record as JSON."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Dump those rows and the raw task record as JSON."
+    ),
 ) -> None:
     """Show one task: what it is, where it stands, its recent reports and
     its notebook."""
-    from .. import notes as notes_mod
     from .. import views
-    from ..config import load_config_or_default
-    from ..tasks import (
-        TaskStore,
-        dependency_state,
-        read_handoff,
-        read_reports,
-        runner_alive,
-        short_handle,
-    )
 
     target = get_home()
     task = _resolve_task(target, task_id)
+    # One assembly of the record (`views.task_detail`), printed here and
+    # dumped under `detail` by --json, so the two cannot say different
+    # things about the same task. The raw record stays at the top level of
+    # the JSON: it is what the babysitter prompt reads `workdir` out of.
+    rows = views.task_detail(target, task)
     if json_out:
-        typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
+        typer.echo(
+            json.dumps({**task.model_dump(), "detail": rows}, indent=2, ensure_ascii=False)
+        )
         return
-    running = runner_alive(target, task.id)
-    # The badges every listing shows, then the words this surface has room
-    # for. `views.task_badges` reads a row, and the two fields it wants are
-    # on the task itself.
-    state = task.status + views.task_badges(
-        {"perpetual": task.perpetual, "pr_state": task.pr_state}
-    )
-    if task.attached:
-        state += " (attached to a live session)"
-    elif running:
-        state += " (runner alive)"
-    if task.perpetual:
-        state += " [perpetual — only you end it]"
-    typer.echo(f"task {task.short_id}  ({task.id})")
-    typer.echo(f"  project:  {task.project}")
-    typer.echo(f"  status:   {state}")
-    typer.echo(f"  harness:  {task.harness}")
-    typer.echo(f"  prompt:   {task.prompt}")
-    typer.echo(f"  workdir:  {task.workdir or '(worktree created on first run)'}")
-    if task.session:
-        typer.echo(f"  session:  {task.session}")
-    if task.issue_url:
-        # The full url here, `#62` everywhere a listing has one column: this
-        # is the page a human opens.
-        typer.echo(f"  issue:    {task.issue_url}")
-    if task.pr_url:
-        typer.echo(f"  pr:       {task.pr_url}")
-    if task.pr_state:
-        # Observed by the manager tick, so it can be older than "now" — say
-        # when, rather than implying it was just checked.
-        typer.echo(f"  pr state: {task.pr_state} (observed {task.pr_state_at})")
-    all_tasks = TaskStore(target).list()
-    if task.depends_on:
-        deps = dependency_state(task, {t.id: t for t in all_tasks})
-        line = ", ".join(short_handle(d) for d in task.depends_on)
-        if deps["waiting_on"]:
-            line += f"  (waiting on {', '.join(deps['waiting_on'])})"
-        if deps["failed"]:
-            line += f"  DEP-FAILED: {', '.join(deps['failed'])}"
-        if deps["missing"]:
-            line += f"  DEP-MISSING: {', '.join(deps['missing'])}"
-        if deps["cycle"]:
-            line += "  DEP-CYCLE"
-        typer.echo(f"  after:    {line}")
-    # The other direction: who is waiting on this task. This is how a
-    # running task learns it should leave a handoff — the preamble tells it
-    # to look here.
-    dependents = [t.short_id for t in all_tasks if task.id in t.depends_on]
-    if dependents:
-        typer.echo(
-            f"  dependents: {', '.join(dependents)}  (leave them a handoff: "
-            f"`task report {task.short_id} --status done --handoff <file|->`)"
-        )
-    if task.runs:
-        last = task.runs[-1]
-        typer.echo(
-            f"  runs:     {len(task.runs)} (last: {last.started_at} → "
-            f"{last.ended_at or 'running'}, exit {last.exit_code if last.exit_code is not None else '—'})"
-        )
-        spent = usage.describe(usage.total(r.usage for r in task.runs))
-        if spent:
-            typer.echo(f"  usage:    {spent} (as reported by the harness)")
-        config = load_config_or_default(target)
-        for note in usage.run_overages(
-            task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
-        ):
-            typer.secho(f"  budget:   {note}", fg="yellow")
-        if usage.last_run_overages(
-            task.runs, config.tasks.max_cost_per_run, config.tasks.max_tokens_per_run
-        ):
-            typer.secho(
-                "  gated:    the last run exceeded its budget — `task run` refuses the "
-                "next one (--force overrides)",
-                fg="yellow",
-            )
-    typer.echo(f"  updated:  {task.updated_at}")
-    reports = read_reports(target, task.id, limit=10)
-    if reports:
-        typer.echo("recent reports:")
-        for r in reports:
-            typer.echo(f"  [{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
-    # The notebook, exactly as the runner renders it into the task's prompt
-    # (header line included, so what you read here is what the harness
-    # reads). The digest never carries it: the manager reads reports.
-    book = notes_mod.task_notebook(target, task.id)
-    standing = book.active()
-    kept = book.render_notes(standing, unscanned=book.unscanned_bytes())
-    if kept:
-        typer.echo("notebook:")
-        for line in kept:
-            typer.echo(f"  {line}")
-    if not standing:
-        # A notebook can render lines and still hold no live note — the file
-        # has outgrown its read window — so the hint hangs off the notes, not
-        # off the rendering.
-        empty = (
-            f'(empty — `quorum task remember {task.short_id} "…"` keeps state '
-            "between its runs)"
-        )
-        typer.echo(f"  {empty}" if kept else f"  notebook: {empty}")
-    handoff = read_handoff(target, task.id)
-    if handoff is not None:
-        # In full: dependents see it capped in their prompt, and this is
-        # where the clip points them.
-        typer.echo("handoff (what this task left for the tasks that depend on it):")
-        for line in handoff.rstrip("\n").splitlines():
-            typer.echo(f"  {line}")
-    typer.echo(f"more: `quorum task log {task.short_id}` for the transcript, `--json` for the raw record")
+    for row in rows:
+        typer.secho(views.detail_line(row), fg="yellow" if row.get("style") == "warning" else None)
 
 
 @task_app.command("history")

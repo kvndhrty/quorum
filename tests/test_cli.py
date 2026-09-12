@@ -919,7 +919,38 @@ def test_task_show_is_human_first_json_on_request(home: Path, tmp_path: Path):
 
     r = runner.invoke(app, ["task", "show", short, "--json"])
     record = json.loads(r.output)
+    # the raw record stays at the top level — the babysitter prompt reads
+    # `workdir` straight off it
     assert record["prompt"] == "tidy the docs"
+
+
+def test_task_show_prints_the_rows_its_json_carries(home: Path, tmp_path: Path):
+    """Text and `--json` are one assembly (`views.task_detail`) rendered two
+    ways, so the omissions the #110 review found — `dependents:` and the
+    handoff body, printed but not dumped — cannot come back: every line of
+    the text is a row of the JSON, and every row carries its fact as a
+    field of its own as well."""
+    from quorum import views
+
+    slug = setup_task_env(home, tmp_path)
+    upstream = _queue(home, slug, "build it")
+    dependent = _queue(home, slug, "review it", "--after", upstream)
+    handoff = tmp_path / "handoff.md"
+    handoff.write_text("Changed: the thing.\nCheck first: tests/\n", encoding="utf-8")
+    runner.invoke(
+        app,
+        ["task", "report", upstream, "shipped", "--status", "done", "--handoff", str(handoff)],
+    )
+
+    text = runner.invoke(app, ["task", "show", upstream])
+    dumped = json.loads(runner.invoke(app, ["task", "show", upstream, "--json"]).output)
+    rows = dumped["detail"]
+    assert text.output.splitlines() == [views.detail_line(row) for row in rows]
+
+    by_label = {r["label"]: r for r in rows if r["kind"] == "field"}
+    assert by_label["dependents"]["dependents"] == [dependent]
+    handoff_rows = [r for r in rows if r["section"] == "handoff"]
+    assert handoff_rows[0]["handoff"] == "Changed: the thing.\nCheck first: tests/\n"
 
 
 def test_list_commands_emit_json(home: Path, tmp_path: Path):
