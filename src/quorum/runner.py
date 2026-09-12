@@ -112,24 +112,35 @@ class GuidancePump:
     prompt, so `build_harness_argv` strips `{prompt}` for inject harnesses.
 
     A stream-json harness runs until stdin closes, so ending the run is the
-    pump's job too. The protocol emits one `result` event per completed user
-    turn (the prompt turn is the first). The pump counts results against
-    deliveries and closes stdin once every delivered turn has its result and
-    nothing is waiting in the inbox — so a run naturally extends while
+    pump's job too. The close rule is about *turns*, not deliveries: a turn
+    written while the harness is idle gets a `result` event of its own,
+    while a turn written into a turn that is still running is drained into
+    it and shares that turn's single result. The pump therefore tracks one
+    boolean — is a turn in flight whose result has not arrived — and closes
+    stdin at the first `result` that leaves no turn open, nothing claimed
+    but unwritten, and nothing waiting in the inbox. A run extends while
     guidance keeps arriving and ends at the first idle turn boundary.
     Anything arriving after close stays in `new/` for the next run.
 
-    The lock guards the counters, the closed flag, and — the one piece of
+    Counting one result per *delivery* instead was the #109 hang: a nudge
+    that reached the CLI mid-turn was answered inside the running turn, the
+    run's one result never satisfied `results >= 1 + delivered`, and stdin
+    stayed open on an idle harness until someone ran `task stop`.
+
+    The lock guards the flags, the closed flag, and — the one piece of
     filesystem work under it — the *claim* of each inbox message (the
-    rename out of `new/`), which is counted as delivered in the same
+    rename out of `new/`), which is counted as unwritten in the same
     critical section. That pairing is what makes the close condition
     sound: a `result` arriving on the transcript thread either still sees
-    the message pending in `new/` (so it does not close) or sees it already
-    counted (so the turn is still owed). Claiming outside the lock and
-    counting after left a gap in which a result closed stdin with a nudge in
-    flight — a real CI flake, one result event instead of two. Stdin writes
-    stay outside the lock (there is one delivering thread, so the prompt
-    turn always precedes guidance).
+    the message pending in `new/` (so it does not close) or sees it claimed
+    and not yet written (so it does not close either). Claiming outside the
+    lock and counting after left a gap in which a result closed stdin with a
+    nudge in flight — a real CI flake, one result event instead of two.
+    Stdin writes stay outside the lock (there is one delivering thread, so
+    the prompt turn always precedes guidance); whether a write folded into a
+    running turn or opened a new one is settled under the lock immediately
+    after it, because that is when the CLI has actually been handed the
+    bytes.
     """
 
     def __init__(self, home: Path, inbox: str, stdin, prompt: str):
@@ -140,8 +151,8 @@ class GuidancePump:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._closed = False
-        self._delivered = 0
-        self._results = 0
+        self._open_turn = False  # a turn is in flight, its result not yet seen
+        self._unwritten = 1  # claimed-but-unwritten turns; the prompt is the first
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def start(self) -> None:
@@ -152,7 +163,7 @@ class GuidancePump:
         if not (isinstance(event, dict) and event.get("type") == "result"):
             return
         with self._lock:
-            self._results += 1
+            self._open_turn = False
             self._maybe_close_locked()
 
     def stop(self) -> None:
@@ -180,8 +191,16 @@ class GuidancePump:
             self._stdin.write(json.dumps(turn) + "\n")
             self._stdin.flush()
         except (OSError, ValueError):
+            with self._lock:
+                self._unwritten -= 1
             self._close()
             return False
+        with self._lock:
+            self._unwritten -= 1
+            # A turn written while one is already in flight is folded into it
+            # and shares its result; one written to an idle harness starts a
+            # turn of its own. Either way a turn is now open.
+            self._open_turn = True
         return True
 
     def _deliver_pending(self) -> None:
@@ -195,19 +214,16 @@ class GuidancePump:
                 claimed = next(claims, None)
                 if claimed is None:
                     return
-                self._delivered += 1
+                self._unwritten += 1
             if not self._write_turn(guidance_note(claimed.message)):
-                with self._lock:
-                    self._delivered -= 1
                 claimed.reject()  # harness is gone; back to new/ for the next run
                 return
             claimed.ack()
 
     def _maybe_close_locked(self) -> None:
-        if self._closed:
+        if self._closed or self._open_turn or self._unwritten:
             return
-        answered = self._results >= 1 + self._delivered
-        if answered and not self._bus.pending(self._inbox):
+        if not self._bus.pending(self._inbox):
             self._close_locked()
 
     def _close(self) -> None:
