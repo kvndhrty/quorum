@@ -21,6 +21,16 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Guidance for any agent (#129): `quorum agent tell <name> "..."` puts a
+  message in that agent's inbox, where a prompt agent's next tick renders it
+  into its `{directives}` placeholder — the capability the guide already
+  described, which until now meant calling `MessageBus.send` from Python. An
+  unconfigured recipient is refused. `quorum manager tell` is the same
+  function with the name fixed to the manager, which also gives it the two
+  things it lacked: the send is journaled and counted against a sending
+  agent's action cap, and it is attributed to the actual sender instead of
+  always to `user`. All three senders now write `type = "guidance"`, the one
+  word the glossary fixes for it.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,

@@ -363,7 +363,7 @@ class QuorumTUI(App):
         if target == "manager":
             sent = self._write(
                 "queue the guidance",
-                lambda: MessageBus(self.home).send("user", "manager", type="directive", text=text),
+                lambda: MessageBus(self.home).send("user", "manager", type="guidance", text=text),
             )
             if sent is FAILED:
                 return

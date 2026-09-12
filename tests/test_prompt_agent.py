@@ -138,6 +138,28 @@ def test_directives_reach_the_prompt_and_are_acked(home: Path, clock):
     assert not bus.pending("standup")
 
 
+def test_agent_tell_fills_the_directives_placeholder(home: Path, clock):
+    """The CLI half of the same path (#129): what `quorum agent tell` queues
+    is what the next tick renders into `{directives}`, attributed to whoever
+    sent it."""
+    from typer.testing import CliRunner
+
+    from quorum.cli import app
+
+    write_config(home)
+    seed_agent(home, prompt="directives today:\n{directives}\n")
+    result = CliRunner().invoke(app, ["agent", "tell", "standup", "skip the retro section"])
+    assert result.exit_code == 0, result.output
+
+    make_agent(home, clock).tick()
+
+    text = "\n".join(
+        e.get("line", "") for e in fsio.read_jsonl(transcript_path(home, "standup"))
+    )
+    assert "skip the retro section" in text
+    assert "[from user at" in text
+
+
 def test_directives_rejected_back_on_crash(home: Path, clock):
     write_config(home, mode="fail")
     seed_agent(home)

@@ -228,6 +228,44 @@ def _agent_command(name: str, command: str, note: str) -> None:
     typer.echo(note)
 
 
+def tell_agent(name: str, text: str) -> None:
+    """Queue guidance in an agent's inbox — the one write path behind both
+    `quorum agent tell` and `quorum manager tell`.
+
+    The recipient claims its inbox at the start of its next tick and renders
+    what it finds into its prompt: a prompt agent's `{directives}`
+    placeholder, the manager's digest. An agent that is not configured is
+    refused here for the same reason `agent pause` refuses one — guidance
+    queued for an agent nothing schedules is never read.
+
+    The sender is `current_actor()`, not `"user"`: a notebook may only be
+    written by its own agent, but guidance may come from anyone — a person,
+    the manager, another agent — and `guidance_note` renders `[from <actor>
+    at ...]`, which is what keeps agent-to-agent guidance legible. The
+    `_actor_guard` call is why an agent's guidance is journaled and counts
+    against its per-run action cap.
+    """
+    target = get_home()
+    if name not in _load_config(target).agents:
+        raise _fail(f"no agent {name!r} in config.toml or agents/ — `quorum agent list`") from None
+    _actor_guard(target, "agent.tell", target=name, args=text[:80])
+    MessageBus(target).send(current_actor(), name, type="guidance", text=text)
+    typer.secho(f"guidance queued for {name}'s next run", fg="green")
+
+
+@agent_app.command("tell")
+def agent_tell(name: str, text: str) -> None:
+    """Send an agent guidance; its next run starts with it.
+
+    Guidance is read once and then consumed; `quorum manager remember --agent
+    <name>` writes the kind that stays. `quorum manager tell` is this command
+    with the name fixed to the manager.
+
+    Example: quorum agent tell standup "skip the retro section today"
+    """
+    tell_agent(name, text)
+
+
 @agent_app.command("pause")
 def agent_pause(name: str) -> None:
     """Pause an agent's schedule (applied by a running supervisor within seconds)."""
