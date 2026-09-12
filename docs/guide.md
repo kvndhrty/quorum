@@ -276,6 +276,48 @@ follows the tick running now, and the same command reads any agent
 (`quorum agent log babysitter`). A prompt agent has no digest, so what it saw
 is its rendered prompt.
 
+### Is supervision doing anything
+
+`agent log` reads one tick. The question across ticks is whether the
+supervision is changing anything: does a nudge change the next report, does a
+relaunch finish the task, does an escalation get acted on. That decides how
+much supervision to run at all, and `quorum agent interventions` answers it
+from the same journal, read against each target's reports:
+
+```
+$ quorum agent interventions manager --since 7d
+manager interventions, since 2026-09-05T09:00:00Z (7d)
+[2026-09-05 10:14:02] nudge -> a3f2k9 · status then executing · “use the retry helper” · reported reviewing after 8m12s · status now done
+[2026-09-06 03:20:04] launch -> 5yqg9f · status then blocked · no report since · status now blocked
+[2026-09-07 11:02:11] escalation -> #attention · “a secret I cannot read” · acked — archived (7c1af2)
+1 nudge, 1 followed by a report · 1 launch, 0 later reported done · 1 escalation, 1 acked
+the journal starts at 2026-09-01T08:00:12Z
+```
+
+Every nudge, launch (`task run`), stop and escalation the agent journaled,
+each with the target's status at the time, the next report the target made
+after it and how long that took. A `task run` reads as `launch` because the
+journal does not say whether it was the first one; the status it recorded
+does — `queued` was a first launch, anything else a relaunch. The summary
+counts only what the files state: a report happened, a `done` report happened,
+a message is no longer live. Nothing here decides whether an intervention
+worked — that reading is yours, which is also why there is no "within N
+hours" threshold to tune.
+
+Four things to know before you read much into a line. A nudge's text is the
+first 80 characters of it, which is all the journal keeps. An escalation is
+matched to its post by text, since the journal line is written before the
+message exists, so a post whose text you have edited since reads as
+`no matching post`. `acked` means the message has left the board — which
+`board ack` does, and so does the janitor's retention sweep, so over a long
+window an escalation nobody saw can read as acked. And the journal is read as
+a bounded tail: the last line says how far back that reaches, and says so
+explicitly when the file is larger than the window read.
+
+`--json` gives the same rows with their raw fields. The manager is an agent
+like any other, so this reads a prompt agent too
+(`quorum agent interventions babysitter`).
+
 ## Steering
 
 Three channels, and you and the manager use all three identically.
@@ -400,6 +442,10 @@ this guide all use.
 - **journal** — what an agent did, recorded by quorum as each command executes
   rather than reported by the model. `quorum manager journal` prints it, and
   the recent entries go back into the next digest.
+- **intervention** — something an agent did about a task, or asked a person
+  for: a nudge, a launch (or relaunch), a stop, or an escalation.
+  `quorum agent interventions <name>` lists them from the journal with what
+  the target did next.
 - **transcript** — everything the harness printed during a run, one JSON line
   per event. Read it with `task log` or `agent log`.
 - **usage log** — one line per agent run saying what it cost and how it ended.

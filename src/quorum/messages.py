@@ -267,21 +267,32 @@ class MessageBus:
         entries = fsio.sorted_entries(self.inbox_dir / agent / folder)
         return [m for m in (_load(p) for p in entries) if m]
 
-    def archived_records(self, to: str, since: datetime | None = None) -> list[dict[str, Any]]:
-        """Raw archived records addressed to `to`, oldest first.
+    def archived_records(
+        self, to: str | None = None, since: datetime | None = None, *, topic: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Raw archived records addressed to `to` — or posted to `topic` —
+        oldest first.
 
         The archive (`messages/archive/YYYY-MM.jsonl.gz`) is where a claimed
         inbox message goes when its consumer acks it — so for a task's inbox
-        this is the record of guidance that was consumed. `since` bounds the
-        read to the monthly files from that month on (the archive is filed by
-        the month the message was archived, never earlier than it was sent),
+        this is the record of guidance that was consumed. A board message
+        lands there when it is acked (`ack_board_message`) or when the
+        janitor sweeps it past its retention, which is why `topic` answers
+        "is this escalation still live" and not "was it acked": the record
+        does not say which of the two archived it. `since` bounds the read to
+        the monthly files from that month on (the archive is filed by the
+        month the message was archived, never earlier than it was sent),
         which is what keeps a home with years of history from being
         decompressed whole to answer one question.
 
+        Exactly one of `to` and `topic`, the same rule a Message itself
+        obeys; anything else is a programming error, not a bad byte.
+
         The one scanner of the archive: `archived_direct` validates these
-        records into Messages for the views, and `export.delivered_guidance`
+        records into Messages for the views, `export.delivered_guidance`
         ships them as they are, so an export keeps a record the current
-        schema would reject.
+        schema would reject, and `views.agent_interventions` reads the
+        `attention` topic through it.
 
         Fail-soft throughout, because both callers are readers a bad byte
         must not take down. A line that will not parse is skipped; so is a
@@ -292,6 +303,9 @@ class MessageBus:
         which is neither. Sorting is by `(created_at, id)` so records sharing
         a second still come back in a stable order.
         """
+        if (to is None) == (topic is None):
+            raise ValueError("exactly one of 'to' or 'topic' must be given")
+        field, wanted = ("to", to) if to is not None else ("topic", topic)
         floor = f"{since:%Y-%m}" if since is not None else ""
         out: list[dict[str, Any]] = []
         for path in sorted(self.archive_dir.glob("*.jsonl.gz")):
@@ -304,7 +318,7 @@ class MessageBus:
                             record = json.loads(line)
                         except ValueError:
                             continue
-                        if isinstance(record, dict) and record.get("to") == to:
+                        if isinstance(record, dict) and record.get(field) == wanted:
                             out.append(record)
             except (OSError, EOFError, zlib.error):
                 continue

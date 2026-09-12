@@ -7,7 +7,7 @@ view works whether or not the supervisor is running.
 from __future__ import annotations
 
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -651,8 +651,6 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
     archived = prune.archived_task_dir(home, task.id)
     if archived.is_dir():
         try:
-            from datetime import UTC, datetime
-
             at = fsio.iso(datetime.fromtimestamp(archived.stat().st_ctime, tz=UTC))
         except OSError:
             at = ""
@@ -680,6 +678,284 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
         )
     )
     return rows
+
+
+# -- intervention outcomes -------------------------------------------------
+#
+# The second post-hoc reader, the mirror of `task_history`: that one asks what
+# happened to one task, this one asks what one agent's supervision did (#97,
+# theme #88). An agent's journal already records every nudge, launch, stop and
+# escalation with the target's status at the time; the target's reports.jsonl
+# records what it said next. Nothing reads the two together, so "does a nudge
+# change the next report, does a relaunch finish the task, does an escalation
+# get acted on" — the question that decides how much supervision to run — was
+# answered by hand over JSONL.
+#
+# Facts only. The view shows the status before, the action, and what came
+# after; what counts as having worked is the reader's judgement, which is why
+# no threshold here separates a good outcome from a bad one and why the
+# summary counts only what the files state (a report happened, a `done` report
+# happened, a message is no longer live).
+
+#: the journal actions this view reads, and the word each reads as. A board
+#: post is the fourth, recognized by its topic rather than its action.
+#: `task.run` reads as `launch` rather than `relaunch` because the journal
+#: does not distinguish the two — the status it recorded does (`queued` was a
+#: first launch, anything else a relaunch), and that is the reader's to see.
+INTERVENTION_KINDS = {
+    "task.nudge": "nudge",
+    "task.run": "launch",
+    "task.stop": "stop",
+}
+#: each kind's plural, for the summary line — "relaunchs" is not a word.
+INTERVENTION_PLURALS = {
+    "nudge": "nudges",
+    "launch": "launches",
+    "stop": "stops",
+    "escalation": "escalations",
+}
+ATTENTION_TOPIC = "attention"
+
+
+def _posted_topic(args: str) -> tuple[str, str]:
+    """The `(topic, text)` a `board.post` journal entry records. Its args are
+    `"<topic>: <text truncated to 80 chars>"` (cli/board.py), so the text is a
+    prefix of the message's own — enough to match it, never enough to quote as
+    the whole post."""
+    topic, _, text = args.partition(": ")
+    return topic.strip(), text
+
+
+def _escalation_state(
+    at: datetime, prefix: str, live: list[Any], archived: list[dict[str, Any]]
+) -> tuple[str | None, bool | None]:
+    """`(short id, acked)` of the escalation a journal entry posted.
+
+    The journal line carries no message id — `board.post` is journaled before
+    the message exists — so the post is found by its content: the first
+    message on the topic, live or archived, stamped at or after the action
+    whose text starts with the prefix the journal kept. `acked` is then
+    whether that message has left the board, which is what acking does
+    (`ack_board_message` archives it); the janitor's retention sweep archives
+    an old escalation too, so over a long window an escalation nobody ever
+    saw can read as acked. None for both when no post matches — a journal
+    that has outlived its message's month in the archive, or a text edited
+    since.
+    """
+    best: tuple[str, str, bool] | None = None  # (created_at, short id, acked)
+    for record, acked in [(m, False) for m in live] + [(r, True) for r in archived]:
+        created = str(record.get("created_at") or "") if isinstance(record, dict) else record.created_at
+        moment = fsio.parse_iso_or(created)
+        if moment is None or moment < at:
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else record.payload
+        text = str((payload or {}).get("text", ""))
+        if not text.startswith(prefix):
+            continue
+        ident = str(record.get("id") or "") if isinstance(record, dict) else record.id
+        if best is None or created < best[0]:
+            best = (created, ident[-6:].lower(), acked)
+    if best is None:
+        return None, None
+    return best[1], best[2]
+
+
+def _intervention_text(row: dict[str, Any]) -> str:
+    """One intervention as the line every surface prints, after `[at]`."""
+    kind = row["kind"]
+    if kind == "escalation":
+        parts = [f"escalation -> #{row['topic']}"]
+        if row.get("note"):
+            parts.append(f"“{row['note']}”")
+        if row.get("acked") is None:
+            parts.append("no matching post on the board or in the archive")
+        elif row["acked"]:
+            parts.append(f"acked — archived ({row['message']})")
+        else:
+            parts.append(f"still on the board ({row['message']})")
+        return " · ".join(parts)
+    parts = [f"{kind} -> {row['target']}"]
+    if row.get("status_then"):
+        parts.append(f"status then {row['status_then']}")
+    if row.get("args"):
+        parts.append(f"“{row['args']}”" if kind == "nudge" else str(row["args"]))
+    if row.get("status_now") is None:
+        parts.append("the task is no longer listed (pruned, or its record was removed)")
+        return " · ".join(parts)
+    report = row.get("next_report")
+    if report is None:
+        parts.append("no report since")
+    else:
+        after = row.get("wait_seconds")
+        when = f" after {usage.format_duration(after)}" if after is not None else ""
+        note = f": {report['text']}" if report.get("text") else ""
+        parts.append(f"reported {report['status']}{when}{note}")
+    parts.append(f"status now {row['status_now']}")
+    return " · ".join(parts)
+
+
+def intervention_line(row: dict[str, Any]) -> str:
+    """One intervention row as `[at] text` — `history_line`'s counterpart."""
+    return f"[{row.get('at_text') or fsio.display_ts(row.get('at', ''))}] {row.get('text', '')}"
+
+
+def intervention_summary_line(summary: dict[str, Any]) -> str:
+    """The counts under the list: how many of each intervention, and the one
+    after-the-fact fact recorded for each kind."""
+    parts = []
+    for kind, extra, label in (
+        ("nudge", "followed_by_report", "followed by a report"),
+        ("launch", "reported_done", "later reported done"),
+        ("stop", None, ""),
+        ("escalation", "acked", "acked"),
+    ):
+        counts = summary.get(kind) or {}
+        if not counts.get("count"):
+            continue
+        part = f"{counts['count']} {kind if counts['count'] == 1 else INTERVENTION_PLURALS[kind]}"
+        if extra:
+            part += f", {counts.get(extra, 0)} {label}"
+        parts.append(part)
+    return " · ".join(parts) or "no interventions recorded"
+
+
+def agent_interventions(
+    home: Path,
+    name: str,
+    since: timedelta | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """What agent `name` did about its tasks and what happened next, oldest
+    first.
+
+    A pure reader over `state/<name>/journal.jsonl` and each target's
+    `reports.jsonl` (plus the board and its archive, for escalations). Every
+    row carries `at`, `at_text`, `kind` (a value of `INTERVENTION_KINDS`, or
+    `escalation`), `text` (the rest of the line `intervention_line` prints)
+    and the raw fields of its kind.
+
+    The journal is read as a bounded tail (`HISTORY_JOURNAL_BYTES`), so the
+    payload says how far back that reaches: `horizon` is the oldest entry in
+    the window read and `scrolled` is whether the file is larger than it —
+    the case where an older intervention exists and this view cannot see it.
+    An entry whose stamp does not parse is dropped rather than placed: the
+    list is ordered by time, and `--since` is a claim about time.
+    """
+    from .actor import journal_path
+
+    home = Path(home)
+    moment = now or fsio.utc_now()
+    cutoff = fsio.window_start(moment, since) if since is not None else None
+    path = journal_path(home, name)
+    entries = fsio.read_jsonl_tail(path, max_bytes=HISTORY_JOURNAL_BYTES)
+    try:
+        scrolled = path.stat().st_size > HISTORY_JOURNAL_BYTES
+    except OSError:
+        scrolled = False
+    stamps = [
+        m
+        for e in entries
+        if isinstance(e, dict) and (m := fsio.parse_iso_or(e.get("at"))) is not None
+    ]
+    bus = MessageBus(home)
+    by_short = {t.short_id: t for t in TaskStore(home).list()}
+    live = bus.read_topic(ATTENTION_TOPIC, since=cutoff)
+    archived = bus.archived_records(topic=ATTENTION_TOPIC, since=cutoff)
+    rows: list[dict[str, Any]] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        action = str(e.get("action") or "")
+        kind = INTERVENTION_KINDS.get(action)
+        if kind is None and action != "board.post":
+            continue
+        at = fsio.parse_iso_or(e.get("at"))
+        if at is None or (cutoff is not None and at < cutoff):
+            continue
+        args = str(e.get("args") or "")
+        row: dict[str, Any] = {
+            "at": str(e.get("at") or ""),
+            "at_text": fsio.display_ts(e.get("at", "")),
+            "kind": kind or "escalation",
+            "action": action,
+            "actor": str(e.get("actor") or name),
+            "agent_run": e.get("run") or None,
+        }
+        if kind is None:
+            topic, prefix = _posted_topic(args)
+            if topic != ATTENTION_TOPIC:
+                continue
+            message, acked = _escalation_state(at, prefix, live, archived)
+            row.update({"topic": topic, "note": prefix, "message": message, "acked": acked})
+        else:
+            target = str(e.get("target") or "")
+            task = by_short.get(target)
+            row.update(
+                {
+                    "target": target,
+                    "args": args or None,
+                    "status_then": e.get("target_status") or None,
+                    "status_now": task.status if task else None,
+                    "next_report": None,
+                    "wait_seconds": None,
+                    "done_at": None,
+                }
+            )
+            if task is not None:
+                row.update(_after_the_action(home, task, at))
+        row["text"] = _intervention_text(row)
+        rows.append(row)
+    rows.sort(key=lambda r: str(r.get("at") or ""))
+    return {
+        "agent": name,
+        "cutoff": fsio.iso(cutoff) if cutoff is not None else None,
+        "horizon": fsio.iso(min(stamps)) if stamps else None,
+        "scrolled": scrolled,
+        "rows": rows,
+        "summary": {
+            "nudge": {
+                "count": sum(1 for r in rows if r["kind"] == "nudge"),
+                "followed_by_report": sum(
+                    1 for r in rows if r["kind"] == "nudge" and r["next_report"]
+                ),
+            },
+            "launch": {
+                "count": sum(1 for r in rows if r["kind"] == "launch"),
+                "reported_done": sum(1 for r in rows if r["kind"] == "launch" and r["done_at"]),
+            },
+            "stop": {"count": sum(1 for r in rows if r["kind"] == "stop")},
+            "escalation": {
+                "count": sum(1 for r in rows if r["kind"] == "escalation"),
+                "acked": sum(1 for r in rows if r["kind"] == "escalation" and r["acked"]),
+            },
+        },
+    }
+
+
+def _after_the_action(home: Path, task: Task, at: datetime) -> dict[str, Any]:
+    """What the task said after an intervention: its next report, how long it
+    took to make it, and when (if ever) it went on to report `done`.
+
+    A report stamped in the same second as the action counts as after it —
+    quorum stores whole seconds, and the journal line is written first.
+    """
+    out: dict[str, Any] = {"next_report": None, "wait_seconds": None, "done_at": None}
+    for r in read_reports(home, task.id):
+        if not isinstance(r, dict):
+            continue
+        when = fsio.parse_iso_or(r.get("at"))
+        if when is None or when < at:
+            continue
+        if out["next_report"] is None:
+            out["next_report"] = {
+                "at": str(r.get("at") or ""),
+                "status": str(r.get("status") or ""),
+                "text": str(r.get("text") or ""),
+            }
+            out["wait_seconds"] = (when - at).total_seconds()
+        if out["done_at"] is None and r.get("status") == "done":
+            out["done_at"] = str(r.get("at") or "")
+    return out
 
 
 def board_tail(home: Path, limit: int = 20) -> list[dict[str, Any]]:
@@ -724,7 +1000,7 @@ ATTENTION_LIST_LIMIT = 50
 def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int = 5) -> dict[str, Any]:
     """Recent posts on the `attention` topic — the manager's ask-a-human channel."""
     floor = fsio.utc_now() - timedelta(days=days)
-    msgs = MessageBus(home).read_topic("attention", since=floor)
+    msgs = MessageBus(home).read_topic(ATTENTION_TOPIC, since=floor)
     return {
         "count": len(msgs),
         "days": days,
