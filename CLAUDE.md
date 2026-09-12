@@ -106,8 +106,8 @@ Each entry says what the module owns and the rules a change must respect.
   chronological, no reader sorts, and `--after` (`depends_on`, validated once at
   `add`, read back by the total `dependency_state`) is the only ordering the
   substrate enforces. `workdir_git_state` is the stranded-work probe; `issue_url`,
-  `handoff` and `perpetual`/`attached` are written once and read by prompts, views
-  and the digest. Not a DAG engine: the manager decides every launch.
+  `handoff` and `attached` are written once and read by prompts, views and the
+  digest. Not a DAG engine: the manager decides every launch.
 - `prune.py` — on-demand cleanup under the bus's rule, **archive never delete**:
   `tasks/<id>/` is *moved* to `tasks/.archive/<id>/`, dot-prefixed so every listing
   skips it and restoring is one `mv`. Total readers (`select`, `refusal`,
@@ -116,11 +116,6 @@ Each entry says what the module owns and the rules a change must respect.
   a task something still depends on, stranded work (the only `--force`-able one).
   **`--force` never reaches `git worktree remove`**; its two meanings are waiving
   the stranded-work refusal and upgrading `branch -d` to `-D`.
-- `export.py` — `quorum task export <id>`: one `.tar.gz` of a task, a pure reader
-  that adds no state. The only write is the archive, refused inside the home and
-  over an existing file. Nothing from a project directory is exported, so the
-  worktree diff is refused loudly for an attached or `--no-worktree` task;
-  `redact_transcript` is structural and its failure direction is "dropped".
 - `runner.py` — one harness run: `runner.lock` → worktree under `worktrees/<id>`
   (branch `quorum/<short-id>`) → claim the task inbox → compose the prompt
   (preamble + task + dependency note + notebook + guidance) → substitute the
@@ -129,8 +124,7 @@ Each entry says what the module owns and the rules a change must respect.
   `GuidancePump` keeps it open for mid-run guidance. The runner **never sets task
   status**, and refuses an attached task, unfinished dependencies and an
   over-budget last run (`--force` waives the last two) — substrate rails, not
-  policy. `[tasks].auto_commit` is a mechanical net that never pushes and never
-  sets status.
+  policy.
 - `usage.py` — token/cost usage read out of harness result events: loose
   extraction, canonical keys, **fail-soft** (silence records `usage = null` and
   readers omit rather than print `$0.00`). Reduction is elementwise **max** within
@@ -255,7 +249,10 @@ Each entry says what the module owns and the rules a change must respect.
   directory with a scratch `QUORUM_HOME`. It borrows rather than duplicates
   (`forge.auth_status`, `home.classify_prompt`, `sandbox.availability`,
   `dials.current`). A ✗ is reserved for something actually wrong, so
-  `quorum init && quorum doctor` exits 0.
+  `quorum init && quorum doctor` exits 0. It is also the **prompt-layer
+  listing** (#128 folded `prompt list` into it): one line per template with its
+  state, one per overlay saying where it lands, one per project filling the
+  preamble's `{project}` slot, and a ✗ for an overlay that names no template.
 - `config.py` — one place to load config: `load_config` raises, `try_load_config`
   returns defaults for a *missing* file and `None` for a malformed one (which is
   what the fail-soft probes read, so an unreadable config means their feature is

@@ -477,6 +477,59 @@ minute it is posted.
   harness-driven manager under mode 2 needs that grant. Task runs are
   unaffected: `build_task_capabilities` leaves the network open as before.
 
+- Surface review round two (#128), executed against the evidence in
+  `scripts/evidence.py`: 55 commands to 42, 91 option declarations to 76, 35
+  config keys to 31, 9 prompt placeholders to 8. Removal was the default where
+  the dogfood home showed no use; pre-1.0, nothing is deprecated in place.
+  Commands removed outright, with what replaces each:
+  `quorum agent pause X` → `enabled = false` in `agents/X.toml` plus
+  `quorum agent reload X`, which is the file that was already the source of
+  truth; `quorum agent run-now X` → `quorum agent run-once X`, which ticks an
+  agent with or without a supervisor; `quorum project list` → `quorum status`,
+  or `ls ~/.quorum/projects/`; `quorum project remove X` →
+  `rm ~/.quorum/projects/X.json`; `quorum task export X` →
+  `tar czf X.tar.gz -C ~/.quorum/tasks X`, which costs the archive's
+  `--redact` pass and its worktree diff (`export.py` goes with the command).
+- Nine commands merged into six, so each thing has one spelling:
+  `board ack <id>` → `board clear --id <id>` (one archiver, a whole topic or
+  one message); `integration list` → `integration install --list`;
+  `manager journal` → `agent log <name> --actions`, which reads any agent's
+  journal rather than the manager's alone; `manager tell "..."` →
+  `board post --to manager "..."` (the inbox half of the one message schema,
+  and it refuses a name no agent answers to); `prompt list` → `quorum doctor`,
+  which already classified every template through the same
+  `home.classify_prompt` and now also reports overlays and per-project
+  `{project}` blocks; `task history <id>` → `task show <id> --history`;
+  `task hook-session-start` / `task hook-stop` / `task hook-session-end` →
+  `task hook session-start|stop|session-end`.
+- `--json` on `agent list`, `board read`, `doctor`, `status`, `task list`,
+  `task show` and `usage`: no consumer in a year of the dogfood home, and
+  under the all-state-is-files invariant every payload it printed is already
+  a file. `views.overview`, `views.recent_actions` and `doctor.report`
+  existed only to build those payloads and go with them. `task adopt --json`
+  stays: the three shipped session adapters parse it.
+- `--tags` on `project add` and `project set`, with the `tags` field on the
+  project record and in the `.quorum.toml` marker: written, carried into
+  `views.project_rows`, rendered by nothing.
+- `board post --from`: the actor protocol is the attribution, and an override
+  defeats it.
+- Four config keys: `[quorum].timezone` (nothing renders a local time; every
+  surface is UTC), `[sandbox].profile` (declared and read by nothing),
+  `[tasks].auto_commit` (with the runner's auto-commit net and the
+  `auto_commit` note on a run record) and `[ci].timeout_seconds` (now
+  `forge.TIMEOUT_SECONDS`, a module constant, since `pr_state` is fail-soft
+  either way and `issue_view` names the bound in its error).
+- Perpetual tasks: `task add --perpetual`, `Task.perpetual`, the
+  `{perpetual}` placeholder, `prompts/task-perpetual.md`, the `∞` badge, the
+  digest's `perpetual=true` line and `PERPETUAL-ENDED`, the `possible-loop`
+  exemption, the manager prompt's rule and the dependency refusal. Zero of 43
+  tasks used it. A task that should keep working still can: give it a prompt
+  that says so and relaunch it.
+- `quorum task cancel` was on the removal list and is **kept**. Its stated
+  replacement, `task prune <id>`, does not exist — prune is a status sweep
+  with no per-task form — and `cancelled` is a terminal status the dependency
+  reader and the manager both act on, written by the TUI's `c` binding too.
+
 ### Fixed
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
@@ -547,6 +600,41 @@ minute it is posted.
   and the count now happen under the same lock the close check takes.
 
 ### Upgrading
+- Round two of the surface review (#128) removed commands, options and config
+  keys outright. Command spellings that changed, old to new:
+  `quorum agent pause X` → `enabled = false` in `agents/X.toml`, then
+  `quorum agent reload X`;
+  `quorum agent run-now X` → `quorum agent run-once X`;
+  `quorum project list` → `quorum status`;
+  `quorum project remove X` → `rm ~/.quorum/projects/X.json`;
+  `quorum task export X` → `tar czf X.tar.gz -C ~/.quorum/tasks X`;
+  `quorum board ack ID` → `quorum board clear --id ID`;
+  `quorum integration list` → `quorum integration install --list`;
+  `quorum manager journal` → `quorum agent log manager --actions`;
+  `quorum manager tell "..."` → `quorum board post --to manager "..."`;
+  `quorum prompt list` → `quorum doctor`;
+  `quorum task history X` → `quorum task show X --history`;
+  `quorum task hook-stop` → `quorum task hook stop` (likewise
+  `hook-session-start` and `hook-session-end`). Every old spelling exits 2
+  with typer's usage error rather than a deprecation warning.
+- **Reinstall the session adapters**: `quorum integration install codex
+  --force` and `quorum integration install opencode --force`, because the
+  hook commands they call were renamed. A Claude Code install goes through
+  its plugin manager (`quorum integration install claude-code` prints the
+  invocation). Until an adapter is reinstalled its hooks exit 2 and an
+  adopted session stops receiving guidance.
+- Drop `timezone` from `[quorum]`, `profile` from `[sandbox]`, `auto_commit`
+  from `[tasks]` and `timeout_seconds` from `[ci]` if your config.toml sets
+  them: config.toml is parsed strictly, so an unknown key fails the load. The
+  seeded config.toml never carried three of the four, and `quorum init` does
+  not rewrite yours.
+- A task queued with `--perpetual` keeps running; the flag is simply ignored
+  when its record loads, no `∞` badge appears, and the manager treats it as
+  an ordinary task — a long run count on it may now read as stuck. Re-queue
+  it with cycle instructions in the prompt itself. `prompts/task-perpetual.md`
+  is no longer packaged; delete your copy, or `quorum doctor` lists it as
+  "yours — no packaged default".
+
 - Command spellings that changed, old to new:
   `quorum task tail X` → `quorum task log X -n 25`;
   `quorum task tail X -f` → `quorum task log X -f`;

@@ -60,7 +60,7 @@ only in hosted products, where the inputs and the decisions stay in someone
 else's cloud. Here every input and decision is a file you can open: the task
 records the digest is computed from, the policy that reads it
 (`~/.quorum/prompts/manager.md`), and the journal of what it did and why
-(`quorum manager journal`).
+(`quorum agent log manager --actions`).
 
 ## Documentation
 
