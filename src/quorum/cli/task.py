@@ -20,6 +20,7 @@ from ._common import (
     _LINES_OPT,
     _RAW_OPT,
     _VERBOSE_OPT,
+    SELF,
     _actor_guard,
     _confirm,
     _echo,
@@ -30,6 +31,7 @@ from ._common import (
     _notebook_write,
     _parse_window,
     _print_table,
+    _resolve_self_task,
     _resolve_task,
     _task_action,
     _task_prompt,
@@ -378,22 +380,42 @@ def task_list(
 
 @task_app.command("show")
 def task_show(
-    task_id: str,
+    task_id: str = typer.Argument(
+        ..., help="A task id or unique prefix, or `self` from inside a task run."
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Dump those rows and the raw task record as JSON."
     ),
 ) -> None:
     """Show one task: what it is, where it stands, its recent reports and
-    its notebook."""
+    its notebook.
+
+    `self` is the same record read from inside the run it describes, plus
+    what only that run can ask about itself: its per-run budget before the
+    gate refuses it for exceeding it, how full its notebook is, and whether
+    anything is waiting on a handoff.
+    """
     from .. import views
+    from ..actor import self_run
 
     target = get_home()
-    task = _resolve_task(target, task_id)
+    # Two resolutions, one record. `self` reads the actor tag (actor.py) and
+    # adds the run-scoped section; an id reads the record anyone can see.
+    # Nothing here changes a cap or a budget — reading one is not a way
+    # around it.
+    if task_id == SELF:
+        task = _resolve_self_task(target)
+    else:
+        task = _resolve_task(target, task_id)
     # One assembly of the record (`views.task_detail`), printed here and
     # dumped under `detail` by --json, so the two cannot say different
     # things about the same task. The raw record stays at the top level of
     # the JSON: it is what the babysitter prompt reads `workdir` out of.
-    rows = views.task_detail(target, task)
+    rows = (
+        views.task_self_detail(target, task, self_run(target))
+        if task_id == SELF
+        else views.task_detail(target, task)
+    )
     if json_out:
         typer.echo(
             json.dumps({**task.model_dump(), "detail": rows}, indent=2, ensure_ascii=False)

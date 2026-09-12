@@ -18,6 +18,7 @@ from ._common import (
     _RAW_OPT,
     _RUN_OPT,
     _VERBOSE_OPT,
+    SELF,
     _actor_guard,
     _agent_table,
     _confirm,
@@ -26,6 +27,7 @@ from ._common import (
     _follow,
     _load_config,
     _print_table,
+    _resolve_self_agent,
     _verbatim_text,
     agent_app,
     get_home,
@@ -126,6 +128,44 @@ def agent_list(
         typer.echo("no agents configured")
         return
     _print_table(_agent_table(rows, with_type=True))
+
+
+@agent_app.command("show")
+def agent_show(
+    name: str = typer.Argument(
+        ..., help="An agent name, or `self` from inside that agent's own run."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Dump those rows and the agent's row as JSON."
+    ),
+) -> None:
+    """Show one agent: its schedule, its last run, what its runs have cost
+    and its notebook. The manager is an agent like any other here.
+
+    `self` is the same record read from inside the run it describes, plus
+    what only that run can ask about itself: how much of its per-run action
+    cap it has used, and how full its notebook is. Reading the cap is not a
+    way around it — nothing here changes a cap, a budget or a schedule.
+    """
+    from .. import views
+    from ..actor import self_run
+
+    target = get_home()
+    # `self` resolves the actor tag (actor.py) and is the only way to get the
+    # run-scoped section; a name reads the record anyone can see.
+    is_self = name == SELF
+    if is_self:
+        name = _resolve_self_agent()
+    _check_agent_name(name)
+    rows = views.agent_detail_rows(target, name, run=self_run(target) if is_self else None)
+    if rows is None:
+        raise _fail(f"no agent {name!r} in config.toml or agents/ — `quorum agent list`") from None
+    if json_out:
+        row = next(r for r in views.agent_rows(target) if r["name"] == name)
+        typer.echo(json.dumps({**row, "detail": rows}, indent=2, ensure_ascii=False))
+        return
+    for row in rows:
+        typer.secho(views.detail_line(row), fg="yellow" if row.get("style") == "warning" else None)
 
 
 @agent_app.command("run-once")

@@ -315,14 +315,7 @@ class Notebook:
             if self.empty_line is None:
                 return lines if unscanned else []
             return lines + [self.empty_line]
-        kept = notes[-self.max_entries :]
-        rendered = [describe(e, now) for e in kept]
-        # Byte cap second: entries are dropped oldest-first, but the newest note
-        # always survives (truncated by `describe` if it has to be). Measured
-        # in UTF-8 bytes like `runner.clip_handoff`, so a notebook written in
-        # a non-Latin script gets the budget the name promises.
-        while len(rendered) > 1 and sum(_nbytes(line) for line in rendered) > self.max_bytes:
-            rendered.pop(0)
+        rendered = self._fit(notes, now)
         dropped = len(notes) - len(rendered)
         if dropped:
             lines.append(
@@ -331,6 +324,42 @@ class Notebook:
                 f'`{self.remember_cmd} "…"`, then `{self.forget_cmd} <id>` the rest)'
             )
         return lines + rendered
+
+    def _fit(self, notes: list[dict], now: datetime) -> list[str]:
+        """The notes that survive both caps, as their rendered lines.
+
+        Entry cap first, byte cap second: entries are dropped oldest-first,
+        but the newest note always survives (truncated by `describe` if it
+        has to be). Measured in UTF-8 bytes like `runner.clip_handoff`, so a
+        notebook written in a non-Latin script gets the budget the name
+        promises. `render_notes` prints these and `size` measures them, so
+        what a reader is told it is using is what the prompt will carry.
+        """
+        rendered = [describe(e, now) for e in notes[-self.max_entries :]]
+        while len(rendered) > 1 and sum(_nbytes(line) for line in rendered) > self.max_bytes:
+            rendered.pop(0)
+        return rendered
+
+    def size(self, now: datetime | None = None) -> dict[str, int]:
+        """How full the notebook is, as numbers rather than as a rendering.
+
+        `{"notes", "shown", "dropped", "bytes", "max_bytes", "max_entries",
+        "unscanned"}` — what `quorum task show self` reports so a run can
+        consolidate *before* the budget starts dropping its oldest notes,
+        which the rendering only says once it already has.
+        """
+        now = now or fsio.utc_now()
+        notes = self.active(now=now)
+        rendered = self._fit(notes, now)
+        return {
+            "notes": len(notes),
+            "shown": len(rendered),
+            "dropped": len(notes) - len(rendered),
+            "bytes": sum(_nbytes(line) for line in rendered),
+            "max_bytes": self.max_bytes,
+            "max_entries": self.max_entries,
+            "unscanned": self.unscanned_bytes(),
+        }
 
     def render(self, now: datetime | None = None) -> list[str]:
         """`render_notes` straight off the file."""

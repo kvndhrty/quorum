@@ -21,10 +21,10 @@ import typer
 from .. import fsio, usage
 from .. import home as home_mod
 from ..actor import (
-    ACTOR_CAP_ENV,
     ACTOR_RUN_ENV,
-    DEFAULT_MAX_ACTIONS_PER_RUN,
+    actions_used,
     current_actor,
+    current_cap,
     is_task_actor,
     journal_path,
 )
@@ -154,19 +154,17 @@ def _actor_guard(
     journal = journal_path(home, actor if agent else "manager")
     run = os.environ.get(ACTOR_RUN_ENV, "") if agent else ""
     if run:
-        try:
-            cap = int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
-        except ValueError:
-            cap = DEFAULT_MAX_ACTIONS_PER_RUN
+        cap = current_cap()
         # this run's entries sit at the journal's end, well inside the tail window;
-        # a torn or hand-edited line is skipped, never a crashed CLI call
+        # a torn or hand-edited line is skipped, never a crashed CLI call. The
+        # count comes from `actor.actions_used`, which is also what `show self`
+        # reports, so the number a run is told is the number it is held to.
         mine = [
             e
             for e in fsio.read_jsonl_tail(journal)
             if isinstance(e, dict) and e.get("run") == run
         ]
-        # a cap.hit is a record of the refusal, not an action the agent took
-        used = len([e for e in mine if e.get("action") != "cap.hit"])
+        used = actions_used(home, actor, run)
         if used >= cap:
             # The cap was silent from the agent's own point of view: it saw a
             # command refused mid-run and its next run saw nothing at all.
@@ -277,6 +275,60 @@ def _confirm(yes: bool, what: str) -> None:
         return
     if not typer.confirm(what):
         raise typer.Exit(1)
+
+
+#: the handle a run passes instead of its own id — `quorum task show self`,
+#: `quorum agent show self`. Resolved from the actor tag (actor.py), never
+#: from an argument, so it can only ever name the process that typed it.
+SELF = "self"
+
+#: the fix named by every `self` that cannot be resolved. One string, because
+#: a run that gets this back has no other way to find out what went wrong.
+_UNTAGGED = (
+    "`self` reads the actor tag this process was started with (QUORUM_ACTOR), "
+    "and this one has none — run it from inside a task run or an agent run, "
+    "or name what you want to see"
+)
+
+
+def _resolve_self_task(home: Path):
+    """The task this process is a run of. Errors name the fix: an agent run
+    asking for a task is pointed at `agent show self`, and an untagged one
+    at the tag it is missing."""
+    from ..actor import self_agent_name, self_task_id
+    from ..tasks import TaskStore
+
+    task_id = self_task_id()
+    if task_id is None:
+        if agent := self_agent_name():
+            raise _fail(
+                f"`self` here is the agent {agent!r}, not a task — `quorum agent show self`"
+            ) from None
+        raise _fail(f"{_UNTAGGED}: `quorum task show <id>` (`quorum task list`)") from None
+    task = TaskStore(home).get(task_id)
+    if task is None:
+        # The tag outlived the record: a pruned task, or a home switched
+        # under a live run.
+        raise _fail(
+            f"this run is tagged as task {task_id} but no such task is in {home} — "
+            "it may have been pruned"
+        ) from None
+    return task
+
+
+def _resolve_self_agent() -> str:
+    """The agent this process is a run of, for `quorum agent show self`."""
+    from ..actor import self_agent_name, self_task_id
+
+    name = self_agent_name()
+    if name is None:
+        if task_id := self_task_id():
+            raise _fail(
+                f"`self` here is a task run ({task_id[-6:].lower()}), not an agent — "
+                "`quorum task show self`"
+            ) from None
+        raise _fail(f"{_UNTAGGED}: `quorum agent show <name>` (`quorum agent list`)") from None
+    return name
 
 
 def _resolve_task(home: Path, prefix: str):
