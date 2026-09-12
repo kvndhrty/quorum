@@ -285,12 +285,14 @@ class MessageBus:
 
         Fail-soft throughout, because both callers are readers a bad byte
         must not take down. A line that will not parse is skipped; so is a
-        whole month that will not decompress, and gzip reports that damage
-        three ways depending on where it is — a bad header as
-        `gzip.BadGzipFile` (an OSError), a stream that stops short as
-        EOFError, and corruption inside the deflate data as `zlib.error`,
-        which is neither. Sorting is by `(created_at, id)` so records sharing
-        a second still come back in a stable order.
+        whole month that will not decompress, and damage reports itself four
+        ways depending on where it is — a bad header as `gzip.BadGzipFile`
+        (an OSError), a stream that stops short as EOFError, corruption
+        inside the deflate data as `zlib.error`, which is neither, and
+        corruption that still inflates as a `UnicodeDecodeError` off the text
+        wrapper, since nothing says damaged bytes decompress to UTF-8.
+        Sorting is by `(created_at, id)` so records sharing a second still
+        come back in a stable order.
         """
         floor = f"{since:%Y-%m}" if since is not None else ""
         out: list[dict[str, Any]] = []
@@ -306,7 +308,7 @@ class MessageBus:
                             continue
                         if isinstance(record, dict) and record.get("to") == to:
                             out.append(record)
-            except (OSError, EOFError, zlib.error):
+            except (OSError, EOFError, zlib.error, UnicodeDecodeError):
                 continue
         out.sort(key=lambda r: (str(r.get("created_at", "")), str(r.get("id", ""))))
         return out
