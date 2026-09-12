@@ -21,6 +21,17 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Intervention outcomes (#97): `quorum agent interventions <name> [--since 30d]
+  [--json]` lists every nudge, launch, stop and `attention` escalation an
+  agent journaled, each with the target's status at the time, the next report
+  the target made after it and how long that took, under a summary line
+  counting nudges followed by a report, launches whose task later reported
+  done and escalations that have left the board. A pure reader over
+  `state/<name>/journal.jsonl` and the targets' `reports.jsonl` that adds no
+  state and judges nothing — it shows the before, the action and the after —
+  and, since the journal is read as a bounded tail, says how far back it can
+  see. The manager is an agent like any other here, so there is no
+  `manager interventions` alias.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,

@@ -98,7 +98,8 @@ Each entry says what the module owns and the rules a change must respect.
   Archival is the janitor's per-message path exposed (`archive_board_message`,
   `ack_board_message`, `archive_topic`, `clear_inbox`) — **archive, never a
   read-state flag**, which is what keeps the board free of consumption marks.
-  `archived_records` is the one scan of `messages/archive/*.jsonl.gz`.
+  `archived_records` is the one scan of `messages/archive/*.jsonl.gz`, by inbox
+  (`to=`) or by board topic (`topic=`) — exactly one, the rule a `Message` obeys.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
   `report()` (the harness's return channel), and the path helpers runner, manager,
   views and CLI share. **Status is a free-form reported string**; only
@@ -180,11 +181,16 @@ Each entry says what the module owns and the rules a change must respect.
   and the TUI read it and nothing else, which is why they cannot disagree. It also
   renders a task row's marks once for every surface (`task_marker`, `task_badges`,
   `task_flags`, `usage_badge`), described by `status --legend`: a surface chooses
-  where to put them, never how to spell them. `task_history` is the post-hoc reader
-  over every file that records part of a task's life — bounded, fail-soft, records
-  nothing. Write affordances (TUI `n`, `m`, `s`, `c`, `a`) are thin calls into the
-  same code the CLI uses — **never view-local write logic** — and all go through
-  `_write`, so an unwritable home notifies instead of taking the dashboard down.
+  where to put them, never how to spell them. The two post-hoc readers live here
+  — `task_history` over every file that records part of a task's life, and
+  `agent_interventions` over an agent's journal read against its targets'
+  reports (`quorum agent interventions <name>`, no `manager` alias) — both
+  bounded, fail-soft, recording nothing, and **judging nothing**: the summary
+  counts facts (a report happened, a `done` report happened, a message is no
+  longer live), never whether an intervention worked. Write affordances (TUI
+  `n`, `m`, `s`, `c`, `a`) are thin calls into the same code the CLI uses —
+  **never view-local write logic** — and all go through `_write`, so an
+  unwritable home notifies instead of taking the dashboard down.
 - `cli/` — one module per command group (`task`, `agent`, `manager`, `board`,
   `project`, `prompt`, `integration`, `notify`, and `root` for
   `init/up/down/status/doctor/tui/usage`) over `_common.py`, which holds the typer
