@@ -164,7 +164,7 @@ a lock.
 ```bash
 quorum status                 # supervisor, agents, tasks, projects
 quorum task list              # every task, one line each
-quorum task show a3f2k9       # one task in full (--json for the raw record)
+quorum task show a3f2k9       # one task in full (--json for the same rows plus the record)
 quorum task log a3f2k9        # one run, rendered readably (-f follows a live one)
 quorum task history a3f2k9    # one task's whole life, oldest first
 quorum tui                    # all of it, live, in the terminal

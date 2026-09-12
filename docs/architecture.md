@@ -1375,8 +1375,9 @@ for what the forge last said about the PR), `task_flags` (`⚠` stranded work,
 `waiting-on <ids>`, `DEP-*`) and `usage_badge` (the spend plus `$!` or `$!
 GATED`). The CLI task table and the TUI task table call all four, which is
 what stops the two from disagreeing about where a dependency mark goes;
-`task show` calls `task_badges` for the two marks it has room for and spells
-the rest out in words, and `quorum status --legend` describes the set. A
+the task record rows call `task_badges` for the two marks they have room
+for and spell the rest out in words, and `quorum status --legend` describes
+the set. A
 surface may choose where it puts a mark — the TUI has no flags column, so it
 appends the flags to the status cell — but not how it is spelled.
 
@@ -1418,6 +1419,37 @@ No view holds a lock, spawns an agent tick, or writes state of its own
 invention. This revises the earlier "the views are pure readers whose one
 write affordance is a task nudge" stance (issue #11); the invariant that
 survived it is *thin, shared, no view-local write logic*.
+
+### The task record as rows
+
+`views.task_detail(home, task)` is the record itself, assembled once: the
+header, the labelled fields, both directions of the dependency graph, the
+runs and what they spent, the recent reports, the notebook and the handoff.
+Every row is `{section, kind, label, text, style, …}` — `section` one of
+`record`, `reports`, `notebook`, `handoff`, `more`; `kind` `heading`,
+`field` or `body`; `text` the rest of the line every surface prints
+(`views.detail_line`); `style` `warning` for the budget lines a surface
+colours; and the raw fields of its kind alongside, so a consumer reads
+`dependents` as a list rather than parsing it back out of a rendered line.
+The sources are the ones already on disk: the loaded `task.json`, the task
+listing (for the reverse read of `depends_on`), `reports.jsonl`, the
+notebook and the handoff file. It is a pure reader and fail-soft in the read
+model's way; like `task_history`, it records nothing.
+
+`quorum task show` prints those rows and `--json` dumps them under `detail`,
+so the two cannot say different things about one task — which they had
+already started doing: the text printed `dependents:` and the handoff body,
+and the early-returning `--json` path printed neither (#110, fixed by
+construction in #127). The raw record stays at the top level of that JSON
+because it is a read interface of its own: the packaged `babysitter` prompt
+takes a task's `workdir` straight off it. The TUI's transcript tab renders
+the `reports` rows through `detail_line`, the one fact it and `task show`
+both display.
+
+`quorum status` and the agent listing have the same shape at smaller scale
+and still render their own lines; they are tables over `views.*_rows`, where
+the cells are already views', so the drift this closes is not the one they
+have.
 
 ### Task history
 

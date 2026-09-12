@@ -337,6 +337,261 @@ def usage_badge(row: dict[str, Any]) -> str:
     return text
 
 
+# -- one rendering of a task record ----------------------------------------
+#
+# The whole record as rows, so the surfaces that print it cannot disagree
+# about what it says. `task show` used to hand-write every line and return
+# the bare record for `--json`, and the two had already drifted: the text
+# printed `dependents:` and the handoff body, the JSON printed neither.
+
+#: the sections of a task record, in the order `task_detail` emits them.
+_DETAIL_SECTIONS = ("record", "reports", "notebook", "handoff", "more")
+
+#: how many of a task's reports the record shows, newest last.
+DETAIL_REPORTS = 10
+
+
+def detail_line(row: dict[str, Any]) -> str:
+    """One `task_detail` row as the line every surface prints: a `heading` at
+    the margin, a `field` whose value is aligned one column past the longest
+    common label, a `body` line indented under the heading it belongs to."""
+    text = str(row.get("text", ""))
+    if row.get("kind") == "heading":
+        return text
+    label = row.get("label") or ""
+    if not label:
+        return f"  {text}"
+    return f"  {label + ':':<9} {text}"
+
+
+def task_detail(
+    home: Path,
+    task: Task,
+    config: Config | None = None,
+    reports: int = DETAIL_REPORTS,
+) -> list[dict[str, Any]]:
+    """One task's record in full, as rows: its fields, its dependencies in
+    both directions, what its runs spent, its recent reports, its notebook
+    and its handoff.
+
+    A pure reader like the rest of this module — `task.json` (already
+    loaded), the task listing (for dependents), `reports.jsonl`, the
+    notebook and the handoff file — and fail-soft in the same way: an
+    unreadable file costs the rows it held, never the list.
+
+    Every row carries `section` (one of `_DETAIL_SECTIONS`), `kind`
+    (`heading`, `field` or `body`), `label`, `text` (the rest of the line
+    every surface prints — `detail_line`) and `style` ("" or `warning`),
+    plus the raw fields of its kind, so a consumer reads a fact instead of
+    parsing a line back out of a rendered string.
+    """
+    from . import notes as notes_mod
+    from .tasks import dependency_state, read_handoff
+
+    home = Path(home)
+    if config is None:
+        config = load_config_or_default(home)
+    rows: list[dict[str, Any]] = []
+
+    def add(section: str, kind: str, label: str, text: str, **fields: Any) -> None:
+        rows.append(
+            {
+                "section": section,
+                "kind": kind,
+                "label": label,
+                "text": text,
+                "style": fields.pop("style", ""),
+                **fields,
+            }
+        )
+
+    running = runner_alive(home, task.id)
+    # The badges every listing shows, then the words this surface has room
+    # for. `task_badges` reads a row, and the two fields it wants are on the
+    # task itself.
+    state = task.status + task_badges({"perpetual": task.perpetual, "pr_state": task.pr_state})
+    if task.attached:
+        state += " (attached to a live session)"
+    elif running:
+        state += " (runner alive)"
+    if task.perpetual:
+        state += " [perpetual — only you end it]"
+    add("record", "heading", "", f"task {task.short_id}  ({task.id})", id=task.id, id_short=task.short_id)
+    add("record", "field", "project", task.project, project=task.project)
+    add(
+        "record",
+        "field",
+        "status",
+        state,
+        status=task.status,
+        running=running,
+        attached=task.attached,
+        perpetual=task.perpetual,
+    )
+    add("record", "field", "harness", task.harness, harness=task.harness)
+    add("record", "field", "prompt", task.prompt, prompt=task.prompt)
+    add(
+        "record",
+        "field",
+        "workdir",
+        task.workdir or "(worktree created on first run)",
+        workdir=task.workdir,
+    )
+    if task.session:
+        add("record", "field", "session", task.session, session=task.session)
+    if task.issue_url:
+        # The full url here, `#62` everywhere a listing has one column: this
+        # is the page a human opens.
+        add("record", "field", "issue", task.issue_url, issue_url=task.issue_url)
+    if task.pr_url:
+        add("record", "field", "pr", task.pr_url, pr_url=task.pr_url)
+    if task.pr_state:
+        # Observed by the manager tick, so it can be older than "now" — say
+        # when, rather than implying it was just checked.
+        add(
+            "record",
+            "field",
+            "pr state",
+            f"{task.pr_state} (observed {task.pr_state_at})",
+            pr_state=task.pr_state,
+            pr_state_at=task.pr_state_at,
+        )
+    all_tasks = TaskStore(home).list()
+    if task.depends_on:
+        deps = dependency_state(task, {t.id: t for t in all_tasks})
+        text = ", ".join(short_handle(d) for d in task.depends_on)
+        if deps["waiting_on"]:
+            text += f"  (waiting on {', '.join(deps['waiting_on'])})"
+        if deps["failed"]:
+            text += f"  DEP-FAILED: {', '.join(deps['failed'])}"
+        if deps["missing"]:
+            text += f"  DEP-MISSING: {', '.join(deps['missing'])}"
+        if deps["cycle"]:
+            text += "  DEP-CYCLE"
+        add(
+            "record",
+            "field",
+            "after",
+            text,
+            depends_on=[short_handle(d) for d in task.depends_on],
+            waiting_on=deps["waiting_on"],
+            dep_failed=deps["failed"],
+            dep_missing=deps["missing"],
+            dep_cycle=deps["cycle"],
+        )
+    # The other direction: who is waiting on this task. This is how a running
+    # task learns it should leave a handoff — the preamble tells it to look
+    # here.
+    dependents = [t.short_id for t in all_tasks if task.id in t.depends_on]
+    if dependents:
+        add(
+            "record",
+            "field",
+            "dependents",
+            f"{', '.join(dependents)}  (leave them a handoff: "
+            f"`task report {task.short_id} --status done --handoff <file|->`)",
+            dependents=dependents,
+        )
+    if task.runs:
+        last = task.runs[-1]
+        add(
+            "record",
+            "field",
+            "runs",
+            f"{len(task.runs)} (last: {last.started_at} → {last.ended_at or 'running'}, "
+            f"exit {last.exit_code if last.exit_code is not None else '—'})",
+            runs=len(task.runs),
+            last_started_at=last.started_at,
+            last_ended_at=last.ended_at,
+            last_exit_code=last.exit_code,
+        )
+        spent = usage.total(r.usage for r in task.runs)
+        if spent_text := usage.describe(spent):
+            add(
+                "record",
+                "field",
+                "usage",
+                f"{spent_text} (as reported by the harness)",
+                usage=spent,
+                usage_text=spent_text,
+            )
+        budget = config.tasks
+        for note in usage.run_overages(
+            task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+        ):
+            add("record", "field", "budget", note, style="warning", budget_overage=note)
+        if usage.last_run_overages(
+            task.runs, budget.max_cost_per_run, budget.max_tokens_per_run
+        ):
+            add(
+                "record",
+                "field",
+                "gated",
+                "the last run exceeded its budget — `task run` refuses the "
+                "next one (--force overrides)",
+                style="warning",
+                budget_gated=True,
+            )
+    add("record", "field", "updated", task.updated_at, updated_at=task.updated_at)
+    entries = read_reports(home, task.id, limit=reports)
+    if entries:
+        add("reports", "heading", "", "recent reports:", count=len(entries))
+        for r in entries:
+            add(
+                "reports",
+                "body",
+                "",
+                f"[{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}",
+                at=r.get("at", ""),
+                status=r.get("status", ""),
+                note=r.get("text", ""),
+                pr_url=r.get("pr_url"),
+            )
+    # The notebook, exactly as the runner renders it into the task's prompt
+    # (header line included, so what a reader sees here is what the harness
+    # reads). The digest never carries it: the manager reads reports.
+    book = notes_mod.task_notebook(home, task.id)
+    standing = book.active()
+    kept = book.render_notes(standing, unscanned=book.unscanned_bytes())
+    if kept:
+        add("notebook", "heading", "", "notebook:", count=len(standing))
+        for line in kept:
+            add("notebook", "body", "", line)
+    if not standing:
+        # A notebook can render lines and still hold no live note — the file
+        # has outgrown its read window — so the hint hangs off the notes, not
+        # off the rendering.
+        empty = (
+            f'(empty — `quorum task remember {task.short_id} "…"` keeps state '
+            "between its runs)"
+        )
+        if kept:
+            add("notebook", "body", "", empty, empty=True)
+        else:
+            add("notebook", "field", "notebook", empty, empty=True)
+    handoff = read_handoff(home, task.id)
+    if handoff is not None:
+        # In full: dependents see it capped in their prompt, and this is
+        # where the clip points them.
+        add(
+            "handoff",
+            "heading",
+            "",
+            "handoff (what this task left for the tasks that depend on it):",
+            handoff=handoff,
+        )
+        for line in handoff.rstrip("\n").splitlines():
+            add("handoff", "body", "", line)
+    add(
+        "more",
+        "heading",
+        "",
+        f"more: `quorum task log {task.short_id}` for the transcript, "
+        "`--json` for these rows and the raw record",
+    )
+    return rows
+
+
 # -- task history ----------------------------------------------------------
 #
 # One chronological list of what happened to a task, read back out of the
