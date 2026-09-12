@@ -1065,9 +1065,22 @@ House rules ("run one task at a time", "always open draft PRs") belong in an
 overlay. Rewriting how supervision fundamentally works belongs in the file.
 
 ```bash
-quorum prompt list                # each template: default, seeded, or edited (+ overlay)
+quorum prompt list                # each template's state, and its overlay
 quorum prompt diff manager        # your copy vs the packaged default
 ```
+
+`prompt list` names one of three states per template, the same three
+`quorum doctor` reports — both ask the seed record, so they cannot disagree:
+
+```
+  manager          seeded, matches the packaged default
+  task-perpetual   seeded by an older quorum, never edited — `quorum init` upgrades it
+  task-preamble    edited — `quorum prompt diff task-preamble` vs the packaged default
+```
+
+Only the third one is yours to deal with. The second is what a home looks like
+after upgrading quorum but not re-running `quorum init`, and one `quorum init`
+clears it.
 
 **Migrating a home that already edited a prompt** — one step, and worth doing,
 because an edited `manager.md` from a few releases ago has no policy for

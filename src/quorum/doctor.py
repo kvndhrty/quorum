@@ -499,10 +499,9 @@ def _prompt_overlays(home: Path) -> list[Check]:
 def check_prompts(home: Path) -> list[Check]:
     """Home prompt copies against the packaged defaults.
 
-    Classification is `home.classify_prompts` — a loop over the same
-    `home.classify_prompt` that `quorum init` seeds by and `quorum prompt
-    list` displays, seed record and all — so doctor can never disagree with
-    either about what "edited" means.
+    Classification is `home.classify_prompts` — the same function `quorum
+    init` seeds by and `quorum prompt list` displays, seed record and all —
+    so doctor can never disagree with either about what "edited" means.
     """
     states = home_mod.classify_prompts(Path(home))
     if not states:
@@ -527,6 +526,16 @@ def check_prompts(home: Path) -> list[Check]:
                     f"prompts/{filename} is an older packaged default, never edited — "
                     "this home is running last release's policy",
                     "run `quorum init`: it upgrades unedited seeds in place",
+                )
+            )
+        elif state == "unreadable":
+            checks.append(
+                problem(
+                    name,
+                    f"prompts/{filename} cannot be read (not UTF-8, or no permission) — "
+                    "every render of it fails",
+                    "fix the file, or delete it and run `quorum init` to seed the "
+                    "packaged default again",
                 )
             )
         else:  # "edited"
