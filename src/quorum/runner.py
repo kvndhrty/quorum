@@ -13,10 +13,7 @@ A run is the unit of control for a generic harness. The runner:
 5. streams stdout into `transcript.jsonl` line by line, capturing a
    `session_id` (or codex `thread_id`) if the harness emits one (enables
    `resume` templates),
-6. optionally (`[tasks].auto_commit`) commits anything the harness left
-   uncommitted in its worktree — a mechanical safety net, since branches
-   outlive worktrees,
-7. records the run's exit (and reported usage) in task.json and releases
+6. records the run's exit (and reported usage) in task.json and releases
    the lock.
 
 A harness with `inject = "stream-json"` speaks over stdin instead of argv: a
@@ -55,7 +52,6 @@ from .config import Config, HarnessConfig, TasksConfig
 from .messages import Message, MessageBus
 from .projects import ProjectRegistry
 from .tasks import (
-    TERMINAL_STATUSES,
     Task,
     TaskRun,
     TaskStore,
@@ -500,7 +496,6 @@ def dependency_note(home: Path, task: Task) -> str | None:
     )
 
 
-_PERPETUAL_SLOT = re.compile(r"(?<!\{)\{perpetual\}(?!\})")
 _ISSUE_SLOT = re.compile(r"(?<!\{)\{issue\}(?!\})")
 
 
@@ -543,37 +538,22 @@ def compose_prompt(
 ) -> str:
     # `project` is the {project} block, passed in when the caller had to read
     # it earlier than this (see `run`); None means read it here.
-    # A perpetual task gets an extra block in place of the preamble's
-    # {perpetual} placeholder: it never reaches "done", so its delivery step
-    # is commit + push every cycle (prompts/task-perpetual.md, user-editable
-    # like every other template). An ordinary task substitutes nothing.
-    perpetual = (
-        prompts.render(home, "task-perpetual", task_id=task.short_id).strip()
-        if task.perpetual
-        else ""
-    )
     issue = issue_note(task)
     preamble = prompts.render(
         home,
         "task-preamble",
         task_id=task.short_id,
         project_path=str(workdir),
-        perpetual=perpetual,
         issue=issue,
         project=project_block(home, task) if project is None else project,
     )
     # An edited preamble from before the placeholder existed never
     # substitutes it (format_map preserves unknown keys but cannot invent
-    # one), and a perpetual task that silently gets the ordinary "report
-    # done" instructions ends on its first cycle. Append the block instead.
-    # (The header documents the key as an escaped `{{perpetual}}`, so look
-    # for an *unescaped* placeholder, not the substring.)
+    # one), so a task queued from an issue would never be told where it came
+    # from. Append the line instead. (The header documents the key as an
+    # escaped `{{issue}}`, so look for an *unescaped* placeholder, not the
+    # substring.)
     template = prompts.load(home, "task-preamble")
-    if perpetual and not _PERPETUAL_SLOT.search(template):
-        preamble = f"{preamble.rstrip()}\n\n{perpetual}"
-    # Same story for the issue line, one placeholder younger: a preamble
-    # edited before `{issue}` existed would otherwise never tell the harness
-    # where the task came from.
     if issue and not _ISSUE_SLOT.search(template):
         preamble = f"{preamble.rstrip()}\n\n{issue}"
     parts = [
@@ -616,127 +596,6 @@ def build_harness_argv(harness: HarnessConfig, prompt: str, session: str | None 
     if not saw_prompt:
         argv.append(prompt)
     return argv
-
-
-AUTO_COMMIT_MESSAGE = "quorum: auto-commit uncommitted work after run"
-
-
-def _merge_or_rebase_in_progress(workdir: Path) -> bool:
-    git_dir = _git(workdir, "rev-parse", "--absolute-git-dir")
-    if git_dir.returncode != 0:
-        return False  # the status call right after fails loudly instead
-    gd = Path(git_dir.stdout.strip())
-    return any(
-        (gd / marker).exists()
-        for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "rebase-merge", "rebase-apply")
-    )
-
-
-def auto_commit_workdir(workdir: Path) -> str:
-    """Commit everything a run left uncommitted in `workdir`.
-
-    Returns a one-line note for the transcript, empty when the tree was
-    already clean. Raises `RunnerError` when git refuses at any step (no
-    identity configured, a stale index lock) — the caller turns that into a
-    note too, because a failed safety net must never cost the run its record.
-
-    Staging is `git add -A`, so untracked files count: a harness that crashed
-    mid-edit usually leaves new files, and those are exactly the work worth
-    saving (`--untracked-files=all` because a repo-level
-    `status.showUntrackedFiles no` would otherwise hide them — an
-    untracked-only crash is the net's core case). The commit runs with
-    `--no-verify` and signing off: hooks and pinentry belong to attended
-    commits, and here a failing hook or a signing prompt would defeat the
-    net in exactly the crashed-harness case it exists for.
-
-    Two states it refuses to touch, raising instead (the tree stays dirty,
-    which `workdir_git_state` keeps reporting as stranded work): a detached
-    HEAD, where a commit would be reachable from no branch and lost with the
-    worktree; and an in-progress merge/rebase/cherry-pick, which `git add
-    -A` + commit would *conclude*, conflict markers and all.
-
-    Committing is the whole net — pushing is deliberately out of scope (it
-    would assume a remote and credentials, and an unpushed branch is
-    already surfaced as stranded work by `tasks.workdir_git_state`).
-    """
-    status = _git(workdir, "status", "--porcelain", "--untracked-files=all")
-    if status.returncode != 0:
-        raise RunnerError(f"git status failed: {status.stderr.strip()[:200]}")
-    if not any(line.strip() for line in status.stdout.splitlines()):
-        return ""
-    branch = _git(workdir, "symbolic-ref", "-q", "--short", "HEAD")
-    if branch.returncode != 0:
-        raise RunnerError("HEAD is detached — a commit here would belong to no branch")
-    if _merge_or_rebase_in_progress(workdir):
-        raise RunnerError(
-            "a merge/rebase/cherry-pick is in progress — committing would conclude it"
-        )
-    add = _git(workdir, "add", "-A")
-    if add.returncode != 0:
-        raise RunnerError(f"git add -A failed: {add.stderr.strip()[:200]}")
-    staged = _git(workdir, "diff", "--cached", "--name-only")
-    count = sum(1 for line in staged.stdout.splitlines() if line.strip())
-    if staged.returncode != 0 or count == 0:
-        return ""
-    commit = _git(
-        workdir, "-c", "commit.gpgsign=false", "commit", "--no-verify", "-m", AUTO_COMMIT_MESSAGE
-    )
-    if commit.returncode != 0:
-        detail = (commit.stderr.strip() or commit.stdout.strip())[:200]
-        raise RunnerError(f"git commit failed: {detail}")
-    head = _git(workdir, "rev-parse", "--short", "HEAD")
-    sha = head.stdout.strip() if head.returncode == 0 else "?"
-    return f"auto-committed {count} path(s) as {sha}"
-
-
-def _maybe_auto_commit(
-    home: Path, config: Config, store: TaskStore, task: Task, workdir: Path
-) -> str | None:
-    """Run the opt-in safety net when this run's tree is quorum's to commit.
-
-    Guards, in order: the flag; the workdir must be the task's own worktree,
-    compared `resolve()`d on both sides — the default `~/.quorum` home is
-    not resolved while `--home` is, and a symlinked spelling must not
-    silently disable the net (a `--no-worktree` task runs in the user's
-    checkout, which quorum does not own); a task whose harness already
-    reported a terminal status keeps its tree exactly as the harness left
-    it — sweeping stray scratch files into a *finished* task's branch would
-    re-flag it as stranded and push junk toward its PR; and a nono-sandboxed
-    runner cannot run git at all (the capability set blocks it), so it says
-    that once per run instead of failing cryptically.
-
-    Mechanical, not a judgement: the runner still never sets status.
-    Failures are recorded rather than raised — the tree simply stays dirty,
-    which is the state `workdir_git_state` reports as STRANDED-WORK for the
-    manager to chase. Returns the note, which the caller also records
-    durably on the `TaskRun`; None when the net did not fire.
-    """
-    if not config.tasks.auto_commit:
-        return None
-    try:
-        owned = workdir.resolve() == worktree_path(home, task.id).resolve()
-    except OSError:
-        owned = False
-    if not owned:
-        return None
-    fresh = store.get(task.id)
-    reported = ((fresh.status if fresh else task.status) or "").strip().lower()
-    if reported in TERMINAL_STATUSES:
-        return None
-    if config.sandbox.use_nono:
-        note = (
-            "auto-commit skipped: the sandboxed runner cannot run git "
-            "(docs/guide.md#sandboxing) — uncommitted work stays visible as stranded"
-        )
-    else:
-        try:
-            note = auto_commit_workdir(workdir)
-        except (RunnerError, OSError, subprocess.SubprocessError) as e:
-            note = f"auto-commit failed: {e}"
-    if not note:
-        return None
-    note_transcript(transcript_path(home, task.id), note)
-    return note
 
 
 def stream_transcript(
@@ -927,13 +786,10 @@ def run_task(
             exit_code = proc.wait()
             stalled = watchdog is not None and watchdog.stalled
 
-        auto_commit_note = _maybe_auto_commit(home, config, store, task, workdir)
-
         run = TaskRun(
             started_at=fsio.iso(started),
             ended_at=fsio.iso(fsio.utc_now()),
             exit_code=exit_code,
-            auto_commit=auto_commit_note,
             usage=spend.result(),
             stalled=stalled,
             fresh_session=fresh_session,

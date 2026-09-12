@@ -45,8 +45,7 @@ quorum up ──► Supervisor
               │   ├─ job: <user plugins…>         heartbeats, error posts,
               │   │                               auto-pause or escalation,
               │   ├─ job: _control (15s: claims supervisor inbox —
-              │   │        agent.pause / agent.resume / agent.run-now /
-              │   │        agent.reload)
+              │   │        agent.reload / agent.resume)
               │   └─ job: _janitor (hourly: archival, stale-claim recovery)
               └─ supervisor.lock (pid file, touched every 60s = liveness)
 
@@ -85,9 +84,9 @@ supervisor.lock                   pid, start time, quorum's version;
                                   mtime = liveness heartbeat
 projects/<slug>.json              canonical project records
 tasks/<id>/task.json              task spec, reported status, session, runs
-                                  (times, exit code, auto-commit note, usage),
-                                  attached / perpetual, depends_on, pr_state /
-                                  pr_state_at, issue_url
+                                  (times, exit code, usage), attached,
+                                  depends_on, pr_state / pr_state_at,
+                                  issue_url
 tasks/<id>/attached.json          attached-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -167,8 +166,8 @@ The **home overlay** removes the reason to take the cliff.
 `prompts/<name>.local.md` is user-owned, never seeded, never read by `init`,
 never upgraded. `render` merges it into the resolved template at the first
 unescaped `{local}` slot, which the packaged `manager.md` (before "How to
-work", so house rules outrank the general guidance), `task-preamble.md` and
-`task-perpetual.md` carry; it is prepended when the template has no slot,
+work", so house rules outrank the general guidance) and `task-preamble.md`
+carry; it is prepended when the template has no slot,
 which is the case of a home that rewrote `<name>.md` before the slot
 existed, where a silently dropped overlay would be the worse failure; and it
 renders as nothing at all when absent or blank, taking the slot's own line
@@ -179,9 +178,10 @@ or decoded renders as no overlay, because `render` is on the manager tick
 and every task run, and one stray byte in a user-owned file must not fail
 supervision forever. Reading the *template* stays loud — it is the prompt
 itself, and silently falling back to the packaged default would hide the
-fork. `quorum prompt list` reports either problem, marking an unreadable
-file `?` and listing the rest; with `quorum prompt diff <name>` it makes the
-state of both levers visible. `local` is otherwise an ordinary placeholder
+fork. `quorum doctor` reports either problem — one line per template with its
+state (`default` / `upgradable` / `edited` / `unreadable`, from the single
+`home.classify_prompt`), one per overlay saying where it lands — and `quorum
+prompt diff <name>` shows the difference behind an `edited` line. `local` is otherwise an ordinary placeholder
 key: pass it explicitly and it wins over the file, and rewriting `<name>.md`
 still overrides a whole template, so the overlay is a second, cheaper lever
 rather than a replacement.
@@ -211,9 +211,9 @@ argument for that reason.
 same empty-slot removal, but **no prepend fallback**. A home overlay is
 policy the home already had, so rescuing it into a slotless template is
 right; a project overlay is new, and there is no defensible place to put it
-in a template the user rewrote. `quorum prompt list` says so instead: it
-lists every project that contributes one, marks one it cannot decode `?`,
-and warns when the home's `task-preamble.md` has no `{project}` slot.
+in a template the user rewrote. `quorum doctor` says so instead: it lists
+every project that contributes one, flags one it cannot decode, and makes a
+`task-preamble.md` with no `{project}` slot a `✗`.
 
 The full order for the task preamble is therefore: packaged default → home
 copy (wins outright) → home overlay (at `{local}`) → project notes plus
@@ -249,40 +249,8 @@ durable record (`tasks/<id>/task.json`) plus a sequence of runs, and
    `transcript.jsonl`, capturing a `session_id` (or codex-style
    `thread_id`) from any JSON event that carries one, and whatever usage
    its result events report,
-6. optionally auto-commit,
-7. append the run (exit code, timestamps, usage) to `task.json`; release
+6. append the run (exit code, timestamps, usage) to `task.json`; release
    the lock.
-
-**Auto-commit (`[tasks].auto_commit`, default off).** The delivery protocol
-in the task preamble and the `STRANDED-WORK` flag in views and the digest
-are advisory: neither *guarantees* work survives a harness that crashes
-mid-edit or ignores its instructions. This setting is the hard guarantee —
-after the harness exits, if the working tree is dirty, the runner does `git
-add -A` and commits it. Branches outlive worktrees, so the work can then
-only be found, never lost.
-
-It is deliberately narrow. It fires only inside a task's *own* worktree
-(paths compared `resolve()`d, so a symlinked home spelling can't disable
-it), never in a `--no-worktree` task's checkout, which quorum does not own,
-and never on a task whose harness already reported a terminal status, since
-sweeping scratch files into a finished branch would re-flag a done task as
-stranded and push junk toward its PR. It never pushes: that would assume a
-remote and credentials, and an unpushed branch is already reported as
-stranded work. It is mechanical, not a judgement — the runner still never
-sets status. For messy crash states, `status` and staging use
-`--untracked-files=all`, so a repo-level `status.showUntrackedFiles no`
-cannot hide an untracked-only crash, and the commit runs `--no-verify` with
-signing off, because a failing pre-commit hook or a pinentry prompt would
-defeat the guarantee in exactly the unattended case it exists for. Two
-states it refuses to conclude, leaving the tree dirty and flagged: a
-detached HEAD (the commit would belong to no branch and die with the
-worktree) and an in-progress merge/rebase/cherry-pick (`git add -A` plus
-commit would finish it, conflict markers and all); under
-`[sandbox].use_nono` it cannot run git at all, so it skips with a transcript
-note. What happened is recorded twice — a transcript line and `auto_commit`
-on the run's entry in `task.json` — and a failure is recorded the same two
-ways rather than raised: the tree stays dirty, which is the state
-`workdir_git_state` already reports.
 
 **Token/cost usage (`usage.py`).** Harnesses already say what a run spent —
 claude's terminal `result` event carries `total_cost_usd` and a `usage`
@@ -349,7 +317,7 @@ store.
 answer "what did this run cost"; the questions asked after a week are
 aggregate — what did this project cost, is one harness cheaper per merged
 PR, how long from queue to merge. `quorum usage [--by
-project|harness|week|agent] [--since 7d] [--json]` answers them as a **pure
+project|harness|week|agent] [--since 7d]` answers them as a **pure
 reader with no cache** (#88): it opens `tasks/<id>/task.json`, each task's
 `reports.jsonl` and the agent usage logs, recomputed on every call, so it
 works with the supervisor stopped. `reports.jsonl` is read for one fact —
@@ -511,7 +479,7 @@ mechanical version, and needs no manager at all: `runner.StallWatchdog`
 watches the stdout stream the runner is already reading, and when no line
 arrives for N seconds it notes the stall in the transcript, SIGTERMs the
 harness (SIGKILL after the same grace) and lets the run end the ordinary way
-— so the run record, auto-commit and lock release all still happen, with
+— so the run record and the lock release both still happen, with
 `stalled = true` on the record. That turns a hang into a dead runner with a
 non-terminal status, which supervision already handles well. It counts
 silence, not progress, so the threshold has to sit above the longest silent
@@ -528,46 +496,6 @@ All three are visible in the digest as `stopped=N` / `fresh_sessions=N` /
 `last-run=stalled` on the task line, which is how the manager knows what it
 has already tried without relying on its bounded journal window.
 
-### Perpetual tasks
-
-(User-facing how-to: [guide.md](guide.md#perpetual-tasks).)
-
-`quorum task add --perpetual` sets `perpetual = true` on the task record.
-Nothing about the substrate changes: the runner still does one run, status
-is still a free-form reported word, and the manager still relaunches any
-task whose runner died with a non-terminal status — which is *already* an
-endless loop for a task that never reports one. The flag exists because
-three readings of that substrate were wrong for a task not trying to finish:
-
-- **the run preamble.** `compose_prompt` substitutes the preamble's
-  `{perpetual}` placeholder with `prompts/task-perpetual.md` (empty for an
-  ordinary task): work in cycles, commit and push *every* cycle rather than
-  "before finishing", report a changing status word per cycle so an
-  unchanging one still means something, and never report `done` or
-  `cancelled`. Both files are ordinary user-editable prompts.
-- **the digest.** The task line carries `perpetual=true` (only when true, so
-  ordinary lines are untouched), and the `possible-loop` observation is
-  **suppressed** for it: that flag reads repetition in a live run as a
-  symptom, and for a task whose job is a repeating cycle it would fire every
-  tick, teaching the manager to ignore a signal that still means something
-  everywhere else.
-- **the manager prompt.** `prompts/manager.md` is told to relaunch it
-  forever, to never read a long `runs=` count or a cycling status as stuck,
-  to never cancel it (only the user ends it, with `task cancel`), and to
-  judge it on its per-cycle reports and git state.
-
-Views badge it (`∞`) so "still running after 40 runs" reads as working. Two
-consequences are worth knowing before queuing one. Runs reuse the task's
-worktree and its captured session id, so a `resume` template hands the
-harness an ever-growing context; expect a session reset eventually, which is
-clearing `session` in `tasks/<id>/task.json` and costs no work, since the
-worktree keeps it. And the manager's tick cadence is the floor on cycle
-latency: nothing relaunches a perpetual task between ticks, so with the
-default `every 5m` schedule a cycle that ends is idle for up to five
-minutes. Tighten the schedule if the loop needs to be tighter; there is
-deliberately no self-relaunch path in the runner, which would be a second
-scheduler.
-
 ### Task dependencies
 
 (User-facing how-to: [guide.md](guide.md#dependencies-and-handoffs).)
@@ -582,10 +510,8 @@ construction, since ids are global.
 - **Validation happens once, at `task add`** (`tasks.resolve_dependencies`):
   handles resolve through the same grammar as everything else and are stored
   expanded, an unknown or ambiguous handle fails the command, and a task
-  cannot depend on itself. Depending on a **perpetual** task is refused too:
-  it never reaches a terminal status, so the dependent would wait forever. A
-  dependency must already exist, so a cycle is only reachable by
-  hand-editing `task.json`.
+  cannot depend on itself. A dependency must already exist, so a cycle is
+  only reachable by hand-editing `task.json`.
 - **Reading is total** (`tasks.dependency_state`, pure over an
   already-loaded task listing, so every reader stays a file reader):
   `waiting_on` = dependencies that have not reached a terminal status;
@@ -702,8 +628,8 @@ generalized to a task, on the same substrate and under the same rules:
   `task show` printed. The identity differs too: an attached session runs
   under the user's own shell with no `QUORUM_ACTOR` set, so its `task
   remember` is admitted as a human and its notes carry `sender: user`.
-  Closing this would mean `task hook-session-start` injecting the notebook
-  the way `hook-stop` injects pending guidance; that is not done.
+  Closing this would mean `task hook session-start` injecting the notebook
+  the way `task hook stop` injects pending guidance; that is not done.
 - **Policy.** The preamble says what the notebook is for — state worth
   having after a restart, not a log — and to rewrite one superseding note
   rather than append when the list grows. Nothing consolidates in Python;
@@ -729,8 +655,8 @@ substrate rail in the same class as `runner.lock`, protecting the user's
 live checkout from a racing headless run. `quorum task detach` lifts it.
 
 Liveness for a run quorum didn't spawn comes from `tasks/<id>/attached.json`,
-rewritten by harness-side hooks (`quorum task hook-session-start`,
-`hook-stop`, `hook-session-end`) with the latest lifecycle event. The hook
+rewritten by harness-side hooks (`quorum task hook session-start`,
+`stop`, `session-end`) with the latest lifecycle event. The hook
 entry points are harness-agnostic — JSON with `session_id`/`cwd` on stdin,
 matched to an attached task by exact session id first, then working
 directory. The cwd fallback is how an id-less adoption *learns* its session
@@ -740,7 +666,7 @@ session id. `integrations/` ships an adapter per harness: `claude-code/` and
 `codex/` wire native Stop/SessionEnd(/SessionStart) hooks straight to the
 CLI, both speaking the same stdin payload and `{"decision": "block"}`
 continuation protocol, while `opencode/` (no hook commands; an in-process
-plugin bus instead) ships a fail-soft JS plugin that calls `hook-stop
+plugin bus instead) ships a fail-soft JS plugin that calls `task hook stop
 --format text` on idle events and injects whatever the CLI prints as a user
 turn. Either way the digest renders attached tasks in their own section, and
 guidance flows through the ordinary task inbox: the stop/idle hook claims
@@ -766,17 +692,17 @@ exactly-once across all delivery points.
 Quorum accumulates: a finished task keeps its directory, its worktree, and
 its `quorum/<short-id>` branch forever, and the board grows until the hourly
 janitor's retention window catches up. `quorum task prune`, `quorum board
-clear <topic>`, `quorum board ack <message-id>` and `quorum task inbox <id>
---clear` are the hand-driven tidies, and all follow the bus's rule:
+clear <topic>`, `quorum board clear --id <message-id>` and `quorum task inbox
+<id> --clear` are the hand-driven tidies, and all follow the bus's rule:
 **archive, never delete.** A pruned task's directory is *moved* to
 `tasks/.archive/<id>/` by one `os.rename`; the name is dot-prefixed on
 purpose, because `TaskStore.list` already skips dot-entries and every reader
 goes through it, so an archived task leaves all of them with no code change
 anywhere, and restoring one is `mv` in the other direction. Cleared board
 and inbox messages go into the same `messages/archive/YYYY-MM.jsonl.gz` the
-janitor writes, keeping their `created_at`; `board ack` takes one message id
-and `board clear` a whole topic, one spelling each, and `inbox --clear`
-touches `new/` only, because a message in `cur/` has a claimant.
+janitor writes, keeping their `created_at`; one `board clear` takes either a
+whole topic or, with `--id`, a single message, and `inbox --clear` touches
+`new/` only, because a message in `cur/` has a claimant.
 
 `prune.py` splits into total readers and two doers — `select()` (pure, over
 an already-loaded task list), `refusal()`, `dependents_first()` (pure batch
@@ -820,52 +746,6 @@ plan and touches nothing. A prune journals one entry through `_actor_guard`,
 not one per task: it is a single decision, and per-task entries would burn
 an agent's action cap mid-sweep and leave the tidy half-finished.
 
-### Exporting a task: one archive for sharing a run
-
-Everything about a task is on disk, in three places: `tasks/<id>/`,
-`messages/inbox/task-<id>/` (guidance waiting or claimed) and — once a run
-has archived it — `messages/archive/YYYY-MM.jsonl.gz`, where delivered
-guidance sits mixed with every other message. `quorum task export <id>
-[--out <path>] [--with-worktree-diff] [--redact]` collects them into one
-`.tar.gz`, so sharing a run or attaching it to a bug report does not mean
-knowing that layout: the task directory whole (tmp files skipped), an
-`export.json` manifest, `inbox/new/` and `inbox/cur/`, an
-`inbox/delivered.jsonl` of archived messages addressed to this task (read
-from the months of its creation onward, since a message can only be archived
-at or after it), and optionally `worktree.diff`.
-
-It is a reader of the same class as `prune.py`'s plan half, and the theme's
-stances (#88) hold: **no new state** — the manifest and `delivered.jsonl`
-are composed in memory; **read-only** apart from the output file, refused
-inside the home (an archive under `tasks/<id>/` would be swept into the next
-export of that task) and refused over an existing file; **nothing from the
-project directory**. That last one is why the diff is refused, loudly, for
-an attached or `--no-worktree` task: its working directory is the user's
-checkout, and the person asked for the diff, so silently omitting it would
-be the wrong kind of quiet. For a task with a quorum-made worktree,
-`worktree.diff` is `git diff` against the merge base with the same base
-`worktree_changed_paths` uses, plus one `git diff --no-index` per untracked
-file — read-only plumbing, no fetch. `runner.lock` is the one file left out:
-it is a pid on this machine, not a fact about the task, and an unpacked
-archive must not look like it holds a live run. Member ownership is
-stripped, and the archive is written beside its final name and renamed into
-place.
-
-`--redact` exists because tool results are where transcripts carry file
-contents, command output and secrets read off disk. It rewrites
-`transcript.jsonl` in the archive (never on disk), keeping the assistant's
-text, its thinking, and every tool *call* — name and arguments, which is how
-a reader follows what the run did — and replacing each tool *result* with a
-marker. The walk is structural and loose in the mold of `loop_signal`'s
-tool-call extraction: a result-kind dict loses its output fields and keeps
-its ids, its remaining keys are walked rather than copied so a payload filed
-under a name this module does not know is still reached, and past a depth
-bound a node is replaced rather than kept, because a redaction's failure
-direction has to be "dropped". A plain-text harness's `line` entries have no
-structure to redact and are kept verbatim — the command says how many, so
-nobody mistakes a `--redact` of an opencode transcript for a clean one.
-There is no `--redact` of reports or guidance, which are what people wrote.
-
 ## The manager
 
 (User-facing how-to: [guide.md](guide.md#the-manager).)
@@ -879,9 +759,8 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
 2. **Digest** (`agents/manager.py::build_digest`, a pure function over
    files): every active task's status, runner liveness, quiet time, recent
    reports and transcript tail, plus a `git:` line when its working
-   directory holds uncommitted changes or unpushed commits, and
-   `perpetual=true` on a task not meant to finish; attached sessions in
-   their own clearly-labeled section (last hook event age, git state,
+   directory holds uncommitted changes or unpushed commits; attached
+   sessions in their own clearly-labeled section (last hook event age, git state,
    reports — never runner liveness, which they don't have); recently
    finished tasks, marked `STRANDED-WORK dirty=N unpushed=M` when they ended
    with work left undelivered in the worktree, which the default manager
@@ -897,7 +776,7 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    lands in the journal as `cap.hit`) — its **notebook**, its recent
    **journal** with then-vs-now status per target (the anti-loop memory),
    and any user guidance claimed from `messages/inbox/manager/` (`quorum
-   manager tell`). Every one of those is an observation the prompt judges;
+   board post --to manager`). Every one of those is an observation the prompt judges;
    none is a rail — nothing pauses, throttles or changes the cap. Claimed
    guidance is acknowledged only after a successful run; a crash rejects it
    back to `new/`. If the manager's harness sets `inject = "stream-json"`,
@@ -913,7 +792,7 @@ policy is a prompt (`prompts/manager.md`), not Python. Each tick:
    manager keeping its historical `state/manager/` spot.
 
 The harness acts with full authority through the quorum CLI — `task
-add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`, and
+add/run/nudge/cancel`, `agent resume`, `board post`, and
 `quorum manager note` to journal a reason. **Every mutating CLI action taken
 under the manager's env tag is journaled automatically** (action, target,
 the target's status at action time, run id) *before* it executes — ground
@@ -975,8 +854,7 @@ binding one on payload-heavy transcripts — extracts tool calls, and scores
 the last `LOOP_WINDOW_CALLS` (12) of them. The evidence must be current:
 only a live runner is scored (the transcript is append-only; a dead task
 would stay flagged forever) and only entries newer than the last *completed*
-run, so a relaunch is not indicted by its predecessor's spinning. A
-perpetual task is skipped entirely — repetition is its job.
+run, so a relaunch is not indicted by its predecessor's spinning.
 
 Extraction is deliberately loose: a recursive walk for any nested dict
 tagged `tool_use` / `tool_call` / `function_call` / `command_execution` /
@@ -1068,7 +946,7 @@ all degrade to `None`, and the digest is byte-identical to one built with
 the probe off (a test asserts that). A missing `ci:` line therefore carries
 no information at all — including under a self-sandboxed supervisor, where
 the blocked network makes every probe return `None`. Cost is bounded twice,
-because digest build blocks the tick: `[ci].timeout_seconds` (10) per call,
+because digest build blocks the tick: `forge.TIMEOUT_SECONDS` (10) per call,
 and `CI_MAX_PROBES` (12) probes per digest, spent in digest order.
 `[ci].enabled = false` skips the probe — and so does a config.toml quorum
 cannot read at all: the table it failed to parse may be the one holding that
@@ -1102,7 +980,7 @@ contracts:
 
 Both contracts share `_invoke`, the single `subprocess.run` of the whole
 codebase for a forge, so the unattended-invocation details (`GH_PAGER=cat`,
-no prompts, no colour, stdin closed, `[ci].timeout_seconds`) are stated
+no prompts, no colour, stdin closed, `forge.TIMEOUT_SECONDS`) are stated
 once; the soft half degrades every exception to `None`, and the loud half
 tells a timeout apart from a call that never started, because those have
 different fixes. Provider selection is `cli_name(home)`, today a constant:
@@ -1240,19 +1118,18 @@ One `Message` schema serves two channels:
   `messages/archive/YYYY-MM.jsonl.gz`. `MessageBus.archived_records` is the
   one reader of those files — raw dicts addressed to one recipient, bounded
   by a starting month, skipping a line that will not parse and a month that
-  will not decompress. `archived_direct` is its validated face and
-  `export.delivered_guidance` takes the raw records, so an export keeps a
-  message the current schema would reject.
+  will not decompress. `archived_direct` is its validated face.
 - The same archive is where **on-demand** clearing goes: `MessageBus`
   exposes the janitor's per-message path as `archive_board_message`, with
   `ack_board_message`, `archive_topic` and `clear_inbox` on top of it,
-  behind `quorum board ack`, `board clear` and `task inbox --clear`. All of
-  them archive rather than set a flag on the message, so the board keeps
-  carrying no read-state.
+  behind `quorum board clear` (a topic, or one message with `--id`) and
+  `task inbox --clear`. All of them archive rather than set a flag on the
+  message, so the board keeps carrying no read-state.
 - **Archiving one message is what dismisses an escalation.**
   `views.attention_summary` is a seven-day window over the `attention`
-  topic, so without `board ack` an escalation the human has already handled
-  sits in `quorum status` and the TUI header for a week; archiving it drops
+  topic, so without `board clear --id` an escalation the human has already
+  handled it sits in `quorum status` and the TUI header for a week;
+  archiving it drops
   it from every view while the history keeps it with its original
   `created_at`. `resolve_board_message` accepts a full message id, a unique
   prefix, or the unique suffix `Message.short_id` prints, and raises for
@@ -1265,7 +1142,7 @@ One `Message` schema serves two channels:
   since every line it renders is one the reader may want to dismiss.
 
 The **control channel** rides the same machinery: `quorum agent
-pause|resume|run-now|reload` sends to the `supervisor` inbox, which the
+reload|resume` sends to the `supervisor` inbox, which the
 supervisor claims every 15 s and applies to its scheduler jobs. No new
 transport, no ports, and commands queue harmlessly while the supervisor is
 down. `agent.reload` is the hot-add path: it re-reads config and creates,
@@ -1370,8 +1247,8 @@ result two ways.
 
 The marks *inside* those cells are views', not the CLI's: `task_marker` (the
 character before the short id — `⚭` attached, `▶` running, `✓` done, `✗`
-blocked, `·` anything else), `task_badges` (`∞` perpetual, then `✔` or `⊘`
-for what the forge last said about the PR), `task_flags` (`⚠` stranded work,
+blocked, `·` anything else), `task_badges` (`✔` or `⊘` for what the forge
+last said about the PR), `task_flags` (`⚠` stranded work,
 `waiting-on <ids>`, `DEP-*`) and `usage_badge` (the spend plus `$!` or `$!
 GATED`). The CLI task table and the TUI task table call all four, which is
 what stops the two from disagreeing about where a dependency mark goes;
@@ -1398,7 +1275,7 @@ that each is a thin call into the same code path the CLI uses — a
 `MessageBus` send, a `TaskStore.update`, `runner.launch_detached`,
 `config.create_agent` — never write logic that lives in a view: send a task
 guidance (`n`), send the manager guidance (`m` — the `manager` inbox,
-exactly `quorum manager tell`, and the reason the TUI needs no task-add
+exactly `quorum board post --to manager`, and the reason the TUI needs no task-add
 form: the manager runs `task add` itself, journaled and capped), start a
 detached run (`s`), cancel a task (`c`). `t` is a read, not a write: the
 detail pane's second tab, the task's history. `s` refuses an attached task
@@ -1428,10 +1305,10 @@ at_text, kind, text, …}` — `at` the ISO-8601 UTC stamp as written, `at_text`
 that stamp as a surface prints it, `kind` one of `queued`, `action`,
 `guidance`, `run.started`, `report`, `run.ended`, `pr_state`, `archived`,
 and `text` the rest of the line every surface prints (`views.history_line`).
-`quorum task history` and the TUI's `t` tab render the same rows, so they
-cannot disagree. The sources: `task.json` (`queued`, and a `run.started` /
+`quorum task show --history` and the TUI's `t` tab render the same rows, so
+they cannot disagree. The sources: `task.json` (`queued`, and a `run.started` /
 `run.ended` pair per run carrying exit code, usage, `stopped`, `stalled`,
-`fresh_session` and the `auto_commit` note, plus `pr_state` from
+`fresh_session`, plus `pr_state` from
 `pr_state_at`); `runner.lock` (a `run.started` marked `live` for the run in
 progress, which has no record yet, and only while the pid is alive);
 `reports.jsonl`; the task's inbox `new/` and `cur/` (`guidance` still
@@ -1463,7 +1340,7 @@ Even bounded it is too expensive for a polling loop: on a home with four
 agents' journals at the byte budget and a year of archives it takes about
 four tenths of a second. So the TUI's tab is rebuilt on `t`, on `r`, on
 opening a different task and after any write the dashboard made, and reused
-on the two-second tick. And it outlives pruning: `quorum task history`
+on the two-second tick. And it outlives pruning: `task show --history`
 resolves a handle out of `tasks/.archive/` when the live listing has
 nothing, because archival is the last thing that happens to a task and the
 answer to "what happened to it" must not vanish with the move. That is the
@@ -1606,7 +1483,7 @@ looks. Three rails, and they are the whole design:
    stream-json CLI ignoring an argv prompt, so every run hung until it timed
    out). Everything the probe touches is scratch, including the child's own
    `QUORUM_HOME`, because a harness with quorum's integration hooks
-   installed runs `quorum task hook-session-start` on startup and must not
+   installed runs `quorum task hook session-start` on startup and must not
    write to the live home. The child is spawned with
    `start_new_session=True` and the timeout `killpg`s the group, since
    killing only the process quorum spawned leaves grandchildren holding the
@@ -1614,7 +1491,7 @@ looks. Three rails, and they are the whole design:
 3. **Three states, no fourth.** `ok` / `problem` / `na` (✓ / ✗ / –), where
    `na` covers "you turned this off" and "there is nothing configured to
    check". Only `problem` sets a non-zero exit, which is what makes `quorum
-   doctor --json` usable in a script and keeps a `–` from training anyone to
+   doctor` usable in a script and keeps a `–` from training anyone to
    ignore the output. A fresh `quorum init` home — no `[harness.*]` table,
    no `default_harness` — is one `–` line rather than two ✗ for one unmade
    decision, and a `gh` that never answered is `–` too, because an offline

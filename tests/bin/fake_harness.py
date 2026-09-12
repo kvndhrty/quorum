@@ -70,7 +70,7 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                        i.e. leave the working tree dirty the way a harness
                        that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
-                             its own task, "tell" sends `manager tell`
+                             its own task, "tell" sends `board post --to manager`
   FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
 """
 
@@ -138,7 +138,7 @@ def inject_main() -> int:
             return 4
         quorum("task", "nudge", task_id, "switch to the fallback plan")
     elif post == "tell":
-        quorum("manager", "tell", "pause new launches until tests pass")
+        quorum("board", "post", "pause new launches until tests pass", "--to", "manager")
     result = {"type": "result", "subtype": "success", **(usage_block() or {})}
     print(json.dumps(result), flush=True)
     for line in sys.stdin:

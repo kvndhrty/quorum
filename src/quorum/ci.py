@@ -21,7 +21,7 @@ a probe could not reach a forge.
 
 Cost note: each probe is one forge-CLI subprocess making a network call, run
 once per digested task per manager tick. `[ci].enabled = false` turns the
-whole thing off; `[ci].timeout_seconds` bounds one call.
+whole thing off; `forge.TIMEOUT_SECONDS` bounds one call.
 """
 
 from __future__ import annotations

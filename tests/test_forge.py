@@ -48,7 +48,7 @@ def test_auth_status_answers_yes_no_or_nothing(home: Path, path_without_gh: Path
     install_gh(path_without_gh, monkeypatch, mode="unauth")
     assert forge.auth_status(home) is False
 
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)
     install_gh(path_without_gh, monkeypatch, mode="hang")
     assert forge.auth_status(home) is None  # offline is not unauthenticated
 
@@ -221,23 +221,25 @@ def test_a_call_that_never_started_is_not_reported_as_a_timeout(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
     """The loud half names the fix, so it may not blame the timeout for a
-    workdir that is gone — raising `[ci].timeout_seconds` would never help."""
+    workdir that is gone — waiting longer would never help."""
     install_gh(path_without_gh, monkeypatch, issue=ISSUE)
     missing = tmp_path / "project-that-moved"
     with pytest.raises(forge.ForgeError) as e:
         forge.issue_view(home, "62", missing)
     assert "could not run" in str(e.value) and str(missing) in str(e.value)
-    assert "timeout_seconds" not in str(e.value)
+    assert "did not finish within" not in str(e.value)
 
 
 def test_a_hung_gh_is_an_error_naming_the_timeout(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
+    """The bound is `forge.TIMEOUT_SECONDS`, a module constant — there is no
+    config key to raise, so the error tells the caller what to check instead."""
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)
     install_gh(path_without_gh, monkeypatch, mode="hang")
     with pytest.raises(forge.ForgeError) as e:
         forge.issue_view(home, "62", tmp_path)
-    assert "[ci].timeout_seconds" in str(e.value)
+    assert "did not finish within 0.5s" in str(e.value)
 
 
 def test_the_ci_switches_turn_issue_intake_off_loudly(

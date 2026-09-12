@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import git_out, harness_config, make_repo, repo_git
+from conftest import harness_config, make_repo, repo_git
 from quorum import fsio, runner, tasks, usage
 from quorum.config import HarnessConfig, load_config
 from quorum.messages import MessageBus
@@ -361,241 +361,6 @@ def test_no_worktree_runs_in_project_dir(home: Path, project: str, tmp_path: Pat
     assert f"CWD| {(tmp_path / 'proj').resolve()}" in transcript_text(home, task.id)
 
 
-def test_auto_commit_captures_work_the_harness_left_behind(home: Path, project: str, monkeypatch):
-    """The safety net's hard guarantee: with `[tasks].auto_commit` on, work a
-    harness left uncommitted lands on the task branch, which outlives the
-    worktree — no policy, no status change, no push."""
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake")
-
-    assert run_task(home, config, task.id) == 0
-
-    workdir = tasks.worktree_path(home, task.id)
-    assert git_out(workdir, "status", "--porcelain") == ""  # nothing stranded
-    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
-    assert "scratch.txt" in git_out(workdir, "show", "--name-only", "--pretty=", "HEAD")
-    assert git_out(workdir, "rev-parse", "--abbrev-ref", "HEAD") == f"quorum/{task.short_id}"
-    assert "auto-committed 1 path(s)" in transcript_text(home, task.id)
-    fresh = TaskStore(home).get(task.id)
-    assert fresh.runs[0].exit_code == 0 and fresh.status == "queued"
-    assert fresh.runs[0].auto_commit.startswith("auto-committed 1 path(s)")  # durable record
-
-
-def test_auto_commit_is_off_by_default(home: Path, project: str, monkeypatch):
-    """Default off: the tree stays dirty and stranded-work detection sees it."""
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home)
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake")
-
-    run_task(home, config, task.id)
-
-    workdir = tasks.worktree_path(home, task.id)
-    assert "scratch.txt" in git_out(workdir, "status", "--porcelain")
-    assert git_out(workdir, "log", "-1", "--pretty=%s") == "init"
-    assert tasks.workdir_git_state(TaskStore(home).get(task.id))["dirty"] == 1
-
-
-def test_auto_commit_never_touches_a_no_worktree_checkout(
-    home: Path, project: str, tmp_path: Path, monkeypatch
-):
-    """A `--no-worktree` task runs in the user's own checkout on whatever
-    branch they had out; committing there is not quorum's to do."""
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake", use_worktree=False)
-
-    run_task(home, config, task.id)
-
-    repo = tmp_path / "proj"
-    assert "scratch.txt" in git_out(repo, "status", "--porcelain")
-    assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
-
-
-def _clean(repo: Path) -> None:
-    pass
-
-
-def _untracked_directory(repo: Path) -> None:
-    gen = repo / "gen"
-    gen.mkdir()
-    for i in range(3):
-        (gen / f"f{i}.txt").write_text("x")
-
-
-def _detached(repo: Path) -> None:
-    repo_git(repo, "checkout", "--detach")
-    (repo / "x.txt").write_text("x")
-
-
-def _mid_merge(repo: Path) -> None:
-    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
-    (repo / "y.txt").write_text("y")
-
-
-def _not_a_repo(repo: Path) -> None:
-    shutil.rmtree(repo / ".git")
-
-
-@pytest.mark.parametrize(
-    ("setup", "note", "raises"),
-    [
-        # A harness that committed its own work gets no empty extra commit.
-        pytest.param(_clean, "", None, id="clean-tree"),
-        # An untracked directory is one porcelain line however many files it
-        # holds; the note counts the files actually committed.
-        pytest.param(_untracked_directory, "auto-committed 3 path(s)", None, id="untracked-dir"),
-        # Detached HEAD: the commit would belong to no branch and die with the
-        # worktree.
-        pytest.param(_detached, "", "detached", id="detached-head"),
-        # Merge in progress: add -A + commit would *conclude* the merge,
-        # conflict markers and all.
-        pytest.param(_mid_merge, "", "in progress", id="merge-in-progress"),
-        # Not a checkout at all: the net cannot even ask what changed.
-        pytest.param(_not_a_repo, "", "git status failed", id="not-a-repo"),
-    ],
-)
-def test_auto_commit_workdir_reads_the_tree_it_is_pointed_at(
-    tmp_path: Path, setup, note: str, raises: str | None
-):
-    """`auto_commit_workdir` on its own, over the tree states it commits in and
-    the ones it refuses. A refusal raises and leaves the tree dirty; the caller
-    turns it into a note (the test below)."""
-    repo = make_repo(tmp_path, setup.__name__.lstrip("_"))
-    setup(repo)
-
-    if raises:
-        with pytest.raises(RunnerError, match=raises):
-            runner.auto_commit_workdir(repo)
-        assert git_out(repo, "log", "-1", "--pretty=%s") in ("init", "")
-        return
-
-    assert runner.auto_commit_workdir(repo).startswith(note)
-    if not note:
-        assert git_out(repo, "log", "-1", "--pretty=%s") == "init"
-
-
-def test_auto_commit_failure_is_recorded_not_raised(home: Path, project: str):
-    """A net that cannot fire leaves a note and the dirty tree behind — never
-    an exception that would cost the run its record."""
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    store = TaskStore(home)
-    task = store.add(project, "x", "fake")
-    assert run_task(home, config, task.id) == 0  # creates the worktree
-    workdir = tasks.worktree_path(home, task.id)
-    (workdir / "left.txt").write_text("x")
-    repo_git(workdir, "checkout", "--detach")  # a state the net refuses to commit in
-
-    note = runner._maybe_auto_commit(home, config, store, store.get(task.id), workdir)
-
-    assert note.startswith("auto-commit failed")  # absorbed into a note...
-    assert "auto-commit failed" in transcript_text(home, task.id)
-    assert "left.txt" in git_out(workdir, "status", "--porcelain")  # ...tree left dirty
-
-
-def test_auto_commit_sees_untracked_files_hidden_by_repo_config(
-    home: Path, project: str, tmp_path: Path, monkeypatch
-):
-    """`status.showUntrackedFiles no` (a git-recommended perf setting on big
-    repos, shared with linked worktrees) must not blind the net to an
-    untracked-only crash — the net's core case."""
-    repo_git(tmp_path / "proj", "config", "status.showUntrackedFiles", "no")
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake")
-
-    assert run_task(home, config, task.id) == 0
-
-    workdir = tasks.worktree_path(home, task.id)
-    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
-    # the stranded-work probe must see through the same setting
-    (workdir / "more.txt").write_text("x")
-    assert tasks.workdir_git_state(TaskStore(home).get(task.id))["dirty"] == 1
-
-
-def test_auto_commit_bypasses_hooks_and_signing(
-    home: Path, project: str, tmp_path: Path, monkeypatch
-):
-    """A failing pre-commit hook (or a signing prompt) would defeat the net in
-    exactly the crashed-harness case it exists for — commits go through with
-    --no-verify and signing off."""
-    hook = tmp_path / "proj" / ".git" / "hooks" / "pre-commit"
-    hook.write_text("#!/bin/sh\nexit 1\n")
-    hook.chmod(0o755)
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake")
-
-    assert run_task(home, config, task.id) == 0
-
-    workdir = tasks.worktree_path(home, task.id)
-    assert git_out(workdir, "log", "-1", "--pretty=%s") == runner.AUTO_COMMIT_MESSAGE
-
-
-def test_auto_commit_leaves_a_terminal_task_alone(home: Path, project: str, monkeypatch):
-    """A harness that reported done owns its tree's final state: sweeping
-    leftovers into a finished branch would re-flag the task as stranded and
-    push junk toward its PR."""
-    monkeypatch.setenv("FAKE_HARNESS_MODE", "report")  # reports status=done
-    monkeypatch.setenv("FAKE_HARNESS_WRITE", "scratch.txt")
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    task = TaskStore(home).add(project, "x", "fake")
-
-    assert run_task(home, config, task.id) == 0
-
-    workdir = tasks.worktree_path(home, task.id)
-    assert git_out(workdir, "log", "-1", "--pretty=%s") == "init"
-    assert "scratch.txt" in git_out(workdir, "status", "--porcelain")
-    assert TaskStore(home).get(task.id).runs[0].auto_commit is None
-
-
-def test_auto_commit_skips_sandboxed_runs_with_a_note(home: Path, project: str):
-    """Under [sandbox].use_nono the runner can no longer run git at all, so
-    the net says so instead of failing cryptically every run."""
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    store = TaskStore(home)
-    task = store.add(project, "x", "fake")
-    assert run_task(home, config, task.id) == 0  # creates the worktree
-    workdir = tasks.worktree_path(home, task.id)
-    (workdir / "left.txt").write_text("x")
-    with open(home / "config.toml", "a") as fh:
-        fh.write("[sandbox]\nuse_nono = true\n")
-    sandboxed = load_config(home)
-
-    note = runner._maybe_auto_commit(home, sandboxed, store, store.get(task.id), workdir)
-
-    assert "sandboxed" in note and note in transcript_text(home, task.id)
-    assert "left.txt" in git_out(workdir, "status", "--porcelain")  # untouched
-
-
-def test_auto_commit_ownership_check_survives_symlinked_home(
-    home: Path, project: str, tmp_path: Path
-):
-    """The workdir/worktree comparison resolves both sides, so a symlinked
-    spelling of the home never silently disables the net."""
-    harness_config(home, tasks_extra="auto_commit = true\n")
-    config = load_config(home)
-    store = TaskStore(home)
-    task = store.add(project, "x", "fake")
-    assert run_task(home, config, task.id) == 0
-    workdir = tasks.worktree_path(home, task.id)
-    (workdir / "left.txt").write_text("x")
-    alias = tmp_path / "home-alias"
-    alias.symlink_to(home)
-
-    note = runner._maybe_auto_commit(alias, config, store, store.get(task.id), workdir)
-
-    assert note.startswith("auto-committed 1 path(s)")
-
-
 def test_missing_harness_and_unknown_task_fail_loud(home: Path, project: str):
     (home / "config.toml").write_text("")
     config = load_config(home)
@@ -911,16 +676,6 @@ def test_resolve_dependencies_rejects_unknown_and_self(home: Path):
         tasks.resolve_dependencies(store, [existing.short_id], self_id=existing.id)
 
 
-def test_cannot_depend_on_a_perpetual_task(home: Path):
-    """A perpetual task never reaches a terminal status, so a dependent would
-    wait on it forever — `task add --after` refuses the chain outright."""
-    store = TaskStore(home)
-    upstream = store.add("proj", "forever", "fake")
-    store.update(upstream.id, perpetual=True)
-    with pytest.raises(ValueError, match="perpetual"):
-        tasks.resolve_dependencies(store, [upstream.short_id])
-
-
 def test_dependency_state_reads_waiting_failed_and_missing(home: Path):
     store = TaskStore(home)
     running = store.add("proj", "still going", "fake")
@@ -1103,37 +858,6 @@ def test_a_pruned_dependency_is_reported_not_waited_on(home: Path, project: str)
     assert run_task(home, config, dependent.id) == 0  # not refused
 
 
-# -- perpetual tasks (#12) ---------------------------------------------------
-
-
-def test_a_perpetual_run_gets_the_softened_delivery_conventions(
-    home: Path, project: str
-):
-    """The preamble's "commit, push, report done" becomes "deliver every
-    cycle, never report done" — and an ordinary task sees none of it."""
-    harness_config(home)
-    config = load_config(home)
-    store = TaskStore(home)
-    forever = store.add(project, "watch the build", "fake", perpetual=True)
-    ordinary = store.add(project, "fix the docs", "fake")
-
-    assert run_task(home, config, forever.id) == 0
-    assert run_task(home, config, ordinary.id) == 0
-
-    cycling = transcript_text(home, forever.id)
-    assert "This is a PERPETUAL task" in cycling
-    assert "Never report `done` or `cancelled`" in cycling
-    assert "--status cycle-3" in cycling
-    # the placeholder is always substituted (the preamble's comment header
-    # still *documents* it, as it does {task_id} — hence the line anchor)
-    assert "PROMPT| {perpetual}" not in cycling
-
-    once = transcript_text(home, ordinary.id)
-    assert "PERPETUAL" not in once and "PROMPT| {perpetual}" not in once
-    # the ordinary delivery protocol survives in both
-    assert "git push -u origin HEAD" in cycling and "git push -u origin HEAD" in once
-
-
 def test_pr_state_survives_a_round_trip_and_defaults_to_unobserved(home: Path):
     """`pr_state` is what the *forge* said, kept beside — never merged into —
     the status the harness reported (#57)."""
@@ -1160,39 +884,6 @@ def test_a_task_json_written_before_pr_state_existed_still_loads(home: Path):
     path.write_text(_json.dumps(data))
 
     assert store.get(task.id).pr_state is None
-
-
-def test_perpetual_survives_a_round_trip_and_defaults_off(home: Path):
-    store = TaskStore(home)
-    assert store.add("proj", "ordinary", "fake").perpetual is False
-    forever = store.add("proj", "forever", "fake", perpetual=True)
-    assert store.get(forever.id).perpetual is True
-    # nothing about it changes what quorum treats as terminal
-    assert store.update(forever.id, status="cycle-2").status not in tasks.TERMINAL_STATUSES
-
-
-def test_a_perpetual_run_survives_an_edited_preamble_without_the_placeholder(
-    home: Path, project: str
-):
-    """A home that customized task-preamble.md before {perpetual} existed
-    never substitutes it — and a perpetual task that silently got the
-    ordinary "report done" instructions would end on its first cycle."""
-    from quorum import prompts
-
-    harness_config(home)
-    # drop the placeholder line only — the header's escaped `{{perpetual}}`
-    # documentation stays, exactly as it would in a real edited copy
-    edited = prompts.load(home, "task-preamble").replace("\n{perpetual}\n", "\n")
-    assert "\n{perpetual}\n" not in edited and "{{perpetual}}" in edited
-    (home / "prompts").mkdir(exist_ok=True)
-    (home / "prompts" / "task-preamble.md").write_text(edited)
-
-    store = TaskStore(home)
-    forever = store.add(project, "watch the build", "fake", perpetual=True)
-    assert run_task(home, load_config(home), forever.id) == 0
-    cycling = transcript_text(home, forever.id)
-    assert "This is a PERPETUAL task" in cycling
-    assert "Never report `done` or `cancelled`" in cycling
 
 
 # -- issue intake (#62) ------------------------------------------------------
@@ -1224,9 +915,9 @@ def test_a_run_from_an_issue_is_told_which_issue(home: Path, project: str):
 def test_an_issue_run_survives_an_edited_preamble_without_the_placeholder(
     home: Path, project: str
 ):
-    """Same upgrade hazard as {perpetual}: a home that customized the
-    preamble before {issue} existed would never tell the harness where the
-    task came from, so the line is appended instead."""
+    """A home that customized the preamble before {issue} existed would never
+    tell the harness where the task came from, so the line is appended
+    instead."""
     from quorum import prompts
 
     harness_config(home)
@@ -1314,34 +1005,16 @@ def test_a_task_run_picks_up_the_preamble_overlay(home: Path, project: str):
     assert "PROMPT| {local}" not in text
 
 
-def test_the_perpetual_block_carries_its_own_overlay(home: Path, project: str):
-    """task-perpetual.md has a {local} slot too, so cycle conventions land
-    where they belong instead of being prepended by the fallback path."""
-    harness_config(home)
-    (home / "prompts" / "task-perpetual.local.md").write_text(
-        "In this home, a cycle ends with `just check`.\n"
-    )
-
-    store = TaskStore(home)
-    forever = store.add(project, "watch the build", "fake", perpetual=True)
-    assert run_task(home, load_config(home), forever.id) == 0
-
-    text = transcript_text(home, forever.id)
-    assert "In this home, a cycle ends with `just check`." in text
-    assert "This is a PERPETUAL task" in text  # the packaged block, unforked
-    assert "PROMPT| {local}" not in text
-    # the overlay lands inside the perpetual block, not ahead of the preamble
-    assert text.index("You are an autonomous coding agent") < text.index("`just check`")
-
-
 def test_a_task_record_with_removed_queue_fields_still_loads(home: Path):
-    """`priority` and `held` were removed with the queue controls (#102). A
-    task.json written before that still has the keys, so the model must
-    ignore them rather than refuse the record and lose the task."""
+    """`priority` and `held` were removed with the queue controls (#102), and
+    `perpetual` with the round-two review (#128). A task.json written before
+    those still has the keys, so the model must ignore them rather than refuse
+    the record and lose the task."""
     store = TaskStore(home)
     task = store.add("proj", "queued before the removal", "fake")
     record = fsio.read_json(task_json_path(home, task.id))
     record["priority"] = 3
+    record["perpetual"] = True
     record["held"] = True
     fsio.atomic_write_json(task_json_path(home, task.id), record)
 
@@ -1349,6 +1022,7 @@ def test_a_task_record_with_removed_queue_fields_still_loads(home: Path):
     assert loaded is not None
     assert loaded.status == "queued" and loaded.prompt == "queued before the removal"
     assert not hasattr(loaded, "priority") and not hasattr(loaded, "held")
+    assert not hasattr(loaded, "perpetual")
     # and an ordinary update rewrites the record without the dead keys
     store.update(task.id, status="done")
     assert "priority" not in fsio.read_json(task_json_path(home, task.id))

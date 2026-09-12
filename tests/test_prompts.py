@@ -120,7 +120,7 @@ def test_an_unreadable_template_still_raises(home: Path):
 
 
 def test_packaged_manager_and_preamble_carry_the_slot():
-    for name in ("manager", "task-preamble", "task-perpetual"):
+    for name in ("manager", "task-preamble"):
         text = prompts.packaged(name)
         assert text is not None
         assert prompts.has_slot(text), f"{name}.md lost its {{local}} slot"

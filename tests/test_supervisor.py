@@ -186,7 +186,7 @@ def test_failed_load_is_visible_in_agent_rows(home: Path):
     assert row["error"] is None
 
 
-def test_control_inbox_pause_resume_run_now(home: Path):
+def test_control_inbox_resumes_and_ignores_the_unknown(home: Path):
     (home / "plugins" / "ctl.py").write_text(
         "from quorum.agent import Agent\n"
         "class Ctl(Agent):\n"
@@ -200,8 +200,8 @@ def test_control_inbox_pause_resume_run_now(home: Path):
         sup._schedule_agent("ctl", sup.agents["ctl"])
         bus = MessageBus(home)
 
-        bus.send("user", "supervisor", type="agent.pause", payload={"agent": "ctl"})
-        sup._control()
+        # the only pause left is the supervisor's own, after repeated failures
+        sup._pause_agent("ctl")
         assert sup.scheduler.get_job("ctl").next_run_time is None
         hb = fsio.read_json(home / "state/agents/ctl/heartbeat.json")
         assert hb["status"] == "paused"
@@ -219,13 +219,8 @@ def test_control_inbox_pause_resume_run_now(home: Path):
         assert hb["consecutive_failures"] == 0
         assert hb["escalated_at"] is None
 
-        before = sup.scheduler.get_job("ctl").next_run_time
-        bus.send("user", "supervisor", type="agent.run-now", payload={"agent": "ctl"})
-        sup._control()
-        assert sup.scheduler.get_job("ctl").next_run_time < before
-
         # unknown agent: logged, acked, never raises
-        bus.send("user", "supervisor", type="agent.pause", payload={"agent": "ghost"})
+        bus.send("user", "supervisor", type="agent.resume", payload={"agent": "ghost"})
         sup._control()
         inbox = bus.inbox_dir / "supervisor"
         assert fsio.sorted_entries(inbox / "new") == []
@@ -274,7 +269,7 @@ def test_agent_reload_hot_adds_and_removes_file_defined_agents(home: Path):
         sup.scheduler.shutdown(wait=False)
 
 
-def test_pause_survives_supervisor_restart(home: Path):
+def test_an_auto_pause_survives_supervisor_restart(home: Path):
     (home / "plugins" / "dur.py").write_text(
         "from quorum.agent import Agent\n"
         "class Dur(Agent):\n"
@@ -286,8 +281,7 @@ def test_pause_survives_supervisor_restart(home: Path):
     sup.scheduler.start(paused=True)
     try:
         sup._schedule_agent("dur", sup.agents["dur"])
-        MessageBus(home).send("user", "supervisor", type="agent.pause", payload={"agent": "dur"})
-        sup._control()
+        sup._pause_agent("dur")
         assert sup.scheduler.get_job("dur").next_run_time is None
     finally:
         sup.scheduler.shutdown(wait=False)

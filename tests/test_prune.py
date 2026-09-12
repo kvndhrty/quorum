@@ -53,15 +53,13 @@ def archive_lines(home: Path) -> list[dict]:
 # -- selection -------------------------------------------------------------
 
 
-def test_select_takes_terminal_statuses_and_skips_perpetual(home: Path):
+def test_select_takes_only_the_terminal_statuses(home: Path):
     done = finished(home, "done one")
     running = finished(home, "still going", status="executing")
-    forever = finished(home, "watch CI", status="done", perpetual=True)
 
     chosen = {t.id for t in prune.select(TaskStore(home).list())}
     assert done.id in chosen
     assert running.id not in chosen  # free-form statuses are never swept up
-    assert forever.id not in chosen  # a perpetual task's "done" is an accident
 
 
 def test_select_honours_older_than_over_updated_at(home: Path):

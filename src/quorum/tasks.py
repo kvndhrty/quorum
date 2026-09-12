@@ -75,10 +75,6 @@ class TaskRun(BaseModel):
     started_at: str
     ended_at: str | None = None
     exit_code: int | None = None
-    # The runner's auto-commit note for this run ("auto-committed N path(s)
-    # as <sha>" / "auto-commit failed: ..."), None when the net didn't fire —
-    # the durable record that quorum, not the harness, committed that work.
-    auto_commit: str | None = None
     # What the harness said this run spent (usage.py): canonical token
     # counts and cost, or None when it reported nothing — most harnesses
     # say nothing, and every reader treats absence as "unknown", never zero.
@@ -130,17 +126,6 @@ class Task(BaseModel):
     # and these only say when a launch would be premature. See
     # `dependency_state` for how they are read.
     depends_on: list[str] = Field(default_factory=list)
-    # True: this task is not expected to finish. It works in cycles — watch,
-    # tidy, poll, groom — and only the user ends it. Quorum enforces nothing
-    # (status stays free-form and TERMINAL_STATUSES still means what it
-    # means); the flag is *observation context*, and it changes three
-    # readings of the same substrate: the run preamble softens the
-    # deliver-then-report-done conventions into deliver-every-cycle, the
-    # digest renders `perpetual=true` and suppresses the `possible-loop`
-    # observation (repetition is the job, not a symptom), and the manager
-    # prompt is told to relaunch it forever and never call a long run count
-    # stuck. See docs/architecture.md ("Perpetual tasks").
-    perpetual: bool = False
     # What the forge last said about this task's pull request: one of
     # `PR_STATES`, and when it was observed. Quorum's **one** materialized
     # probe result — written only from the manager tick's digest build
@@ -246,7 +231,6 @@ class TaskStore:
         status: str = "queued",
         issue_url: str | None = None,
         depends_on: list[str] | None = None,
-        perpetual: bool = False,
         now: Any = None,
     ) -> Task:
         created = fsio.iso(now or fsio.utc_now())
@@ -262,7 +246,6 @@ class TaskStore:
             status=status,
             issue_url=issue_url,
             depends_on=list(depends_on or []),
-            perpetual=perpetual,
             created_at=created,
             updated_at=created,
         )
@@ -402,14 +385,6 @@ def resolve_dependencies(
             raise ValueError(str(e)) from None
         if self_id is not None and dep.id == self_id:
             raise ValueError(f"task {dep.short_id} cannot depend on itself")
-        # A perpetual task never reaches a terminal status, so a dependent
-        # would wait on it forever — refuse the chain at the one validated
-        # entry point rather than queue work that can never start.
-        if dep.perpetual:
-            raise ValueError(
-                f"task {dep.short_id} is perpetual — it never finishes, so nothing "
-                "may depend on it"
-            )
         if dep.id not in resolved:
             resolved.append(dep.id)
     return resolved
@@ -657,9 +632,9 @@ def git_probe(
 ) -> Callable[..., subprocess.CompletedProcess | None]:
     """`git_runner`'s fail-soft face: None when git could not be run at all.
 
-    What the read-only probes want — the stranded-work and overlap probes and
-    `task export`'s diff feed digests, views and an export, all of which must
-    produce something rather than raise over a missing git or a hung call.
+    What the read-only probes want — the stranded-work and overlap probes
+    feed digests and views, both of which must produce something rather than
+    raise over a missing git or a hung call.
     The short default timeout is the probe's, not the operation's.
     """
     run = git_runner(cwd, timeout)

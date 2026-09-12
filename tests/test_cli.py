@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import harness_table, install_gh, make_repo
-from quorum import fsio
+from quorum import fsio, views
 from quorum.cli import app
 
 runner = CliRunner()
@@ -370,16 +370,16 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     from quorum import fsio
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["agent", "pause", "manager"])
+    r = runner.invoke(app, ["agent", "resume", "manager"])
     assert r.exit_code == 0, r.output
-    r = runner.invoke(app, ["agent", "pause", "ghost"])
+    r = runner.invoke(app, ["agent", "resume", "ghost"])
     assert r.exit_code == 1
 
     inbox = MessageBus(home).inbox_dir / "supervisor" / "new"
     entries = fsio.sorted_entries(inbox)
     assert len(entries) == 1
     msg = fsio.read_json(entries[0])
-    assert msg["type"] == "agent.pause" and msg["payload"]["agent"] == "manager"
+    assert msg["type"] == "agent.resume" and msg["payload"]["agent"] == "manager"
 
 
 def test_agent_create_remove_and_reload(home: Path):
@@ -442,14 +442,21 @@ def test_run_once_respects_the_tick_lock(home: Path):
 # -- manager ---------------------------------------------------------------
 
 
-def test_manager_tell_note_and_journal(home: Path):
+def test_board_post_to_an_inbox_note_and_the_action_journal(home: Path):
     from quorum import fsio
     from quorum.agents.manager import journal_path
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["manager", "tell", "focus on the api task"])
-    assert r.exit_code == 0
+    r = runner.invoke(app, ["board", "post", "focus on the api task", "--to", "manager"])
+    assert r.exit_code == 0, r.output
     inbox = MessageBus(home).inbox_dir / "manager" / "new"
+    assert len(fsio.sorted_entries(inbox)) == 1
+    assert fsio.read_json(fsio.sorted_entries(inbox)[0])["type"] == "guidance"
+
+    # an inbox is not a topic: a name no agent answers to is refused rather
+    # than written to a maildir nobody ever claims
+    r = runner.invoke(app, ["board", "post", "hello", "--to", "ghost"])
+    assert r.exit_code == 1 and "no agent 'ghost'" in r.output
     assert len(fsio.sorted_entries(inbox)) == 1
 
     r = runner.invoke(app, ["manager", "note", "human-added context"])
@@ -457,7 +464,7 @@ def test_manager_tell_note_and_journal(home: Path):
     entries = fsio.read_jsonl(journal_path(home))
     assert entries[-1]["action"] == "note" and entries[-1]["actor"] == "user"
 
-    r = runner.invoke(app, ["manager", "journal"])
+    r = runner.invoke(app, ["agent", "log", "manager", "--actions"])
     assert "human-added context" in r.output
 
 
@@ -573,7 +580,7 @@ def test_init_upgrades_pristine_prompts_and_keeps_edits(tmp_path: Path, monkeypa
     fresh, outcomes = home_mod.scaffold(target)
     assert fresh
     assert outcomes["task-preamble.md"] == "seeded"
-    assert outcomes["task-perpetual.md"] == "seeded"  # the perpetual block (#12)
+    assert outcomes["manager.md"] == "seeded"
 
     # a pristine seed from an older quorum: the file is still what init
     # recorded writing, and the packaged default has since moved on
@@ -619,34 +626,18 @@ def test_init_points_an_edited_prompt_at_the_overlay(tmp_path: Path):
     assert "{local}" in out
 
 
-def test_prompt_diff_and_list_show_home_vs_packaged(home: Path):
+def test_prompt_diff_shows_home_vs_packaged(home: Path):
     r = runner.invoke(app, ["prompt", "diff", "manager"])
     assert r.exit_code == 0
     assert "identical to the packaged default" in r.output
 
     (home / "prompts" / "manager.md").write_text("my custom manager policy\n")
-    (home / "prompts" / "manager.local.md").write_text("one task at a time\n")
     r = runner.invoke(app, ["prompt", "diff", "manager.md"])  # .md tolerated
     assert r.exit_code == 0
     out = _plain(r.output)
     assert "-You are the manager of a quorum home" in out  # what you are missing
     assert "+my custom manager policy" in out
     assert "delete prompts/manager.md" in out
-
-    r = runner.invoke(app, ["prompt", "list"])
-    assert r.exit_code == 0
-    out = _plain(r.output)
-    assert "manager" in out and "edited" in out
-    assert "manager.local.md (prepended)" in out  # the edit has no {local} slot
-    assert "task-preamble" in out and "matches the packaged default" in out
-    # an overlay is not a template of its own
-    assert not any(line.split()[:1] == ["manager.local"] for line in out.splitlines())
-
-    # a misspelled overlay is dead policy nobody would ever notice
-    (home / "prompts" / "manger.local.md").write_text("oops\n")
-    r = runner.invoke(app, ["prompt", "list"])
-    assert r.exit_code == 0
-    assert "manger.local.md: no prompt named 'manger'" in _plain(r.output)
 
     # a template quorum does not package has nothing to diff against
     r = runner.invoke(app, ["prompt", "diff", "nope"])
@@ -657,18 +648,36 @@ def test_prompt_diff_and_list_show_home_vs_packaged(home: Path):
     assert r.exit_code == 0 and "packaged default unchanged" in r.output
 
 
-def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
+def test_doctor_lists_every_prompt_layer(home: Path):
+    """Which templates exist, which are edited and what overlays them is one
+    surface — doctor's prompt lines (#128 folded `prompt list` into them)."""
+    (home / "prompts" / "manager.md").write_text("my custom manager policy\n")
+    (home / "prompts" / "manager.local.md").write_text("one task at a time\n")
+    (home / "prompts" / "house.md").write_text("a prompt agent's own\n")
+
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "prompts/manager.md is edited" in out
+    assert "quorum prompt diff manager" in out  # where the difference is shown
+    assert "prompts/manager.local.md overlays manager.md, prepended" in out
+    assert "prompts/task-preamble.md matches the packaged default" in out
+    assert "prompts/house.md is yours — no packaged default" in out
+
+    # a misspelled overlay is dead policy nobody would ever notice
+    (home / "prompts" / "manger.local.md").write_text("oops\n")
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "prompts/manger.local.md: no prompt named 'manger'" in out
+
+
+def test_prompt_layers_degrade_over_an_unreadable_file(home: Path):
     """One prompt quorum cannot decode must not take the whole listing down
     with it — mark that file and keep going (review of #37)."""
     (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
     (home / "prompts" / "task-preamble.local.md").write_bytes(b"\xff\xfe policy\n")
 
-    r = runner.invoke(app, ["prompt", "list"])
-    assert r.exit_code == 0, r.output
-    out = _plain(r.output)
-    assert "manager" in out and "unreadable" in out
-    assert "task-preamble.local.md (? unreadable — ignored when rendering)" in out
-    assert "task-perpetual" in out and "matches the packaged default" in out
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "prompts/task-preamble.local.md cannot be read" in out
+    assert "ignored when rendering" in out
+    assert "prompts/task-preamble.md matches the packaged default" in out
 
     r = runner.invoke(app, ["prompt", "diff", "manager"])
     assert r.exit_code == 1
@@ -906,7 +915,9 @@ def test_doctor_walks_a_setup_to_green(home: Path, tmp_path: Path):
     assert "no-such-binary-xyz" in r.output and "not found on PATH" in r.output
 
 
-def test_task_show_is_human_first_json_on_request(home: Path, tmp_path: Path):
+def test_task_show_is_words_not_a_record_dump(home: Path, tmp_path: Path):
+    """The record itself is tasks/<id>/task.json (invariant 2); what this
+    command owes a reader is the reading of it."""
     slug = setup_task_env(home, tmp_path)
     r = runner.invoke(app, ["task", "add", slug, "tidy the docs", "--harness", "fake"])
     short = r.output.split("queued task ")[1].split(" ")[0]
@@ -916,30 +927,26 @@ def test_task_show_is_human_first_json_on_request(home: Path, tmp_path: Path):
     assert "project:  " + slug in r.output
     assert "tidy the docs" in r.output
     assert not r.output.lstrip().startswith("{")
-
-    r = runner.invoke(app, ["task", "show", short, "--json"])
-    record = json.loads(r.output)
-    assert record["prompt"] == "tidy the docs"
+    assert "task.json" in r.output  # where the raw record lives
 
 
-def test_list_commands_emit_json(home: Path, tmp_path: Path):
+def test_the_listings_are_tables_not_payloads(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     runner.invoke(app, ["task", "add", slug, "a task", "--harness", "fake"])
-    tasks = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)
-    assert tasks[0]["project"] == slug
-    projects = json.loads(runner.invoke(app, ["project", "list", "--json"]).output)
-    assert projects[0]["slug"] == slug
-    agents = json.loads(runner.invoke(app, ["agent", "list", "--json"]).output)
-    assert any(a["name"] == "manager" for a in agents)
-    overview = json.loads(runner.invoke(app, ["status", "--json"]).output)
-    assert overview["attention"]["count"] == 0
+    for argv in (["task", "list"], ["agent", "list"], ["status"]):
+        r = runner.invoke(app, argv)
+        assert r.exit_code == 0, r.output
+        assert not r.output.lstrip().startswith(("{", "["))
+    assert slug in runner.invoke(app, ["task", "list"]).output
+    assert "manager" in runner.invoke(app, ["agent", "list"]).output
+    assert slug in runner.invoke(app, ["status"]).output
 
 
 def test_status_and_task_show_surface_what_a_run_spent(
     home: Path, tmp_path: Path, monkeypatch
 ):
     """Surfacing end to end: a usage-reporting run shows up in `quorum status`,
-    `task list --json` and `task show`, and a configured budget marks the row
+    `task list` and `task show`, and a configured budget marks the row
     without stopping anything."""
     slug = setup_task_env(home, tmp_path)
     cfg = home / "config.toml"
@@ -953,9 +960,10 @@ def test_status_and_task_show_surface_what_a_run_spent(
     assert "$0.42 · 11.0k tok" in r.output
     assert "$!" in r.output  # over the configured budget — marked, not blocked
 
-    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
+    row = views.task_rows(home)[0]
     assert row["usage"]["cost_usd"] == 0.42 and row["usage"]["runs"] == 1
     assert row["budget_overages"] == ["run 1: cost $0.42 > max_cost_per_run $0.10"]
+    assert "$0.42" in runner.invoke(app, ["task", "list"]).output
 
     r = runner.invoke(app, ["task", "show", short])
     assert "usage:    $0.42 · 11.0k tok" in r.output
@@ -971,8 +979,9 @@ def test_status_stays_clean_when_no_harness_reports_usage(home: Path, tmp_path: 
 
     r = runner.invoke(app, ["status"])
     assert "tok" not in r.output and "$" not in r.output
-    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
+    row = views.task_rows(home)[0]
     assert row["usage"] is None and row["usage_text"] == "" and row["budget_overages"] == []
+    assert "$" not in runner.invoke(app, ["task", "list"]).output
     r = runner.invoke(app, ["task", "show", short])
     assert "usage:" not in r.output
 
@@ -1096,36 +1105,34 @@ def test_project_set_checks_the_slug_before_consuming_stdin(home: Path, tmp_path
     assert ProjectRegistry(home).get(slug).notes == "base on main\n"
 
 
-def test_prompt_list_shows_each_project_block(home: Path, tmp_path: Path):
-    """The third prompt layer has to be findable: `prompt list` already
-    answers "what will a run actually be told", and per-project text is part
-    of that answer now."""
+def test_doctor_shows_each_project_block(home: Path, tmp_path: Path):
+    """The fourth prompt layer has to be findable: doctor answers "what will a
+    run actually be told", and per-project text is part of that answer."""
     slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["prompt", "list"])
-    assert r.exit_code == 0
-    assert "per-project" not in _plain(r.output)  # nothing to say, nothing listed
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "{project} slot" not in out  # nothing to say, nothing listed
 
     runner.invoke(app, ["project", "set", slug, "--notes", "base on main"])
     repo = tmp_path / "cliproj"
     (repo / ".quorum").mkdir()
     (repo / ".quorum" / "task-preamble.local.md").write_text("run `just check`\n")
 
-    r = runner.invoke(app, ["prompt", "list"])
-    assert r.exit_code == 0, r.output
-    out = _plain(r.output)
-    assert "per-project overlay in task-preamble ({project} slot):" in out
-    assert f"{slug}" in out and "notes (registry)" in out
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert f"{slug} fills task-preamble's {{project}} slot" in out
+    assert "notes (registry)" in out
     assert ".quorum/task-preamble.local.md" in out
 
     # a block quorum cannot decode is dropped at render time — say so here
     (repo / ".quorum" / "task-preamble.local.md").write_bytes(b"just \xff\xfe check\n")
-    out = _plain(runner.invoke(app, ["prompt", "list"]).output)
-    assert "? .quorum/task-preamble.local.md unreadable" in out
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "cannot be read — it is ignored when rendering" in out
 
     # ...and so is a block with nowhere to go, in a rewritten preamble
+    (repo / ".quorum" / "task-preamble.local.md").write_text("run `just check`\n")
     (home / "prompts" / "task-preamble.md").write_text("my own rewritten preamble\n")
-    out = _plain(runner.invoke(app, ["prompt", "list"]).output)
-    assert "has no {project} slot — these overlays are never rendered" in out
+    out = _plain(runner.invoke(app, ["doctor"]).output)
+    assert "has no {project} slot" in out
+    assert "these per-project blocks are never rendered" in out
 
 
 def test_project_add_validates_the_directory(home: Path, tmp_path: Path):
@@ -1147,10 +1154,12 @@ def test_project_add_validates_the_directory(home: Path, tmp_path: Path):
 def test_destructive_commands_pass_through_without_a_tty(home: Path, tmp_path: Path):
     """CliRunner's stdin is not a tty, so scripts and harness-driven agents
     keep working with no prompt; --yes is for interactive shells."""
-    slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(app, ["project", "remove", slug])
-    assert r.exit_code == 0
-    assert "removed" in r.output
+    from quorum.messages import MessageBus
+
+    MessageBus(home).post("manager", "attention", "escalation", text="look at this")
+    r = runner.invoke(app, ["board", "clear", "attention"])
+    assert r.exit_code == 0, r.output
+    assert "archived 1 message(s)" in r.output
 
 
 def test_up_detach_and_down(home: Path):
@@ -1264,8 +1273,7 @@ def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, m
 
     r = runner.invoke(app, ["task", "list"])
     assert "$! GATED" in r.output
-    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
-    assert row["budget_gated"] is True
+    assert views.task_rows(home)[0]["budget_gated"] is True
     r = runner.invoke(app, ["task", "show", short])
     assert "gated:    the last run exceeded its budget" in r.output
 
@@ -1275,33 +1283,6 @@ def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, m
 
 
 # -- perpetual tasks (#12) ---------------------------------------------------
-
-
-def test_perpetual_tasks_are_queued_and_badged_everywhere(home: Path, tmp_path: Path):
-    slug = setup_task_env(home, tmp_path)
-    r = runner.invoke(
-        app,
-        ["task", "add", slug, "watch CI forever", "--perpetual", "--harness", "fake"],
-    )
-    assert r.exit_code == 0, r.output
-    assert "queued perpetual task" in r.output and "task cancel" in r.output
-    short = r.output.split("queued perpetual task ")[1].split(" ")[0]
-
-    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
-    assert row["perpetual"] is True
-
-    assert "∞" in runner.invoke(app, ["task", "list"]).output
-    assert "∞" in runner.invoke(app, ["status"]).output
-    assert "∞" in runner.invoke(app, ["status", "--legend"]).output
-    assert "perpetual" in runner.invoke(app, ["task", "show", short]).output
-
-
-def test_an_ordinary_task_carries_no_perpetual_badge(home: Path, tmp_path: Path):
-    slug = setup_task_env(home, tmp_path)
-    runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake"])
-    row = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)[0]
-    assert row["perpetual"] is False
-    assert "∞" not in runner.invoke(app, ["task", "list"]).output
 
 
 # -- the merged observation (#57) --------------------------------------------
@@ -1321,8 +1302,7 @@ def test_a_merged_or_closed_pr_is_badged_everywhere(home: Path, tmp_path: Path):
     store.update(dropped.id, pr_state="closed", pr_state_at="2026-01-01T00:00:00Z")
     store.add(slug, "never observed", "fake", status="done")
 
-    rows = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)
-    assert [r["pr_state"] for r in rows] == ["merged", "closed", None]
+    assert [r["pr_state"] for r in views.task_rows(home)] == ["merged", "closed", None]
 
     listing = runner.invoke(app, ["task", "list"]).output
     assert "done ✔" in listing and "done ⊘" in listing
@@ -1338,9 +1318,7 @@ def test_a_task_with_no_observed_pr_state_is_not_badged(home: Path, tmp_path: Pa
     runner.invoke(app, ["task", "add", slug, "one-off", "--harness", "fake"])
     listing = runner.invoke(app, ["task", "list"]).output
     assert "✔" not in listing and "⊘" not in listing
-    short = json.loads(
-        runner.invoke(app, ["task", "list", "--json"]).output
-    )[0]["id_short"]
+    short = views.task_rows(home)[0]["id_short"]
     assert "pr state" not in runner.invoke(app, ["task", "show", short]).output
 
 
@@ -1372,11 +1350,10 @@ def test_load_config_or_default_is_the_one_fallback(home: Path, tmp_path: Path):
 
 def test_views_still_render_over_a_broken_config(home: Path):
     """Views never demand config: a syntax error must not blank the dashboard."""
-    from quorum import views
-
     (home / "config.toml").write_text("nonsense = [[[")
-    overview = views.overview(home)
-    assert overview["agents"] == [] and overview["tasks"] == []
+    assert views.agent_rows(home) == [] and views.task_rows(home) == []
+    assert views.project_rows(home) == []
+    assert runner.invoke(app, ["status"]).exit_code == 0
 
 
 # -- listings as Rich tables (#52) -------------------------------------------
@@ -1388,7 +1365,7 @@ def _wide_task_rows() -> list[dict]:
     return [
         {
             "id_short": "38hskq", "project": "quorum", "status": "executing",
-            "harness": "claude", "running": True, "attached": False, "perpetual": False,
+            "harness": "claude", "running": True, "attached": False,
             "last_report": "implementing the rich table for status rows\nand making sure "
                            "nothing wraps at eighty columns even with every field lit",
             "pr_url": "https://github.com/kvndhrty/quorum/pull/49",
@@ -1428,7 +1405,7 @@ def test_task_table_fits_eighty_columns_without_wrapping(capsys):
     assert "#49" in first and "$12.31 · 17.4M tok $!" in first
     assert "…" in first  # the report gave way
     assert "https://" not in first  # the URL itself only in `task show`
-    assert "✓ a3f2k9" in second and "done ∞" in second and "1.2k tok" in second
+    assert "✓ a3f2k9" in second and "done" in second and "1.2k tok" in second
 
 
 def test_task_table_is_whole_and_plain_off_a_terminal(capsys):
@@ -1573,8 +1550,9 @@ def test_agent_and_project_listings_are_tables(home: Path, tmp_path: Path):
     assert projects[0].split() == ["slug", "due"]  # name == slug is not repeated
     assert projects[1].startswith(slug) and "2099-01-01 (" in projects[1]
 
-    r = runner.invoke(app, ["project", "list"])
-    assert r.exit_code == 0 and r.output.split("\n")[1].startswith(slug)
+    # projects are listed by `status` alone; the registry itself is
+    # projects/<slug>.json (invariant 2)
+    assert (home / "projects" / f"{slug}.json").is_file()
 
 
 # -- handoffs (#92) ---------------------------------------------------------

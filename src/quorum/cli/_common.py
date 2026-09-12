@@ -38,13 +38,18 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
-board_app = typer.Typer(help="Read and post to the public message board.", no_args_is_help=True)
+board_app = typer.Typer(
+    help="Read and post messages: the public board, and one agent's inbox.",
+    no_args_is_help=True,
+)
 project_app = typer.Typer(help="Manage registered projects.", no_args_is_help=True)
 agent_app = typer.Typer(help="Inspect, run, and control agents.", no_args_is_help=True)
 task_app = typer.Typer(help="Create, run, and guide harness-driven tasks.", no_args_is_help=True)
-manager_app = typer.Typer(help="Talk to (and audit) the manager agent.", no_args_is_help=True)
+manager_app = typer.Typer(
+    help="An agent's own journal and notebook writes.", no_args_is_help=True
+)
 prompt_app = typer.Typer(
-    help="Inspect prompt templates and their local overlays.", no_args_is_help=True
+    help="Diff a prompt template against the packaged default.", no_args_is_help=True
 )
 integration_app = typer.Typer(
     help="Install harness adapters (session-adoption hooks and plugins).", no_args_is_help=True
@@ -322,13 +327,13 @@ def _task_action(action: str, task_id: str, args: str | None = None):
 
 # -- tables ----------------------------------------------------------------
 #
-# Every listing (`status`, `task list`, `agent list`, `project list`) is a
+# Every listing (`status`, `task list`, `agent list`) is a
 # Rich table (typer already depends on rich): one column per field, so a
 # row stays a row instead of a string that grows a clause per feature and
 # wraps mid-cell past column 80. The same table renders two ways:
 #
 #   - on a terminal it is *fitted* to the window: the report/flags (or
-#     error/tags) columns absorb the shortfall with an ellipsis — a cut cell
+#     error/due) columns absorb the shortfall with an ellipsis — a cut cell
 #     where a wrapped one used to be — so id, status, harness, pr and usage
 #     stay whole down to the width where the give-way column has nothing
 #     left to give (roughly 60 columns for a task listing). Below that floor
@@ -383,8 +388,7 @@ _AGENT_COLUMNS: list[tuple[str, dict[str, Any]]] = [
 _PROJECT_COLUMNS: list[tuple[str, dict[str, Any]]] = [
     ("slug", _NO_WRAP),
     ("name", _NO_WRAP),
-    ("due", _NO_WRAP),
-    ("tags", _give_way(1)),
+    ("due", _give_way(1)),
 ]
 
 
@@ -522,7 +526,6 @@ def _project_cells(p: dict) -> dict[str, str]:
         "slug": p["slug"],
         "name": p["name"] if p["name"] != p["slug"] else "",
         "due": due,
-        "tags": ", ".join(p["tags"] or []),
     }
 
 

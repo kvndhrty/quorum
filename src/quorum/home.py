@@ -24,9 +24,6 @@ DEFAULT_CONFIG = """\
 [tasks]
 default_harness = ""      # e.g. "claude"
 worktree = true           # each task runs in its own git worktree
-#auto_commit = true       # safety net: commit whatever a run leaves uncommitted
-                          # in its worktree, so a crashed harness loses nothing
-                          # (skipped under [sandbox].use_nono — git is blocked there)
 #max_cost_per_run = 5.0   # budget observation (0 = off): a run that reports
 #max_tokens_per_run = 0   # more spend than this is flagged in the digest and
                           # in `quorum status`. Nothing is killed or refused
@@ -181,6 +178,10 @@ def classify_prompt(existing: str | None, current: str, seeded: str | None) -> s
     or "edited" (anything else: the user's own words, over a default that
     has since moved on; also any differing copy with no record, since a
     lost record must never turn into an overwrite).
+
+    `existing` is None for a file that is not there *and* for one that
+    cannot be read — the caller tells them apart, because seeding over a
+    file quorum merely failed to decode would destroy it.
     """
     if existing is None:
         return "missing"
@@ -201,8 +202,12 @@ def classify_prompts(home: Path) -> dict[str, str]:
         dest = target / filename
         try:
             existing = dest.read_text(encoding="utf-8") if dest.is_file() else None
-        except OSError:
-            existing = None
+        except (OSError, UnicodeDecodeError):
+            # There *is* a file; quorum just cannot read it. Its own state,
+            # never "missing": every render of it fails, and seeding over it
+            # would silently destroy whatever it holds.
+            states[filename] = "unreadable"
+            continue
         states[filename] = classify_prompt(existing, current, record.get(filename))
     return states
 
@@ -216,9 +221,10 @@ def _seed_prompts(home: Path) -> dict[str, str]:
     has moved on it is reported as "edited" so the CLI can tell the user.
     Every file seeded, upgraded or found identical to the current default
     is (re)recorded in prompts/.seeded.json — so a home that predates the
-    record picks one up as long as its copies are pristine. Returns
-    {filename: "seeded" | "upgraded" | "edited"} covering only files that
-    changed or need attention.
+    record picks one up as long as its copies are pristine. A file quorum
+    cannot read is left exactly as it is and recorded under no hash. Returns
+    {filename: "seeded" | "upgraded" | "edited" | "unreadable"} covering only
+    files that changed or need attention.
     """
     target = home / "prompts"
     outcomes: dict[str, str] = {}
@@ -237,7 +243,9 @@ def _seed_prompts(home: Path) -> dict[str, str]:
             outcomes[filename] = "upgraded"
         elif state == "edited":
             outcomes[filename] = "edited"
-        if state != "edited":
+        elif state == "unreadable":
+            outcomes[filename] = "unreadable"
+        if state not in ("edited", "unreadable"):
             recorded[filename] = _sha256(current)
     if recorded != record:
         fsio.atomic_write_json(seeded_record_path(home), recorded)

@@ -127,8 +127,6 @@ def select(
 ) -> list[Task]:
     """The tasks matching the prune filters — pure over an already-loaded list.
 
-    A perpetual task is never selected: it is not meant to finish, so a
-    terminal status on one is an accident of reporting, not a life ended.
     Age is measured from `updated_at` (the last report or run), which is what
     "finished a week ago" means to a reader.
     """
@@ -140,7 +138,7 @@ def select(
     )
     out = []
     for task in tasks:
-        if task.perpetual or task.status.lower() not in wanted:
+        if task.status.lower() not in wanted:
             continue
         if floor is not None:
             updated = fsio.parse_iso_or(task.updated_at)

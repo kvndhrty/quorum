@@ -16,7 +16,6 @@ from .home import CONFIG_NAME
 
 class SandboxConfig(BaseModel):
     use_nono: bool = False
-    profile: str = ""
     # A user-authored nono-style JSON profile ({"fs_read": [...], "fs_write":
     # [...], "network": [...]}) merged into the capability sets quorum derives
     # for self-sandbox and task runs — the same file works with the nono
@@ -65,12 +64,6 @@ class HarnessConfig(BaseModel):
 class TasksConfig(BaseModel):
     worktree: bool = True
     default_harness: str = ""
-    # Opt-in safety net (runner.py): after a run, commit whatever the harness
-    # left uncommitted in its worktree, so a crashed or forgetful harness can
-    # never lose work — branches outlive worktrees. Off by default, and only
-    # ever applied to a task's own worktree, never the user's checkout; a
-    # nono-sandboxed run skips it with a note (the sandbox blocks git).
-    auto_commit: bool = False
     # Per-run token/cost budget (usage.py). 0 = off, which is the default and
     # what any harness that reports no usage always effectively gets. A run
     # over budget is flagged in the digest and in views, and — the rail in
@@ -108,7 +101,9 @@ class HerdrConfig(BaseModel):
 
 class CIConfig(BaseModel):
     """Optional [ci] table for every forge-CLI call (forge.py): the fail-soft
-    PR/checks probe behind `ci.pr_state`, and `task add --issue`.
+    PR/checks probe behind `ci.pr_state`, and `task add --issue`. One switch:
+    the call timeout is `forge.TIMEOUT_SECONDS`, a module constant, because
+    `pr_state` is fail-soft either way.
 
     Absent config is fine: the probe auto-detects `gh` and silently does
     nothing without it. Set `enabled = false` to stop the manager's digest
@@ -116,7 +111,6 @@ class CIConfig(BaseModel):
     then says so rather than going quiet, since someone typed the flag."""
 
     enabled: bool = True
-    timeout_seconds: float = 10.0
 
 
 class NotifyConfig(BaseModel):
@@ -163,7 +157,6 @@ class NotifyConfig(BaseModel):
 
 
 class QuorumSection(BaseModel):
-    timezone: str = "local"
     retention_days: int = 30
 
 

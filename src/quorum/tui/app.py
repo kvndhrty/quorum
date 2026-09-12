@@ -2,10 +2,10 @@
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
 CLI makes: `n` sends guidance into a task's inbox, `m` sends a
-guidance to the manager's inbox (`quorum manager tell`), `s` launches a
+guidance to the manager's inbox (`quorum board post --to manager`), `s` launches a
 detached run, `c` cancels a task — the one destructive binding, so it confirms
 first — and `a` acks an escalation off the #attention banner
-(`quorum board ack`).
+(`quorum board clear --id`).
 
 Two rules hold for all of them. They act on what the reader is *looking at* —
 the highlighted row while the task table has focus, the open task while
@@ -363,7 +363,7 @@ class QuorumTUI(App):
         if target == "manager":
             sent = self._write(
                 "queue the guidance",
-                lambda: MessageBus(self.home).send("user", "manager", type="directive", text=text),
+                lambda: MessageBus(self.home).send("user", "manager", type="guidance", text=text),
             )
             if sent is FAILED:
                 return
@@ -392,7 +392,7 @@ class QuorumTUI(App):
 
         Every row the dashboard offers is a *snapshot*, so the thing a write
         names can also be gone by the time the key is pressed — an escalation
-        the janitor or another `board ack` archived out of band.
+        the janitor or another `board clear` archived out of band.
         That surfaces as the KeyError/ValueError board resolution raises, not
         as OSError, and it is the same class of disappointment: say so and keep
         the view up."""

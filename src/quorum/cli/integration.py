@@ -59,10 +59,8 @@ _ADAPTER_NOTES = {
 }
 
 
-@integration_app.command("list")
-def integration_list() -> None:
-    """Show the bundled harness adapters and whether they are installed."""
-    root = _integrations_root()
+def _print_adapters(root: Path) -> None:
+    """The bundled adapters and whether each is installed (`install --list`)."""
     for name in ("claude-code", "codex", "opencode"):
         if name == "claude-code":
             state = "plugin-managed"
@@ -82,7 +80,10 @@ def integration_list() -> None:
 
 @integration_app.command("install")
 def integration_install(
-    name: str = typer.Argument(help="Adapter: claude-code, codex, or opencode."),
+    name: str = typer.Argument("", help="Adapter: claude-code, codex, or opencode."),
+    list_only: bool = typer.Option(
+        False, "--list", help="Show the bundled adapters and whether they are installed."
+    ),
     force: bool = typer.Option(False, "--force", help="Overwrite existing destination files."),
 ) -> None:
     """Install a harness adapter so live sessions can be adopted (`quorum task adopt`).
@@ -90,8 +91,18 @@ def integration_install(
     Copies the adapter's hook config or plugin to the harness's user-wide
     config location; per-project installs are described in the adapter's
     README (integrations/<name>/README.md in the repo).
+
+    `quorum integration install --list` names the bundled adapters and says
+    which of them this machine already has.
     """
     root = _integrations_root()
+    if list_only:
+        if name:
+            raise _fail("--list shows every adapter; drop the name")
+        _print_adapters(root)
+        return
+    if not name:
+        raise _fail("name an adapter to install, or --list to see them")
     if name == "claude-code":
         typer.echo("Claude Code adapters install through its plugin manager — run:")
         typer.echo(f"  claude plugin install {root / 'claude-code'}")

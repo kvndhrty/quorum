@@ -6,7 +6,7 @@ reports and output, plus the manager's own recent action journal and any
 guidance the user sent — renders it into the user-editable
 `prompts/manager.md`, and runs the configured coding harness over it. The
 harness then acts with real authority by invoking the quorum CLI:
-`task add/run/nudge/cancel`, `agent pause/resume/run-now`, `board post`,
+`task add/run/nudge/cancel`, `agent resume`, `board post`,
 `quorum manager note`. Every mutating action it takes is auto-journaled by
 the CLI (tagged with this run's id) and capped per run; the journal is fed
 back into the next digest so the manager can see which of its interventions
@@ -503,28 +503,12 @@ def build_digest(
             # the state a PR sits in for the whole of a task's working life,
             # is rendered by no surface, so taking that race for it buys
             # nothing. A merge (or a close) is the opposite: durable, badged
-            # everywhere, and a PR can land while its task is still running —
-            # and a perpetual task never reaches a terminal status at all, so
-            # waiting for one would mean never recording its merge.
+            # everywhere, and a PR can land while its task is still
+            # running, so waiting for a terminal status could mean never
+            # recording the merge at all.
             tasks.record_pr_state(home, task, state["state"], now=now)
         return state
 
-    # A perpetual task is never supposed to finish, so one that reported a
-    # terminal status is either the user ending it (cancelled — fine) or a
-    # harness that ignored its cycle instructions. The digest lists only
-    # live tasks, so without this line the failure would be invisible.
-    ended = [
-        t for t in all_tasks
-        if t.perpetual and t.status in tasks.TERMINAL_STATUSES and t.status != "cancelled"
-    ]
-    for t in ended:
-        lines.append(
-            f"PERPETUAL-ENDED {t.short_id}: reported {t.status!r} — a perpetual task never "
-            "finishes; relaunch it with a nudge about its cycle instructions unless the user "
-            "ended it"
-        )
-    if ended:
-        lines.append("")
     lines.append("## Active tasks")
     if not active:
         lines.append("(none)")
@@ -547,9 +531,6 @@ def build_digest(
             # task whose PR has landed is not probed again, so without this
             # the merge would be visible for exactly one tick.
             + (f" pr_state={t.pr_state}" if t.pr_state else "")
-            # Only when true: an ordinary task's line stays as it was, and
-            # the marker reads as the exception it is.
-            + (" perpetual=true" if t.perpetual else "")
             # Where the work came from, when it came from a forge issue
             # (`task add --issue`): the short form, so you can tell the user
             # "the task for #62 is done". `quorum task show` has the url.
@@ -599,12 +580,8 @@ def build_digest(
         # append-only, so a dead task would stay flagged forever), and only
         # entries newer than the last *completed* run — after a relaunch, the
         # previous run's spinning must not indict the fresh one.
-        # A perpetual task is exempt: cycling over the same few tool calls
-        # forever IS its job, so the repetition read has nothing to say about
-        # it and the flag would fire every tick, teaching the manager to
-        # ignore a signal that still means something on ordinary tasks.
         loop = None
-        if alive and not t.perpetual:
+        if alive:
             boundary = t.runs[-1].ended_at if t.runs else None
             current = [e for e in scan if not boundary or e.get("at", "") >= boundary]
             loop = loop_signal(current)

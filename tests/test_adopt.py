@@ -1,7 +1,7 @@
 """Adopting a live interactive session as an attached task.
 
 The harness side is exercised the way a real hook invokes it: `quorum task
-hook-stop` / `hook-session-end` through the CLI with the hook's JSON on
+hook stop` / `task hook session-end` through the CLI with the hook's JSON on
 stdin. No quorum-spawned process exists for an attached task — that's the
 point.
 """
@@ -71,7 +71,7 @@ def test_hook_stop_delivers_pending_guidance_and_consumes_it(home: Path, repo: P
     bus = MessageBus(home)
     bus.send("manager", inbox_name(task.id), type="guidance", text="run the tests before pushing")
 
-    r = runner.invoke(app, ["task", "hook-stop"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "stop"], input=stop_payload(task))
     assert r.exit_code == 0, r.output
     out = json.loads(r.output)
     assert out["decision"] == "block"
@@ -80,7 +80,7 @@ def test_hook_stop_delivers_pending_guidance_and_consumes_it(home: Path, repo: P
     assert attached_state(home, task.id)["event"] == "stop"
 
     # no guidance queued: silent, and never blocks (no delivery loop)
-    r = runner.invoke(app, ["task", "hook-stop"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "stop"], input=stop_payload(task))
     assert r.exit_code == 0 and r.output.strip() == ""
 
 
@@ -89,7 +89,7 @@ def test_hook_stop_text_format_prints_bare_guidance(home: Path, repo: Path):
     bus = MessageBus(home)
     bus.send("manager", inbox_name(task.id), type="guidance", text="run the tests before pushing")
 
-    r = runner.invoke(app, ["task", "hook-stop", "--format", "text"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "stop", "--format", "text"], input=stop_payload(task))
     assert r.exit_code == 0, r.output
     # bare text for shims that inject the continuation themselves — no JSON
     assert "run the tests before pushing" in r.output
@@ -97,13 +97,13 @@ def test_hook_stop_text_format_prints_bare_guidance(home: Path, repo: Path):
         json.loads(r.output)
     assert not bus.pending(inbox_name(task.id))
 
-    r = runner.invoke(app, ["task", "hook-stop", "--format", "text"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "stop", "--format", "text"], input=stop_payload(task))
     assert r.exit_code == 0 and r.output.strip() == ""
 
 
 def test_hook_stop_rejects_unknown_format(home: Path, repo: Path):
     task = adopt(home, repo)
-    r = runner.invoke(app, ["task", "hook-stop", "--format", "xml"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "stop", "--format", "xml"], input=stop_payload(task))
     assert r.exit_code != 0
 
 
@@ -127,7 +127,7 @@ def test_hook_stop_accepts_codex_shaped_payload(home: Path, repo: Path):
             "transcript_path": None,
         }
     )
-    r = runner.invoke(app, ["task", "hook-stop"], input=payload)
+    r = runner.invoke(app, ["task", "hook", "stop"], input=payload)
     assert r.exit_code == 0, r.output
     out = json.loads(r.output)
     assert out["decision"] == "block" and "prefer smaller commits" in out["reason"]
@@ -141,14 +141,14 @@ def test_hook_session_start_refreshes_liveness_and_learns_the_session(home: Path
     payload = json.dumps(
         {"session_id": "sess-from-start", "cwd": str(repo), "source": "startup"}
     )
-    r = runner.invoke(app, ["task", "hook-session-start"], input=payload)
+    r = runner.invoke(app, ["task", "hook", "session-start"], input=payload)
     assert r.exit_code == 0 and r.output.strip() == ""
     assert attached_state(home, task.id)["event"] == "session-start"
     assert TaskStore(home).get(task.id).session == "sess-from-start"
 
     # un-adopted sessions stay silent
     payload = json.dumps({"session_id": "sess-other", "cwd": "/nowhere"})
-    r = runner.invoke(app, ["task", "hook-session-start"], input=payload)
+    r = runner.invoke(app, ["task", "hook", "session-start"], input=payload)
     assert r.exit_code == 0 and r.output.strip() == ""
 
 
@@ -157,7 +157,7 @@ def test_hook_stop_matches_by_cwd_and_learns_the_session(home: Path, repo: Path)
     TaskStore(home).update(task.id, session=None)  # adopted without --session
 
     payload = json.dumps({"session_id": "sess-learned", "cwd": str(repo)})
-    r = runner.invoke(app, ["task", "hook-stop"], input=payload)
+    r = runner.invoke(app, ["task", "hook", "stop"], input=payload)
     assert r.exit_code == 0, r.output
     assert TaskStore(home).get(task.id).session == "sess-learned"
 
@@ -172,15 +172,15 @@ def test_hook_stop_ignores_a_second_session_in_the_same_checkout(home: Path, rep
     bus.send("manager", inbox_name(task.id), type="guidance", text="for the adopted session only")
 
     intruder = json.dumps({"session_id": "sess-intruder", "cwd": str(repo)})
-    r = runner.invoke(app, ["task", "hook-stop"], input=intruder)
+    r = runner.invoke(app, ["task", "hook", "stop"], input=intruder)
     assert r.exit_code == 0 and r.output.strip() == ""
     assert TaskStore(home).get(task.id).session == "sess-live-1"
     assert bus.pending(inbox_name(task.id))  # guidance not stolen
 
     # the adopted session ends; a session under a fresh id now re-associates
-    r = runner.invoke(app, ["task", "hook-session-end"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "session-end"], input=stop_payload(task))
     assert r.exit_code == 0, r.output
-    r = runner.invoke(app, ["task", "hook-stop"], input=intruder)
+    r = runner.invoke(app, ["task", "hook", "stop"], input=intruder)
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["decision"] == "block"
     assert TaskStore(home).get(task.id).session == "sess-intruder"
@@ -199,13 +199,13 @@ def test_task_run_detach_refuses_attached_tasks(home: Path, repo: Path):
 def test_hook_stop_ignores_unadopted_sessions(home: Path, repo: Path, tmp_path: Path):
     adopt(home, repo)
     payload = json.dumps({"session_id": "sess-other", "cwd": str(tmp_path / "elsewhere")})
-    r = runner.invoke(app, ["task", "hook-stop"], input=payload)
+    r = runner.invoke(app, ["task", "hook", "stop"], input=payload)
     assert r.exit_code == 0 and r.output.strip() == ""
 
 
 def test_hook_session_end_records_the_event(home: Path, repo: Path):
     task = adopt(home, repo)
-    r = runner.invoke(app, ["task", "hook-session-end"], input=stop_payload(task))
+    r = runner.invoke(app, ["task", "hook", "session-end"], input=stop_payload(task))
     assert r.exit_code == 0, r.output
     st = attached_state(home, task.id)
     assert st["event"] == "session-end"
