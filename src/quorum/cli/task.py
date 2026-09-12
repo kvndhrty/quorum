@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -42,13 +43,12 @@ from ._common import (
 
 @task_app.command("add")
 def task_add(
-    project: str = typer.Argument(help="Registered project slug (see `quorum project list`)."),
+    project: str = typer.Argument(help="Registered project slug (see `quorum status`)."),
     prompt: str = typer.Argument("", help="What the harness should do — or `-` to read it from stdin."),
     issue: str | None = typer.Option(None, "--issue", help="Queue this forge issue (number or URL): its title and body become the prompt."),
     harness: str | None = typer.Option(None, "--harness", help="\\[harness.<name>] to use (default: \\[tasks].default_harness)."),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Run in the project dir itself instead of a git worktree."),
     after: list[str] = typer.Option(None, "--after", help="Do not start before this task finishes (repeatable; accepts short ids)."),
-    perpetual: bool = typer.Option(False, "--perpetual", help="A task that is never expected to finish: the manager relaunches it forever and only you end it."),
 ) -> None:
     """Queue a task. The manager starts it while `quorum up` runs; or start it
     yourself with `quorum task run`.
@@ -68,11 +68,6 @@ def task_add(
 
     Chain work with --after: `quorum task add my-api "review the PR" --after a1b2c3`
     queues a task the manager will not launch until a1b2c3 finishes.
-
-    With --perpetual the task works in cycles instead of finishing: its
-    preamble tells it to deliver every cycle and never report done, the
-    manager relaunches it whenever its runner dies, and `quorum task cancel`
-    is the only way it ends.
     """
     from ..projects import ProjectRegistry
     from ..tasks import TaskStore, resolve_dependencies, short_handle
@@ -122,20 +117,14 @@ def task_add(
         harness=name,
         use_worktree=config.tasks.worktree and not no_worktree,
         depends_on=depends_on,
-        perpetual=perpetual,
         issue_url=issue_url,
     )
-    kind = "perpetual task" if perpetual else "task"
-    typer.secho(f"queued {kind} {task.short_id} on {project} (harness: {name})", fg="green")
+    typer.secho(f"queued task {task.short_id} on {project} (harness: {name})", fg="green")
     if issue_url:
         typer.echo(f"from issue: {issue_url}")
     if depends_on:
         waiting = ", ".join(short_handle(d) for d in depends_on)
         typer.echo(f"waits on: {waiting} — `task run` refuses until they finish (--force overrides)")
-    if perpetual:
-        typer.echo(
-            f"it runs in cycles and never reports done — end it with `quorum task cancel {task.short_id}`"
-        )
     typer.echo(f"start now: `quorum task run {task.short_id}` — or let the manager pick it up under `quorum up`")
 
 
@@ -153,7 +142,8 @@ def task_adopt(
     Creates an *attached* task pointing at the session's own directory —
     quorum never spawns runs for it. The manager observes it like any task
     and guides it with `quorum task nudge`; a harness-side hook (see
-    `quorum integration list`) delivers the guidance into the live session.
+    `quorum integration install --list`) delivers the guidance into the live
+    session.
 
     Example: quorum task adopt "refactoring the auth flow"  (from the session's directory)
     """
@@ -264,27 +254,44 @@ def _read_hook_payload() -> dict:
         return {}
 
 
-@task_app.command("hook-stop", rich_help_panel="Harness protocol")
-def task_hook_stop(
+class HookEvent(StrEnum):
+    session_start = "session-start"
+    stop = "stop"
+    session_end = "session-end"
+
+
+@task_app.command("hook", rich_help_panel="Harness protocol")
+def task_hook(
+    event: HookEvent = typer.Argument(
+        ..., case_sensitive=False, help="Which lifecycle hook fired."
+    ),
     format: str = typer.Option(
         "decision",
         "--format",
-        help="Output when guidance is waiting: 'decision' (the Claude Code/Codex "
-        "Stop-hook block protocol) or 'text' (bare guidance lines, for shims that "
-        "inject the continuation themselves, e.g. the opencode plugin).",
+        help="Output when guidance is waiting on `stop`: 'decision' (the Claude "
+        "Code/Codex Stop-hook block protocol) or 'text' (bare guidance lines, for "
+        "shims that inject the continuation themselves, e.g. the opencode plugin).",
     ),
 ) -> None:
-    """Harness stop/idle-hook entry point (reads the hook's JSON on stdin).
+    """Harness lifecycle-hook entry point (reads the hook's JSON on stdin).
 
-    For an attached session this refreshes its liveness record and, when
-    guidance is waiting in the task inbox, emits it — by default as the
-    Stop-hook block-protocol JSON that continues the session (Claude Code and
-    Codex speak the same one). For everything else it exits 0 silently — the
-    hook is installed globally, so this must stay cheap and mute.
+    One command per installed hook, named by the event:
+
+      session-start  refresh an attached task's liveness record and learn the
+                     (possibly new) session id — harnesses whose sessions
+                     can't shell out with their own id at adopt time (Codex)
+                     get it associated here instead.
+      stop           refresh liveness and, when guidance is waiting in the
+                     task inbox, emit it — by default as the Stop-hook
+                     block-protocol JSON that continues the session (Claude
+                     Code and Codex speak the same one).
+      session-end    record that an attached session ended (the task stays
+                     attached — sessions get reopened).
+
+    For anything that is not an attached task it exits 0 silently: the hooks
+    are installed globally, so this must stay cheap and mute.
     """
-    from ..messages import MessageBus
-    from ..runner import guidance_note
-    from ..tasks import TaskStore, inbox_name, write_attached_state
+    from ..tasks import TaskStore, write_attached_state
 
     if format not in ("decision", "text"):
         raise _fail(f"unknown --format {format!r} (expected 'decision' or 'text')")
@@ -296,9 +303,26 @@ def task_hook_stop(
     task = _match_attached(target, session_id, str(payload.get("cwd") or ""))
     if task is None:
         raise typer.Exit(0)
-    write_attached_state(target, task.id, "stop", session_id or task.session)
+    if event is HookEvent.session_end:
+        # The session is gone, so there is no id to learn and nothing to
+        # deliver into: record the event and stop.
+        write_attached_state(target, task.id, "session-end", task.session)
+        return
+    write_attached_state(target, task.id, event.value, session_id or task.session)
     if session_id and session_id != task.session:
         TaskStore(target).update(task.id, session=session_id)
+    if event is HookEvent.session_start:
+        return
+    _deliver_guidance(target, task, format)
+
+
+def _deliver_guidance(target: Path, task, format: str) -> None:
+    """The `stop` hook's second half: hand the session whatever guidance is
+    waiting in its inbox."""
+    from ..messages import MessageBus
+    from ..runner import guidance_note
+    from ..tasks import inbox_name
+
     claimed = list(MessageBus(target).claim(inbox_name(task.id)))
     if not claimed:
         raise typer.Exit(0)
@@ -320,56 +344,12 @@ def task_hook_stop(
         c.ack()
 
 
-@task_app.command("hook-session-start", rich_help_panel="Harness protocol")
-def task_hook_session_start() -> None:
-    """Harness SessionStart-hook entry point: refreshes an attached task's
-    liveness record and learns the (possibly new) session id — harnesses
-    whose sessions can't shell out with their own id at adopt time (Codex)
-    get it associated here instead."""
-    from ..tasks import TaskStore, write_attached_state
-
-    payload = _read_hook_payload()
-    target = get_home(must_exist=False)
-    if not (target / home_mod.CONFIG_NAME).exists():
-        raise typer.Exit(0)
-    session_id = str(payload.get("session_id") or "")
-    task = _match_attached(target, session_id, str(payload.get("cwd") or ""))
-    if task is None:
-        raise typer.Exit(0)
-    write_attached_state(target, task.id, "session-start", session_id or task.session)
-    if session_id and session_id != task.session:
-        TaskStore(target).update(task.id, session=session_id)
-
-
-@task_app.command("hook-session-end", rich_help_panel="Harness protocol")
-def task_hook_session_end() -> None:
-    """Harness SessionEnd-hook entry point: records that an attached session
-    ended (the task stays attached — sessions get reopened)."""
-    from ..tasks import write_attached_state
-
-    payload = _read_hook_payload()
-    target = get_home(must_exist=False)
-    if not (target / home_mod.CONFIG_NAME).exists():
-        raise typer.Exit(0)
-    task = _match_attached(
-        target, str(payload.get("session_id") or ""), str(payload.get("cwd") or "")
-    )
-    if task is None:
-        raise typer.Exit(0)
-    write_attached_state(target, task.id, "session-end", task.session)
-
-
 @task_app.command("list")
-def task_list(
-    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-) -> None:
+def task_list() -> None:
     """List tasks, newest last (`quorum status --legend` explains the glyphs)."""
     from .. import views
 
     rows = views.task_rows(get_home())
-    if json_out:
-        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
-        return
     if not rows:
         typer.echo("no tasks — `quorum task add <project> \"<prompt>\"`")
         return
@@ -379,10 +359,21 @@ def task_list(
 @task_app.command("show")
 def task_show(
     task_id: str,
-    json_out: bool = typer.Option(False, "--json", help="Dump the full task record as JSON."),
+    history: bool = typer.Option(
+        False, "--history", help="Print everything that happened to it instead, oldest first."
+    ),
 ) -> None:
     """Show one task: what it is, where it stands, its recent reports and
-    its notebook."""
+    its notebook.
+
+    `--history` is the other reading of the same task — not where it stands
+    but how it got there: queued, each run's start and end (exit, cost,
+    stopped, stalled, fresh session), every report, guidance sent to it and
+    by whom, the PR state the manager observed, what the manager (or any
+    agent) did to it, and its archival. Read straight off the files, so it
+    works with the supervisor stopped and still answers for a task `task
+    prune` has moved into tasks/.archive.
+    """
     from .. import notes as notes_mod
     from .. import views
     from ..config import load_config_or_default
@@ -396,23 +387,19 @@ def task_show(
     )
 
     target = get_home()
-    task = _resolve_task(target, task_id)
-    if json_out:
-        typer.echo(json.dumps(task.model_dump(), indent=2, ensure_ascii=False))
+    if history:
+        _task_history(target, task_id)
         return
+    task = _resolve_task(target, task_id)
     running = runner_alive(target, task.id)
     # The badges every listing shows, then the words this surface has room
     # for. `views.task_badges` reads a row, and the two fields it wants are
     # on the task itself.
-    state = task.status + views.task_badges(
-        {"perpetual": task.perpetual, "pr_state": task.pr_state}
-    )
+    state = task.status + views.task_badges({"pr_state": task.pr_state})
     if task.attached:
         state += " (attached to a live session)"
     elif running:
         state += " (runner alive)"
-    if task.perpetual:
-        state += " [perpetual — only you end it]"
     typer.echo(f"task {task.short_id}  ({task.id})")
     typer.echo(f"  project:  {task.project}")
     typer.echo(f"  status:   {state}")
@@ -507,29 +494,26 @@ def task_show(
         typer.echo("handoff (what this task left for the tasks that depend on it):")
         for line in handoff.rstrip("\n").splitlines():
             typer.echo(f"  {line}")
-    typer.echo(f"more: `quorum task log {task.short_id}` for the transcript, `--json` for the raw record")
+    typer.echo(
+        f"more: `quorum task log {task.short_id}` for the transcript, "
+        f"`--history` for everything that happened to it "
+        f"(the record itself is tasks/{task.id}/task.json)"
+    )
 
 
-@task_app.command("history")
-def task_history(
-    task_id: str,
-    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
-) -> None:
-    """Everything that happened to a task, oldest first: queued, each run's
-    start and end (exit, cost, stopped, stalled, fresh session), every
-    report, guidance sent to it and by whom, the PR state the manager
-    observed, what the manager (or any agent) did to it, and its archival.
+def _task_history(target: Path, task_id: str) -> None:
+    """`task show --history`: every recorded event of a task's life, oldest
+    first, read straight off the files — task.json, reports.jsonl, the inbox
+    and the message archive, the agents' journals.
 
-    Read straight off the files — task.json, reports.jsonl, the inbox and
-    the message archive, the agents' journals — so it works with the
-    supervisor stopped, and it still answers for a task `task prune` has
-    moved into tasks/.archive.
+    It resolves an archived task too, which is why it does not go through
+    `_resolve_task`: the whole point is to still answer once `task prune` has
+    moved the directory into tasks/.archive.
     """
     from .. import views
     from ..prune import archived_task_dir, resolve_archived
     from ..tasks import TaskStore
 
-    target = get_home()
     root = None
     try:
         task = TaskStore(target).resolve(task_id)
@@ -544,9 +528,6 @@ def task_history(
     except ValueError as e:
         raise _fail(str(e)) from None
     rows = views.task_history(target, task, root=root)
-    if json_out:
-        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
-        return
     typer.echo(f"task {task.short_id}  ({task.id})  {len(rows)} event(s), oldest first")
     for row in rows:
         typer.echo(views.history_line(row))
@@ -980,58 +961,3 @@ def task_prune(
             continue
         archived += 1
     typer.secho(f"archived {archived} task(s) into tasks/.archive", fg="green")
-
-
-@task_app.command("export")
-def task_export(
-    task_id: str,
-    out: Path | None = typer.Option(
-        None, "--out", help="Archive path (default: ./quorum-task-<short-id>.tar.gz; never inside the home)."
-    ),
-    with_worktree_diff: bool = typer.Option(
-        False, "--with-worktree-diff",
-        help="Add worktree.diff: the task's worktree against the branch it forked from.",
-    ),
-    redact: bool = typer.Option(
-        False, "--redact",
-        help="Replace every tool result in the transcript with a marker; keep the assistant's "
-             "text and its tool calls.",
-    ),
-) -> None:
-    """Pack one task into a tar.gz for sharing or a bug report.
-
-    The archive holds `tasks/<id>/` whole (record, reports, transcript,
-    runner log, any subdirectory), the task's inbox — waiting, claimed and
-    already-delivered guidance — and, with --with-worktree-diff, a patch of
-    the worktree against its base. Nothing from the project directory, and
-    nothing is written but the archive. A task that ran in your own checkout
-    (--no-worktree, adopted) is refused the diff.
-    """
-    from .. import export as export_mod
-
-    target = get_home()
-    task = _resolve_task(target, task_id)
-    destination = out if out is not None else export_mod.default_output(task)
-    refused = export_mod.output_refusal(destination, target)
-    if refused:
-        raise _fail(refused)
-    try:
-        entries, redaction = export_mod.plan(
-            target, task, with_worktree_diff=with_worktree_diff, redact=redact
-        )
-        names = export_mod.write_archive(destination, task, entries)
-    except export_mod.ExportError as e:
-        raise _fail(f"cannot export task {task.short_id}: {e}") from None
-    except OSError as e:
-        raise _fail(f"cannot write {destination}: {e}") from None
-    typer.secho(f"exported task {task.short_id} to {destination} ({len(names)} entries)", fg="green")
-    for name in names:
-        typer.echo(f"  {name}")
-    if redaction is not None:
-        note = f"redacted {redaction.results} tool result(s)"
-        if redaction.lines_kept:
-            note += (
-                f"; {redaction.lines_kept} plain-text line(s) kept verbatim — "
-                "no structure to redact"
-            )
-        typer.secho(note, fg="yellow")

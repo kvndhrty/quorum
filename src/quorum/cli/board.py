@@ -1,8 +1,8 @@
-"""`quorum board`: read, post to and empty the public message board."""
+"""`quorum board`: the message substrate's one CLI — the public board, and
+the direct inboxes `board post --to` delivers into."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
@@ -14,6 +14,7 @@ from ._common import (
     _actor_guard,
     _confirm,
     _fail,
+    _load_config,
     _parse_before,
     _parse_window,
     board_app,
@@ -25,25 +26,65 @@ from ._common import (
 
 @board_app.command("post")
 def board_post(
-    topic: str,
-    text: str,
+    topic: str = typer.Argument(
+        "", metavar="TOPIC|TEXT", help="Board topic to post to (with --to: the message)."
+    ),
+    text: str = typer.Argument("", help="The message."),
+    to: str = typer.Option(
+        "", "--to",
+        help="Send into this agent's inbox instead of onto a topic (e.g. --to manager).",
+    ),
     type: str = typer.Option("note", "--type", help="Message type tag."),
-    sender: str = typer.Option("user", "--from", help="Sender name."),
 ) -> None:
-    """Post a message to a board topic."""
+    """Post a message — onto a board topic, or into one agent's inbox.
+
+    The board is public and anything may read it; `--to <agent>` is the other
+    channel of the same schema, a direct delivery that only that agent claims.
+    Guidance for the manager is `quorum board post --to manager "..."`, and
+    its next tick starts with it in the digest.
+    """
     target = get_home()
+    if to:
+        if text:
+            raise _fail("--to takes one argument: the message (quote it)")
+        if type != "note":
+            raise _fail("--type tags a board post; --to always sends guidance")
+        _tell(target, to, topic)
+        return
+    if not topic or not text:
+        raise _fail('post to a topic (`board post <topic> "<text>"`) or an inbox (--to <agent>)')
     _actor_guard(target, "board.post", args=f"{topic}: {text[:80]}")
-    if sender == "user":
-        sender = current_actor()  # a manager-tagged call attributes itself
-    msg = MessageBus(target).post(sender=sender, topic=topic, type=type, text=text)
+    msg = MessageBus(target).post(
+        sender=current_actor(), topic=topic, type=type, text=text
+    )
     typer.echo(f"posted {msg.id} to {topic}")
+
+
+def _tell(home: Path, to: str, text: str) -> None:
+    """The inbox half of `board post`: a direct delivery to one agent.
+
+    The recipient is checked against the configured agents, because a topic
+    is free-form but an inbox is not: a misspelled `--to` would write a
+    maildir nobody ever claims, and the message would look sent.
+    """
+    if not text:
+        raise _fail("nothing to send — pass the message as the argument")
+    config = _load_config(home)
+    known = set(config.agents) | {"supervisor"}
+    if to not in known:
+        raise _fail(
+            f"no agent {to!r} to send to (known: {', '.join(sorted(known))}) — "
+            "a board topic is free-form, an inbox is not"
+        )
+    _actor_guard(home, "board.post", target=to, args=text[:80])
+    MessageBus(home).send(current_actor(), to, type="guidance", text=text)
+    typer.secho(f"guidance queued for {to}'s next run", fg="green")
 
 
 @board_app.command("read")
 def board_read(
     topic: str | None = typer.Argument(None, help="Topic to read (default: all topics)."),
     since: str = typer.Option("24h", "--since", help="Window like 90m, 24h or 7d."),
-    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON lines."),
 ) -> None:
     """Read recent board messages."""
     bus = MessageBus(get_home())
@@ -54,22 +95,25 @@ def board_read(
     for t in topics:
         for msg in bus.read_topic(t, since=floor):
             empty = False
-            if as_json:
-                typer.echo(json.dumps(msg.dump(), ensure_ascii=False))
-            else:
-                created = fsio.display_ts(msg.created_at)
-                # the short id is here so `board ack` has something to name
-                typer.echo(
-                    f"[{created}] {t} {msg.short_id} <{msg.sender}> "
-                    f"{msg.type}: {msg.payload.get('text', '')}"
-                )
-    if empty and not as_json:
+            created = fsio.display_ts(msg.created_at)
+            # the short id is here so `board clear --id` has something to name
+            typer.echo(
+                f"[{created}] {t} {msg.short_id} <{msg.sender}> "
+                f"{msg.type}: {msg.payload.get('text', '')}"
+            )
+    if empty:
         typer.echo(f"no messages in the last {since}")
 
 
 @board_app.command("clear")
 def board_clear(
-    topic: str,
+    topic: str | None = typer.Argument(
+        None, help="Topic to empty (optional when --id names one message)."
+    ),
+    message_id: str | None = typer.Option(
+        None, "--id", metavar="MESSAGE_ID",
+        help="Archive just this message (an id, prefix or short suffix) instead of the topic.",
+    ),
     before: str | None = typer.Option(
         None, "--before",
         help="Only messages older than this: a window (7d) or a timestamp (2026-09-01).",
@@ -77,56 +121,50 @@ def board_clear(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
 ) -> None:
-    """Archive a board topic, emptying it.
+    """Archive board messages: a whole topic, or one message with --id.
 
-    The messages land in the same `messages/archive/YYYY-MM.jsonl.gz` the
-    hourly janitor writes — nothing is lost, it just stops being live.
-    `quorum board clear attention` is the one that empties the banner.
-    """
-    _clear_topic(get_home(), topic, before=before, dry_run=dry_run, yes=yes)
+    They land in the same `messages/archive/YYYY-MM.jsonl.gz` the hourly
+    janitor writes — nothing is lost, it just stops being live.
 
-
-@board_app.command("ack")
-def board_ack(
-    target_id: str = typer.Argument(
-        ..., metavar="MESSAGE_ID", help="A message id, prefix or short suffix."
-    ),
-    topic: str | None = typer.Option(
-        None, "--topic", help="Only look in this topic (default: every topic)."
-    ),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be archived."),
-) -> None:
-    """Say "I have seen this one": archive a single board message.
-
-    The banner (`quorum status`, the TUI header) is a time
-    window over #attention, not a read-state — so an escalation you have
-    already handled sits there for a week. Acking archives that one message
-    into `messages/archive/YYYY-MM.jsonl.gz`, which drops it from every view
-    while the history keeps its original `created_at`.
-
-    A whole topic at once is `quorum board clear <topic>`.
+    The banner (`quorum status`, the TUI header) is a time window over
+    #attention, not a read-state, so an escalation you have already handled
+    sits there for a week. `quorum board clear attention` empties it;
+    `quorum board clear --id 7c1af2` says "I have seen this one" and drops
+    that message alone, keeping its original `created_at` in the history.
     """
     home_path = get_home()
-    bus = MessageBus(home_path)
+    if message_id is not None:
+        if before is not None:
+            raise _fail("--before selects a window of a topic; --id names one message")
+        _clear_message(home_path, message_id, topic=topic, dry_run=dry_run)
+        return
+    if not topic:
+        raise _fail("name a topic to empty, or --id <message-id> for one message")
+    _clear_topic(home_path, topic, before=before, dry_run=dry_run, yes=yes)
+
+
+def _clear_message(home: Path, handle: str, topic: str | None, dry_run: bool) -> None:
+    """The single-message path behind `board clear --id`."""
+    bus = MessageBus(home)
     try:
-        msg, path = bus.resolve_board_message(target_id, topic=topic)
+        msg, path = bus.resolve_board_message(handle, topic=topic)
     except KeyError:
         where = f" on {topic}" if topic else ""
         raise _fail(
-            f"no live board message matching {target_id!r}{where} — `quorum board read`"
+            f"no live board message matching {handle!r}{where} — `quorum board read`"
         ) from None
     except ValueError as e:
         raise _fail(str(e)) from None
     text = msg.payload.get("text", "")
     if dry_run:
-        typer.echo(f"would ack #{msg.topic} {msg.short_id} <{msg.sender}> {text[:70]}")
+        typer.echo(f"would archive #{msg.topic} {msg.short_id} <{msg.sender}> {text[:70]}")
         return
-    _actor_guard(home_path, "board.ack", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
+    _actor_guard(home, "board.clear", target=msg.short_id, args=f"#{msg.topic}: {text[:60]}")
     # archive the path resolution already handed us: resolving a second time
-    # could miss (the janitor, another `board ack`, the TUI) and raise
+    # could miss (the janitor, another `board clear`, the TUI) and raise
     # where a tidy line belongs, and archiving a gone file is a no-op anyway
     bus.archive_board_message(path)
-    typer.secho(f"acked {msg.short_id} on #{msg.topic} — archived, not deleted", fg="green")
+    typer.secho(f"archived {msg.short_id} from #{msg.topic} — archived, not deleted", fg="green")
 
 
 def _clear_topic(home: Path, topic: str, before: str | None, dry_run: bool, yes: bool) -> None:

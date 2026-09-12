@@ -43,7 +43,7 @@ export const QuorumPlugin = async ({ client, directory }) => {
     if (!sessionID || inflight.has(sessionID)) return
     inflight.add(sessionID)
     try {
-      const out = await quorum(["task", "hook-stop", "--format", "text"], {
+      const out = await quorum(["task", "hook", "stop", "--format", "text"], {
         session_id: sessionID,
         cwd: directory,
       })
@@ -88,7 +88,7 @@ export const QuorumPlugin = async ({ client, directory }) => {
       const sid = event.properties?.sessionID
       if (sid) seen.add(sid)
       // session.status{idle} is current; session.idle is its deprecated
-      // predecessor — handling both double-calls hook-stop, which is safe
+      // predecessor — handling both double-calls `task hook stop`, which is safe
       // (guidance is consumed by whichever claim wins; the loser is silent).
       if (event.type === "session.status" && event.properties?.status?.type === "idle") {
         await onIdle(event.properties.sessionID)
@@ -102,7 +102,7 @@ export const QuorumPlugin = async ({ client, directory }) => {
       const payloads = seen.size
         ? [...seen].map((s) => ({ session_id: s, cwd: directory }))
         : [{ cwd: directory }]
-      for (const p of payloads) await quorum(["task", "hook-session-end"], p)
+      for (const p of payloads) await quorum(["task", "hook", "session-end"], p)
     },
   }
 }

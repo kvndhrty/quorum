@@ -5,7 +5,6 @@ row saying where it lives and when to move it."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -169,15 +168,12 @@ def test_doctor_command_prints_the_dials_and_stays_green(home: Path):
     assert dials.GUIDE_ANCHOR in result.output
 
 
-def test_doctor_json_carries_every_dial(home: Path):
+def test_doctor_carries_a_check_for_every_dial(home: Path):
     disable_ci(home)
-    result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    found = {c["name"]: c for c in payload["checks"] if c["name"].startswith("dial.")}
+    found = {c.name: c for c in doctor.run_checks(home) if c.name.startswith("dial.")}
     assert set(found) == {f"dial.{d.key}" for d in dials.DIALS}
-    assert {c["status"] for c in found.values()} == {NA}
-    assert found["dial.max_actions_per_run"]["summary"].endswith("manager 20 (default)")
+    assert {c.status for c in found.values()} == {NA}
+    assert found["dial.max_actions_per_run"].summary.endswith("manager 20 (default)")
 
 
 def test_doctor_skips_the_dials_when_the_config_is_unreadable(home: Path):

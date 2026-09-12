@@ -3,7 +3,6 @@ usage and tui."""
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
@@ -60,6 +59,12 @@ def init() -> None:
                 f"  to resume upgrades: move your own lines into prompts/{stem}.local.md "
                 f"(merged in at the default's {{local}} slot, never touched by init), "
                 f"then delete prompts/{name} and re-run `quorum init`"
+            )
+        elif outcome == "unreadable":
+            typer.secho(
+                f"prompts/{name} cannot be read (not UTF-8, or no permission) — left "
+                f"untouched, and every render of it fails; fix or delete it",
+                fg="red",
             )
         elif outcome == "seeded" and not fresh:
             typer.echo(f"prompts/{name}: seeded from the packaged default")
@@ -153,7 +158,6 @@ def doctor(
         help="Which harness --smoke runs (default: the configured default harness). "
         "Naming one implies --smoke.",
     ),
-    json_out: bool = typer.Option(False, "--json", help="Emit every check as JSON, for scripts."),
     smoke: bool = typer.Option(
         False,
         "--smoke",
@@ -175,24 +179,21 @@ def doctor(
     smoke_arg = harness if (smoke or harness) else None
     checks = doctor_mod.run_checks(target, smoke=smoke_arg, smoke_timeout=smoke_timeout)
     counts = doctor_mod.tally(checks)
-    if json_out:
-        typer.echo(json.dumps(doctor_mod.report(target, checks), indent=2, ensure_ascii=False))
+    typer.echo(f"home: {target}")
+    colors = {doctor_mod.OK: "green", doctor_mod.PROBLEM: "red", doctor_mod.NA: "bright_black"}
+    for check in checks:
+        typer.secho(f"  {check.glyph} {check.summary}", fg=colors[check.status])
+        if check.fix and check.status != doctor_mod.OK:
+            typer.secho(f"      → {check.fix}", fg="bright_black")
+    if counts["problems"]:
+        typer.secho(
+            f"\n{counts['problems']} problem(s) — fix the ✗ lines above", fg="red", err=True
+        )
     else:
-        typer.echo(f"home: {target}")
-        colors = {doctor_mod.OK: "green", doctor_mod.PROBLEM: "red", doctor_mod.NA: "bright_black"}
-        for check in checks:
-            typer.secho(f"  {check.glyph} {check.summary}", fg=colors[check.status])
-            if check.fix and check.status != doctor_mod.OK:
-                typer.secho(f"      → {check.fix}", fg="bright_black")
-        if counts["problems"]:
-            typer.secho(
-                f"\n{counts['problems']} problem(s) — fix the ✗ lines above", fg="red", err=True
-            )
-        else:
-            typer.secho(
-                f"\nall checks passed ({counts['ok']} ok, {counts['na']} not applicable)",
-                fg="green",
-            )
+        typer.secho(
+            f"\nall checks passed ({counts['ok']} ok, {counts['na']} not applicable)",
+            fg="green",
+        )
     if counts["problems"]:
         raise typer.Exit(1)
 
@@ -203,7 +204,6 @@ agent table prints the status word itself.
   before a task's id:
           ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
   after its status:
-          ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
              means nothing was ever observed (no PR yet, or no `gh` here)
@@ -222,7 +222,6 @@ agent table prints the status word itself.
 @app.command()
 def status(
     legend: bool = typer.Option(False, "--legend", help="Explain the status glyphs and exit."),
-    json_out: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
 ) -> None:
     """Show supervisor liveness, agents, tasks, and project deadlines
     (`--legend` explains the glyphs)."""
@@ -232,9 +231,6 @@ def status(
         typer.echo(STATUS_LEGEND)
         return
     target = get_home()
-    if json_out:
-        typer.echo(json.dumps(views.overview(target), indent=2, ensure_ascii=False))
-        return
     sup = views.supervisor_status(target)
     if sup["alive"]:
         typer.secho(f"supervisor: running (pid {sup['pid']}, since {sup['started_at']})", fg="green")
@@ -245,7 +241,7 @@ def status(
     if attention["count"]:
         typer.secho(
             f"⚠ {attention['count']} on #attention in the last {attention['days']}d "
-            "— `quorum board read attention`, then `quorum board ack <id>` "
+            "— `quorum board read attention`, then `quorum board clear --id <id>` "
             "for each one you have handled",
             fg="yellow",
         )
@@ -292,7 +288,6 @@ def usage_cmd(
         "--since",
         help="Only tasks queued (or agent runs made) in the last 7d / 36h / 2w / 90m.",
     ),
-    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
 ) -> None:
     """Usage and delivery statistics by project, harness, week or agent:
     tasks, runs, reruns, cost and tokens as the harness reported them, and
@@ -307,9 +302,6 @@ def usage_cmd(
         payload = stats.report(target, by=by.value, since=window)
     except ValueError as e:
         raise _fail(str(e)) from None
-    if json_out:
-        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
     what = "agent runs" if by is UsageBy.agent else "tasks queued"
     scope = f"{what} since {payload['cutoff']} ({since.strip()})" if window else "all time"
     typer.echo(f"usage by {by.value}, {scope}")

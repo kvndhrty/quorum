@@ -807,44 +807,42 @@ def test_doctor_command_says_so_when_a_broken_config_skips_the_smoke(home: Path)
     assert "smoke skipped" in result.output
 
 
-def test_doctor_command_emits_json(home: Path):
+def test_doctor_command_prints_the_home_and_every_check(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["home"] == str(home)
-    assert payload["problems"] == 0
-    assert {"name", "status", "summary", "fix"} == set(payload["checks"][0])
-    assert any(c["name"] == "harness.fake.binary" for c in payload["checks"])
+    assert f"home: {home}" in result.output
+    assert "all checks passed" in result.output
+    # one line per check, each with its glyph — the only rendering there is
+    for check in doctor.run_checks(home):
+        assert f"{check.glyph} {check.summary}" in result.output
 
 
 def test_doctor_command_runs_the_smoke_probe_on_request(home: Path):
     configure(home, mode="inject", inject="stream-json")
-    result = runner.invoke(
-        app, ["doctor", "--json", "--smoke", "--smoke-timeout", "30"]
-    )
-    payload = json.loads(result.output)
-    smoke = {c["name"]: c["status"] for c in payload["checks"] if c["name"].startswith("smoke.")}
+    result = runner.invoke(app, ["doctor", "--smoke", "--smoke-timeout", "30"])
+    checks = doctor.run_checks(home, smoke="", smoke_timeout=30)
+    smoke = {c.name: c.status for c in checks if c.name.startswith("smoke.")}
     assert smoke == {
         "smoke.fake.run": OK,
         "smoke.fake.result": OK,
         "smoke.fake.session": OK,
     }
     assert result.exit_code == 0
+    assert "reported session id sess-fake-123" in result.output  # the probe really ran
 
 
 def test_doctor_command_takes_a_named_harness_for_the_smoke_run(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json", "--smoke", "ghost"])
-    payload = json.loads(result.output)
-    assert any(c["name"] == "smoke.ghost" for c in payload["checks"])
+    result = runner.invoke(app, ["doctor", "--smoke", "ghost"])
+    assert "ghost" in result.output
     assert result.exit_code == 1
 
 
 def test_doctor_command_skips_the_probe_by_default(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json"])
-    assert not [c for c in json.loads(result.output)["checks"] if c["name"].startswith("smoke")]
+    assert not [c for c in doctor.run_checks(home) if c.name.startswith("smoke")]
+    assert "reported session id" not in runner.invoke(app, ["doctor"]).output
 
 
 def test_status_points_at_doctor_when_an_agent_is_failing(home: Path):
@@ -880,11 +878,8 @@ def test_doctor_command_ends_with_the_surfaces_line(home: Path):
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "– surfaces: " in result.output
-    payload = json.loads(
-        runner.invoke(app, ["doctor", "--json"]).output
-    )
-    assert payload["checks"][-1]["name"] == "surfaces"
-    assert payload["checks"][-1]["status"] == NA
+    checks = doctor.run_checks(home)
+    assert checks[-1].name == "surfaces" and checks[-1].status == NA
 
 
 def test_doctor_skips_the_surfaces_line_when_the_config_is_unreadable(home: Path):

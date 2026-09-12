@@ -21,7 +21,7 @@ Quorum only ever *reads* from a forge. There is no write path here — no
 labelling, no comments, no closing an issue when a PR merges: the human
 owns the issue and the pull request.
 
-Config is the `[ci]` table (`enabled`, `timeout_seconds`), read through
+Config is the `[ci]` table (one key, `enabled`), read through
 `config.try_load_config`, so an unreadable config.toml means *off* rather
 than "defaults" — the table quorum failed to parse may be the one holding
 `enabled = false`.
@@ -36,7 +36,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-DEFAULT_TIMEOUT_SECONDS = 10.0
+#: Seconds any one forge-CLI call gets. A module constant rather than a
+#: config key: every caller either degrades a timeout to None or names it in
+#: the error, so the value is quorum's to pick.
+TIMEOUT_SECONDS = 10.0
 
 # The one forge CLI quorum knows how to drive. **This is the seam for #51**
 # (a `[ci].provider = gh | glab | none` switch): every subprocess in this
@@ -102,13 +105,8 @@ def available(home: Path) -> bool:
         return False
 
 
-def _timeout(home: Path) -> float:
-    cfg = _config(home)
-    return cfg.timeout_seconds if cfg is not None else DEFAULT_TIMEOUT_SECONDS
-
-
 def _invoke(home: Path, workdir: Path | None, args: list[str]) -> subprocess.CompletedProcess:
-    """One forge-CLI call, bounded by `[ci].timeout_seconds`. **Raises** what
+    """One forge-CLI call, bounded by `TIMEOUT_SECONDS`. **Raises** what
     the subprocess raised.
 
     The single subprocess site of the whole codebase. Callers decide what a
@@ -121,7 +119,7 @@ def _invoke(home: Path, workdir: Path | None, args: list[str]) -> subprocess.Com
         cwd=str(workdir) if workdir is not None else None,
         capture_output=True,
         text=True,
-        timeout=_timeout(home),
+        timeout=TIMEOUT_SECONDS,
         env={**os.environ, **GH_ENV},
         stdin=subprocess.DEVNULL,
     )
@@ -244,7 +242,7 @@ def issue_view(home: Path, ref: str, workdir: Path) -> dict:
     except subprocess.TimeoutExpired:
         raise ForgeError(
             f"`{cli} issue view {target}` did not finish within "
-            f"[ci].timeout_seconds ({cfg.timeout_seconds}s) — raise it or retry"
+            f"{TIMEOUT_SECONDS:g}s — retry, or check that `{cli}` is not waiting on input"
         ) from None
     except Exception as e:
         # The call never ran (a project directory that has moved or gone) or

@@ -2,9 +2,7 @@
      short id; {{project_path}} the directory the harness runs in;
      {{issue}} the line naming the forge issue a task queued with
      `task add --issue` came from (empty otherwise);
-     {{perpetual}} the extra instructions for a task queued with
-     `task add --perpetual` (empty for an ordinary task — see
-     prompts/task-perpetual.md); {{local}} the conventions of this home,
+     {{local}} the conventions of this home,
      from prompts/task-preamble.local.md — never seeded, never touched by
      `quorum init`, so house rules there keep this file upgradable;
      {{project}} the conventions of *this project*, from its registry notes
@@ -83,5 +81,4 @@ assume gh, glab, or any other forge CLI is installed):
 
 {project}
 
-{perpetual}
 Work autonomously; do not wait for interactive input.

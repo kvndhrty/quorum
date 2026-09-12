@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
@@ -108,20 +107,18 @@ def _run_tail(
     if follow:
         _follow(path, render, len(entries))
 
+#: What `--actions` shows without an explicit `-n`.
+DEFAULT_JOURNAL_LINES = 20
+
 # -- agents ----------------------------------------------------------------
 
 
 @agent_app.command("list")
-def agent_list(
-    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-) -> None:
+def agent_list() -> None:
     """List configured agents and their last heartbeat."""
     from .. import views
 
     rows = views.agent_rows(get_home())
-    if json_out:
-        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
-        return
     if not rows:
         typer.echo("no agents configured")
         return
@@ -135,10 +132,9 @@ def agent_run_once(
 ) -> None:
     """Construct an agent and run a single tick in this process.
 
-    Use this when the supervisor is stopped, or when you want the tick's
-    output and its failure in front of you. `quorum agent run-now` is the
-    other one: it asks a *running* supervisor to tick the agent on its own
-    schedule thread.
+    Runs whether or not the supervisor is up, with the tick's output and its
+    failure in front of you. It takes the same per-agent tick lock the
+    supervisor takes, so it can never interleave with a scheduled tick.
     """
     from ..agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from ..registry import AgentResolutionError, resolve
@@ -195,6 +191,10 @@ def agent_log(
     name: str,
     last: int = _LAST_OPT,
     run: str | None = _RUN_OPT,
+    actions: bool = typer.Option(
+        False, "--actions",
+        help="Print only the agent's action journal, across runs (`-n` bounds it).",
+    ),
     lines: int = _LINES_OPT,
     follow: bool = _FOLLOW_OPT,
     verbose: bool = _VERBOSE_OPT,
@@ -209,7 +209,17 @@ def agent_log(
     id). A tick happening right now has no usage-log line yet, so `-f` follows
     the transcript file as it is written and `-n 40` prints its last forty
     entries; neither can be combined with --last or --run.
+
+    `--actions` drops to the journal alone — every mutating CLI call the
+    agent made, run by run, with what became of each target. That is the
+    "what it did" section of a run, read across all of them.
     """
+    if actions:
+        if run or follow or raw:
+            raise _fail("--actions reads the journal; drop --run/-f/--raw")
+        _check_agent_name(name)
+        _echo(transcript_mod.render_journal(get_home(), name, lines or DEFAULT_JOURNAL_LINES))
+        return
     if lines or follow:
         if run:
             raise _fail("--run reads a finished run; -n/-f follow the transcript itself")
@@ -228,27 +238,16 @@ def _agent_command(name: str, command: str, note: str) -> None:
     typer.echo(note)
 
 
-@agent_app.command("pause")
-def agent_pause(name: str) -> None:
-    """Pause an agent's schedule (applied by a running supervisor within seconds)."""
-    _agent_command(name, "pause", f"pause queued for {name} — takes effect while `quorum up` is running")
-
-
 @agent_app.command("resume")
 def agent_resume(name: str) -> None:
-    """Resume a paused agent (also clears the auto-pause failure counter)."""
-    _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
+    """Resume an auto-paused agent (also clears its failure counter).
 
-
-@agent_app.command("run-now")
-def agent_run_now(name: str) -> None:
-    """Ask the running supervisor to tick an agent immediately.
-
-    This is a message to `quorum up`, so it needs the supervisor running and
-    returns before the tick does. With the supervisor stopped, or to watch
-    the tick happen, use `quorum agent run-once`.
+    The supervisor pauses an agent after repeated failures, and that pause is
+    durable — it lands in the heartbeat and survives a restart, so this is
+    the only way to clear it. To stop scheduling an agent on purpose, set
+    `enabled = false` in agents/<name>.toml and `quorum agent reload` it.
     """
-    _agent_command(name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
 
 
 def _prompt_exists(home: Path, name: str) -> bool:

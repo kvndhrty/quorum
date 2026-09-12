@@ -153,12 +153,12 @@ def test_full_loop_launch_nudge_journal_and_directives(home: Path, clock, projec
     assert fsio.read_json(nudges[0])["from"] == "manager"
 
 
-def test_mid_run_directive_reaches_a_live_manager_run(
+def test_mid_run_guidance_reaches_a_live_manager_run(
     home: Path, clock, project: str, monkeypatch
 ):
-    """`quorum manager tell` while a tick's harness is in flight: the pump
-    forwards the directive as a user turn instead of holding it for the next
-    tick (the fake posts the tell itself mid-run, for determinism)."""
+    """`quorum board post --to manager` while a tick's harness is in flight:
+    the pump forwards the guidance as a user turn instead of holding it for the
+    next tick (the fake posts it itself mid-run, for determinism)."""
     monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
     monkeypatch.setenv("FAKE_HARNESS_INJECT_POST", "tell")
     write_config(home, "inject", mgr_inject=True)
@@ -777,49 +777,6 @@ def test_the_digest_names_the_issue_a_task_came_from(home: Path, clock, project:
 
 
 # -- perpetual tasks (#12) ---------------------------------------------------
-
-
-def test_a_perpetual_task_is_marked_and_never_flagged_as_looping(
-    home: Path, clock, project: str
-):
-    """Repetition is the job for a perpetual task, so the digest marks it and
-    withholds the one observation that would read it as stuck."""
-    store = TaskStore(home)
-    forever = store.add(project, "watch CI and fix what breaks", "tasktool", perpetual=True)
-    ordinary = store.add(project, "one-off work", "tasktool")
-    store.update(forever.id, status="cycle-9")
-    store.update(ordinary.id, status="executing")
-    for task in (forever, ordinary):
-        mark_runner_alive(home, task.id)
-        write_transcript(home, task.id, [tool_use("Bash", "gh pr checks", f"c{i}") for i in range(6)])
-
-    digest = build_digest(home, store.list(), clock(), directives=[])
-
-    marked = digest.split(f"[cycle-9] {forever.short_id}")[1]
-    assert marked.splitlines()[0].endswith("perpetual=true")
-    assert "possible-loop" not in marked.split("- [")[0]
-    # the identical transcript on an ordinary task is still flagged
-    assert "possible-loop" in digest.split(f"[executing] {ordinary.short_id}")[1]
-
-
-def test_a_perpetual_task_that_reported_done_is_observed_not_forgotten(
-    home: Path, clock, project: str
-):
-    """Terminal tasks drop out of the active list, so the one thing a
-    perpetual task must never do would otherwise be invisible."""
-    store = TaskStore(home)
-    ended = store.add(project, "watch CI", "tasktool", perpetual=True)
-    stopped = store.add(project, "watch builds", "tasktool", perpetual=True)
-    ordinary = store.add(project, "one-off", "tasktool")
-    store.update(ended.id, status="done")
-    store.update(stopped.id, status="cancelled")
-    store.update(ordinary.id, status="done")
-
-    digest = build_digest(home, store.list(), clock(), directives=[])
-
-    assert f"PERPETUAL-ENDED {ended.short_id}: reported 'done'" in digest
-    assert stopped.short_id not in digest.split("## Active tasks")[0]
-    assert ordinary.short_id not in digest.split("## Active tasks")[0]
 
 
 # -- the notebook (a separate memory, #35) ----------------------------------

@@ -37,17 +37,17 @@ def hook_commands(hooks_json: Path) -> dict[str, list[str]]:
 def test_codex_hooks_wire_the_lifecycle_to_quorum():
     wired = hook_commands(INTEGRATIONS / "codex" / "hooks.json")
     assert wired == {
-        "SessionStart": ["quorum task hook-session-start"],
-        "Stop": ["quorum task hook-stop"],
-        "SessionEnd": ["quorum task hook-session-end"],
+        "SessionStart": ["quorum task hook session-start"],
+        "Stop": ["quorum task hook stop"],
+        "SessionEnd": ["quorum task hook session-end"],
     }
 
 
 def test_claude_code_hooks_wire_the_lifecycle_to_quorum():
     wired = hook_commands(INTEGRATIONS / "claude-code" / "hooks" / "hooks.json")
     assert wired == {
-        "Stop": ["quorum task hook-stop"],
-        "SessionEnd": ["quorum task hook-session-end"],
+        "Stop": ["quorum task hook stop"],
+        "SessionEnd": ["quorum task hook session-end"],
     }
 
 
@@ -210,15 +210,24 @@ def test_integration_claude_code_points_at_the_plugin_manager():
     assert Path(quoted).is_dir()
 
 
-def test_integration_list_reports_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_integration_install_list_reports_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ch"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    r = runner.invoke(app, ["integration", "list"])
+    r = runner.invoke(app, ["integration", "install", "--list"])
     assert r.exit_code == 0
     assert "not installed" in r.output and "plugin-managed" in r.output
     runner.invoke(app, ["integration", "install", "opencode"])
-    r = runner.invoke(app, ["integration", "list"])
+    r = runner.invoke(app, ["integration", "install", "--list"])
     assert "installed" in r.output
+
+
+def test_integration_install_needs_a_name_or_the_list_flag():
+    """The two spellings are one command, so each has to refuse the other's
+    arguments rather than guess."""
+    bare = runner.invoke(app, ["integration", "install"])
+    assert bare.exit_code == 1 and "--list" in bare.output
+    both = runner.invoke(app, ["integration", "install", "codex", "--list"])
+    assert both.exit_code == 1 and "drop the name" in both.output
 
 
 def test_unknown_integration_lists_the_known_ones():

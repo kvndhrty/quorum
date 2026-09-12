@@ -702,8 +702,8 @@ generalized to a task, on the same substrate and under the same rules:
   `task show` printed. The identity differs too: an attached session runs
   under the user's own shell with no `QUORUM_ACTOR` set, so its `task
   remember` is admitted as a human and its notes carry `sender: user`.
-  Closing this would mean `task hook-session-start` injecting the notebook
-  the way `hook-stop` injects pending guidance; that is not done.
+  Closing this would mean `task hook session-start` injecting the notebook
+  the way `task hook stop` injects pending guidance; that is not done.
 - **Policy.** The preamble says what the notebook is for — state worth
   having after a restart, not a log — and to rewrite one superseding note
   rather than append when the list grows. Nothing consolidates in Python;
@@ -729,8 +729,8 @@ substrate rail in the same class as `runner.lock`, protecting the user's
 live checkout from a racing headless run. `quorum task detach` lifts it.
 
 Liveness for a run quorum didn't spawn comes from `tasks/<id>/attached.json`,
-rewritten by harness-side hooks (`quorum task hook-session-start`,
-`hook-stop`, `hook-session-end`) with the latest lifecycle event. The hook
+rewritten by harness-side hooks (`quorum task hook session-start`,
+`stop`, `session-end`) with the latest lifecycle event. The hook
 entry points are harness-agnostic — JSON with `session_id`/`cwd` on stdin,
 matched to an attached task by exact session id first, then working
 directory. The cwd fallback is how an id-less adoption *learns* its session
@@ -740,7 +740,7 @@ session id. `integrations/` ships an adapter per harness: `claude-code/` and
 `codex/` wire native Stop/SessionEnd(/SessionStart) hooks straight to the
 CLI, both speaking the same stdin payload and `{"decision": "block"}`
 continuation protocol, while `opencode/` (no hook commands; an in-process
-plugin bus instead) ships a fail-soft JS plugin that calls `hook-stop
+plugin bus instead) ships a fail-soft JS plugin that calls `task hook stop
 --format text` on idle events and injects whatever the CLI prints as a user
 turn. Either way the digest renders attached tasks in their own section, and
 guidance flows through the ordinary task inbox: the stop/idle hook claims
@@ -1606,7 +1606,7 @@ looks. Three rails, and they are the whole design:
    stream-json CLI ignoring an argv prompt, so every run hung until it timed
    out). Everything the probe touches is scratch, including the child's own
    `QUORUM_HOME`, because a harness with quorum's integration hooks
-   installed runs `quorum task hook-session-start` on startup and must not
+   installed runs `quorum task hook session-start` on startup and must not
    write to the live home. The child is spawned with
    `start_new_session=True` and the timeout `killpg`s the group, since
    killing only the process quorum spawned leaves grandchildren holding the

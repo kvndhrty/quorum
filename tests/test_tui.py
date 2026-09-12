@@ -135,11 +135,11 @@ def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path, tui)
     tui(home, script)
 
 
-def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path, tui):
+def test_guidance_lands_in_the_manager_inbox_without_a_selection(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
-        await pilot.press("m")  # no task selected: directives need none
+        await pilot.press("m")  # no task selected: manager guidance needs none
         box = app.query_one("#nudge", Input)
         assert box.display
         assert "manager" in box.placeholder
@@ -148,7 +148,7 @@ def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path, tu
         await pilot.pause()
         claimed = [c for c in MessageBus(home).claim("manager")]
         assert [c.message.payload["text"] for c in claimed] == ["start the oldest queued task"]
-        assert claimed[0].message.type == "directive"
+        assert claimed[0].message.type == "guidance"
 
     tui(home, script)
 
@@ -355,20 +355,6 @@ def test_typing_in_the_box_never_fires_the_bindings(home: Path, tui):
         assert app.query_one("#nudge", Input).value == "cancel me"
         assert TaskStore(home).get(ids[0]).status != "cancelled"
         assert len(app.screen_stack) == 1  # no confirmation modal was pushed
-
-    tui(home, script)
-
-
-def test_a_perpetual_task_is_badged_in_the_task_table(home: Path, tui):
-    """`∞` is how "40 runs and counting" reads as working rather than stuck."""
-    store = TaskStore(home)
-    store.add("proj-a", "watch CI", "fake", perpetual=True)
-    store.add("proj-a", "one-off", "fake")
-
-    async def script(app, pilot):
-        table = app.query_one("#tasks", DataTable)
-        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
-        assert statuses[0].endswith("∞") and "∞" not in statuses[1]
 
     tui(home, script)
 

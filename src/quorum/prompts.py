@@ -10,9 +10,8 @@ Placeholders use str.format-style {names}; unknown braces are left intact.
 
 Alongside each template sits an optional *overlay*: prompts/<name>.local.md,
 user-owned, never seeded and never touched by `quorum init`. It is merged
-into the resolved template at its `{local}` slot (the packaged manager,
-task preamble and perpetual block each carry one where home policy
-belongs), or prepended when the template has no slot. An absent, empty or
+into the resolved template at its `{local}` slot (the packaged manager and
+task preamble each carry one where home policy belongs), or prepended when the template has no slot. An absent, empty or
 unreadable overlay renders to nothing. The
 overlay exists so that adding a few lines of home policy does not fork the
 whole template — a forked `<name>.md` stops receiving packaged upgrades,

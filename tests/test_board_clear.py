@@ -1,4 +1,4 @@
-"""Attention acknowledgement: `quorum board ack`.
+"""Attention acknowledgement: `quorum board clear --id`.
 
 The board carries no read-state by design, so "I have seen this one" is
 *archival*: acking moves the message into `messages/archive/` and leaves the
@@ -101,7 +101,7 @@ def test_ack_drops_one_escalation_from_the_banner_and_the_archive_holds_it(home:
     msg = bus.post("manager", "attention", "escalation", text="a human is needed")
     assert views.attention_summary(home)["count"] == 1
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id])
+    result = runner.invoke(app, ["board", "clear", "--id", msg.short_id])
     assert result.exit_code == 0, result.output
     assert msg.short_id in result.output
     assert views.attention_summary(home)["count"] == 0
@@ -114,7 +114,7 @@ def test_ack_leaves_the_other_escalations_alone(home: Path):
     second = bus.post("manager", "attention", "escalation", text="second")
     bus.post("manager", "attention", "escalation", text="third")
 
-    result = runner.invoke(app, ["board", "ack", second.short_id])
+    result = runner.invoke(app, ["board", "clear", "--id", second.short_id])
     assert result.exit_code == 0, result.output
     live = [m.payload["text"] for m in bus.read_topic("attention")]
     assert live == ["first", "third"]
@@ -123,7 +123,7 @@ def test_ack_leaves_the_other_escalations_alone(home: Path):
 
 def test_ack_of_an_unknown_id_fails_loudly(home: Path):
     MessageBus(home).post("manager", "attention", "escalation", text="still here")
-    result = runner.invoke(app, ["board", "ack", "ZZZZZZ"])
+    result = runner.invoke(app, ["board", "clear", "--id", "ZZZZZZ"])
     assert result.exit_code != 0
     assert "no live board message" in result.output
     assert views.attention_summary(home)["count"] == 1
@@ -134,7 +134,7 @@ def test_ack_of_an_ambiguous_id_fails_loudly(home: Path):
     post_with_id(home, "01SHAREDHEAD0000000000000A", "one")
     post_with_id(home, "01SHAREDHEAD0000000000000B", "two")
 
-    result = runner.invoke(app, ["board", "ack", "01SHAREDHEAD"])
+    result = runner.invoke(app, ["board", "clear", "--id", "01SHAREDHEAD"])
     assert result.exit_code != 0
     assert "ambiguous" in result.output
     assert views.attention_summary(home)["count"] == 2
@@ -143,22 +143,26 @@ def test_ack_of_an_ambiguous_id_fails_loudly(home: Path):
 def test_ack_dry_run_changes_nothing(home: Path):
     msg = MessageBus(home).post("manager", "attention", "escalation", text="untouched")
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--dry-run"]
+        app, ["board", "clear", "--id", msg.short_id, "--dry-run"]
     )
     assert result.exit_code == 0, result.output
-    assert "would ack" in result.output
+    assert "would archive" in result.output
     assert views.attention_summary(home)["count"] == 1
     assert archive_lines(home) == []
 
 
-def test_ack_is_one_message_only(home: Path):
-    """A whole topic is `board clear <topic>`, so `board ack` has no --all and
-    no --before: one spelling for the sweep, one for the single message."""
+def test_the_two_halves_of_clear_refuse_each_others_selectors(home: Path):
+    """One archiver, two selections: a topic (optionally `--before`) or one
+    `--id`. Mixing them would be a third meaning nobody asked for."""
     msg = MessageBus(home).post("manager", "attention", "escalation", text="here")
-    for extra in (["--all"], ["--before", "7d"]):
-        result = runner.invoke(app, ["board", "ack", msg.short_id, *extra])
-        assert result.exit_code != 0
-        assert views.attention_summary(home)["count"] == 1
+    both = runner.invoke(app, ["board", "clear", "--id", msg.short_id, "--before", "7d"])
+    assert both.exit_code != 0
+    assert views.attention_summary(home)["count"] == 1
+
+    neither = runner.invoke(app, ["board", "clear"])
+    assert neither.exit_code != 0
+    assert "--id" in neither.output
+    assert views.attention_summary(home)["count"] == 1
 
 
 def test_board_read_prints_the_handle_an_ack_needs(home: Path):
@@ -177,27 +181,27 @@ def test_an_agents_ack_lands_in_its_journal(home: Path, monkeypatch):
     monkeypatch.setenv("QUORUM_ACTOR_RUN", "run-1")
     monkeypatch.setenv("QUORUM_ACTOR_CAP", "10")
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id])
+    result = runner.invoke(app, ["board", "clear", "--id", msg.short_id])
     assert result.exit_code == 0, result.output
     entries = fsio.read_jsonl(home / "state" / "manager" / "journal.jsonl")
-    assert [e["action"] for e in entries] == ["board.ack"]
+    assert [e["action"] for e in entries] == ["board.clear"]
     assert entries[0]["target"] == msg.short_id
 
 
 def test_topic_scopes_the_cli_ack(home: Path):
-    """Two topics can hand out the same short id; `--topic` is how you say
-    which board you meant."""
+    """Two topics can hand out the same short id; naming the topic alongside
+    `--id` is how you say which board you meant."""
     bus = MessageBus(home)
     msg = bus.post("manager", "attention", "escalation", text="escalated")
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--topic", "notes"]
+        app, ["board", "clear", "notes", "--id", msg.short_id]
     )
     assert result.exit_code != 0
     assert "on notes" in result.output
     assert views.attention_summary(home)["count"] == 1
 
     result = runner.invoke(
-        app, ["board", "ack", msg.short_id, "--topic", "attention"]
+        app, ["board", "clear", "attention", "--id", msg.short_id]
     )
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
@@ -205,7 +209,7 @@ def test_topic_scopes_the_cli_ack(home: Path):
 
 def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypatch):
     """Resolution hands back a path; between that and the archive the janitor
-    (or a second `board ack`, or the TUI) can take the file. Acking the
+    (or a second `board clear`, or the TUI) can take the file. Acking the
     path we already have makes that a no-op instead of a traceback from a
     second resolution — and the message is archived once, not twice."""
     bus = MessageBus(home)
@@ -219,7 +223,7 @@ def test_ack_of_a_message_that_vanishes_mid_ack_stays_tidy(home: Path, monkeypat
 
     monkeypatch.setattr(MessageBus, "resolve_board_message", racing)
 
-    result = runner.invoke(app, ["board", "ack", msg.short_id])
+    result = runner.invoke(app, ["board", "clear", "--id", msg.short_id])
     assert result.exit_code == 0, result.output
     assert views.attention_summary(home)["count"] == 0
     assert [m["payload"]["text"] for m in archive_lines(home)] == ["handled elsewhere"]

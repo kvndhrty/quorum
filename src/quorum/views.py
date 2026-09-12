@@ -160,7 +160,6 @@ def project_rows(home: Path) -> list[dict[str, Any]]:
             "slug": p.slug,
             "name": p.name,
             "path": p.path,
-            "tags": p.tags,
             "deadline": p.deadline,
             "days_left": p.days_left(today),
             "notes": p.notes,
@@ -198,10 +197,6 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 "harness": t.harness,
                 "running": runner_alive(home, t.id),
                 "attached": t.attached,
-                # A task that is never expected to finish (task add
-                # --perpetual): views badge it, so "still running after 40
-                # runs" reads as working, not stuck.
-                "perpetual": t.perpetual,
                 "attached_state": attached_state(home, t.id) if t.attached else None,
                 "runs": len(t.runs),
                 # Absent (None) whenever no run reported usage — the common
@@ -279,16 +274,15 @@ def task_marker(row: dict[str, Any]) -> str:
 
 
 def task_badges(row: dict[str, Any]) -> str:
-    """The marks that follow a task's status word: `∞` for a perpetual task,
-    then the forge's word about its pull request.
+    """The mark that follows a task's status word: the forge's word about its
+    pull request.
 
     "done ✔" is delivered and "done ⊘" is a pull request somebody closed
     unmerged. The absence of both means nothing was ever observed — the
     manager tick materializes `pr_state`, so a home with no `gh` never
     badges one.
     """
-    marks = " ∞" if row.get("perpetual") else ""
-    return marks + {"merged": " ✔", "closed": " ⊘"}.get(row.get("pr_state") or "", "")
+    return {"merged": " ✔", "closed": " ⊘"}.get(row.get("pr_state") or "", "")
 
 
 def task_flags(row: dict[str, Any]) -> str:
@@ -425,8 +419,6 @@ def _run_ended_text(n: int, run: Any) -> str:
     spent = usage.describe(run.usage)
     if spent:
         parts.append(spent)
-    if run.auto_commit:
-        parts.append(run.auto_commit)
     return " · ".join(parts)
 
 
@@ -598,7 +590,6 @@ def task_history(home: Path, task: Task, root: Path | None = None) -> list[dict[
                     "fresh_session": run.fresh_session,
                     "usage": run.usage,
                     "usage_text": usage.describe(run.usage),
-                    "auto_commit": run.auto_commit,
                 }
             )
     # The run in progress has no record yet — the runner writes one when it
@@ -702,14 +693,10 @@ def board_tail(home: Path, limit: int = 20) -> list[dict[str, Any]]:
     return msgs[-limit:]
 
 
-def recent_actions(home: Path, limit: int = 20) -> list[dict[str, Any]]:
-    return fsio.read_jsonl(home / "logs" / "actions.jsonl")[-limit:]
-
-
 # The board has no read-state, so "needs a look" is time-bounded rather than
 # tracked: recent posts on the escalation topic. Old escalations age out of
 # the summary (and are eventually archived by the janitor); a handled one is
-# dropped early by acking it (`quorum board ack`, TUI `a`),
+# dropped early by acking it (`quorum board clear --id`, TUI `a`),
 # which archives the message rather than marking it — see
 # `MessageBus.ack_board_message`. Each entry therefore carries its id, because
 # that is the handle every ack affordance needs.
@@ -738,21 +725,4 @@ def attention_summary(home: Path, days: int = ATTENTION_WINDOW_DAYS, limit: int 
             }
             for m in msgs[-limit:]
         ],
-    }
-
-
-def overview(home: Path) -> dict[str, Any]:
-    config = load_config_or_default(home)
-    return {
-        "home": str(home),
-        "supervisor": supervisor_status(home),
-        "agents": agent_rows(home, config),
-        "tasks": task_rows(home, config),
-        "projects": project_rows(home),
-        "board": board_tail(home),
-        # The full list, not the banner's handful: `overview` is what the
-        # TUI reads, and its `a` picker acks one line at a time — an
-        # escalation the picker never renders cannot be acked there at all.
-        "attention": attention_summary(home, limit=ATTENTION_LIST_LIMIT),
-        "actions": recent_actions(home),
     }

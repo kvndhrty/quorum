@@ -90,14 +90,6 @@ class Check:
     def glyph(self) -> str:
         return GLYPH[self.status]
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "status": self.status,
-            "summary": self.summary,
-            "fix": self.fix,
-        }
-
 
 def ok(name: str, summary: str, fix: str = "") -> Check:
     return Check(name=name, status=OK, summary=summary, fix=fix)
@@ -327,7 +319,7 @@ def check_projects(home: Path) -> list[Check]:
                     f"project.{project.slug}",
                     f"project {project.slug}: {pdir} does not exist",
                     f"fix the path in projects/{project.slug}.json, or "
-                    f"`quorum project remove {project.slug}`",
+                    f"delete that file to unregister it",
                 )
             )
         elif not (pdir / ".git").exists():
@@ -473,40 +465,159 @@ def check_sandbox(config: Config) -> Check:
 # -- prompts -----------------------------------------------------------------
 
 
+PREAMBLE = "task-preamble"
+
+
+def _readable(path: Path) -> str | None:
+    """A prompt file's text, or None when it cannot be read or decoded.
+
+    `prompts.render` ignores an overlay it cannot decode, so one bad file
+    must not take the listing down — it becomes its own line instead.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
 def _prompt_overlays(home: Path) -> list[Check]:
-    """`prompts/<name>.local.md` files: reported, never judged.
+    """`prompts/<name>.local.md` files: where each one lands, and the two
+    ways one can be dead policy.
 
     An overlay is additive by construction — the user's own words layered on
-    top of whatever default ships — so there is no such thing as a stale one
-    and nothing here can be a `✗`. It is listed because a prompt that does
-    not read the way the file on disk does is otherwise a genuinely baffling
-    half hour.
+    top of whatever default ships — so a present, readable overlay is never a
+    `✗`. An overlay that names no template, or one that cannot be decoded, is:
+    both are silently never rendered, which is a genuinely baffling half hour.
     """
+    from . import prompts as prompts_mod
+
     directory = Path(home) / "prompts"
     try:
         overlays = sorted(p.name for p in directory.glob("*.local.md") if p.is_file())
     except OSError:
         return []
-    return [
-        na(
-            f"prompts.{name.removesuffix('.local.md')}.local",
-            f"prompts/{name} overlays the packaged {name.removesuffix('.local.md')}.md",
+    checks: list[Check] = []
+    for filename in overlays:
+        stem = filename.removesuffix(prompts_mod.LOCAL_SUFFIX)
+        name = f"prompts.{stem}.local"
+        try:
+            template = prompts_mod.load(Path(home), stem)
+        except KeyError:
+            checks.append(
+                problem(
+                    name,
+                    f"prompts/{filename}: no prompt named {stem!r} — it is never rendered",
+                    "rename it after a template (`quorum doctor` lists them), or delete it",
+                )
+            )
+            continue
+        except (OSError, UnicodeDecodeError):
+            template = ""
+        if _readable(directory / filename) is None:
+            checks.append(
+                problem(
+                    name,
+                    f"prompts/{filename} cannot be read (not UTF-8, or no permission) — "
+                    "it is ignored when rendering",
+                    "fix the encoding or permissions, or delete it",
+                )
+            )
+            continue
+        where = "at its {local} slot" if prompts_mod.has_slot(template) else "prepended"
+        checks.append(na(name, f"prompts/{filename} overlays {stem}.md, {where}"))
+    return checks
+
+
+def _prompt_project_blocks(home: Path) -> list[Check]:
+    """The fourth prompt layer: what each project puts in the preamble's
+    `{project}` slot — its registry notes, its own `.quorum` file, or both.
+
+    Only projects that actually contribute one are reported; the point is to
+    make per-project prompt text findable, not to re-list the registry.
+    """
+    from . import prompts as prompts_mod
+    from .projects import ProjectRegistry
+
+    try:
+        projects = ProjectRegistry(Path(home)).list()
+    except Exception:
+        return []
+    checks: list[Check] = []
+    for project in projects:
+        sources = []
+        if project.notes.strip():
+            sources.append("notes (registry)")
+        block = prompts_mod.project_local_path(project.dir, PREAMBLE)
+        if block.is_file():
+            shown = f"{prompts_mod.PROJECT_DIR_NAME}/{block.name}"
+            if _readable(block) is None:
+                checks.append(
+                    problem(
+                        f"prompts.{PREAMBLE}.{project.slug}",
+                        f"{project.slug}: {block} cannot be read — it is ignored when rendering",
+                        "fix the encoding or permissions, or delete it",
+                    )
+                )
+                continue
+            sources.append(shown)
+        if not sources:
+            continue
+        checks.append(
+            na(
+                f"prompts.{PREAMBLE}.{project.slug}",
+                f"{project.slug} fills {PREAMBLE}'s {{project}} slot: {' + '.join(sources)}",
+            )
         )
-        for name in overlays
+    if checks:
+        try:
+            template = prompts_mod.load(Path(home), PREAMBLE)
+        except (KeyError, OSError, UnicodeDecodeError):
+            return checks  # already reported by check_prompts
+        if not prompts_mod.has_slot(template, "project"):
+            checks.append(
+                problem(
+                    f"prompts.{PREAMBLE}.project_slot",
+                    f"prompts/{PREAMBLE}.md has no {{project}} slot — "
+                    "these per-project blocks are never rendered",
+                    f"put {{project}} back in prompts/{PREAMBLE}.md, or delete the blocks",
+                )
+            )
+    return checks
+
+
+def _prompt_extras(home: Path, packaged: set[str]) -> list[Check]:
+    """Templates in prompts/ that quorum packages no default for — a prompt
+    agent's own, or one written by hand. Nothing can be stale about them, so
+    they are listed and never judged."""
+    from . import prompts as prompts_mod
+
+    try:
+        names = sorted(
+            p.name
+            for p in (Path(home) / "prompts").glob("*.md")
+            if p.is_file() and not p.name.endswith(prompts_mod.LOCAL_SUFFIX)
+        )
+    except OSError:
+        return []
+    return [
+        na(f"prompts.{name.removesuffix('.md')}", f"prompts/{name} is yours — no packaged default")
+        for name in names
+        if name not in packaged
     ]
 
 
 def check_prompts(home: Path) -> list[Check]:
-    """Home prompt copies against the packaged defaults.
+    """Every prompt layer, in the order `prompts.render` resolves them:
+    packaged default, home copy, home overlay, project block.
 
     Classification is `home.classify_prompts` — a loop over the same
-    `home.classify_prompt` that `quorum init` seeds by and `quorum prompt
-    list` displays, seed record and all — so doctor can never disagree with
-    either about what "edited" means.
+    `home.classify_prompt` that `quorum init` seeds by, seed record and all —
+    so doctor can never disagree with init about what "edited" means.
     """
     states = home_mod.classify_prompts(Path(home))
+    trailer = _prompt_extras(home, set(states)) + _prompt_overlays(home) + _prompt_project_blocks(home)
     if not states:
-        return [na("prompts", "no packaged prompt defaults found"), *_prompt_overlays(home)]
+        return [na("prompts", "no packaged prompt defaults found"), *trailer]
     checks: list[Check] = []
     for filename, state in sorted(states.items()):
         name = f"prompts.{filename.removesuffix('.md')}"
@@ -518,6 +629,16 @@ def check_prompts(home: Path) -> list[Check]:
                     name,
                     f"prompts/{filename} is not seeded — the packaged default is in use",
                     "`quorum init` seeds an editable copy",
+                )
+            )
+        elif state == "unreadable":
+            checks.append(
+                problem(
+                    name,
+                    f"prompts/{filename} cannot be read (not UTF-8, or no permission) — "
+                    "every render of it fails",
+                    "fix the encoding or permissions, or delete it to fall back to the "
+                    "packaged default",
                 )
             )
         elif state == "upgradable":
@@ -534,11 +655,11 @@ def check_prompts(home: Path) -> list[Check]:
                 na(
                     name,
                     f"prompts/{filename} is edited and the packaged default has since changed",
-                    "diff it against the packaged default and merge, or delete the file "
-                    "to adopt the new one",
+                    f"`quorum prompt diff {filename.removesuffix('.md')}` shows what you are "
+                    "missing; merge it, or delete the file to adopt the new one",
                 )
             )
-    return checks + _prompt_overlays(home)
+    return checks + trailer
 
 
 # -- state hygiene -----------------------------------------------------------
@@ -842,8 +963,8 @@ def _smoke_run(scratch: Path, name: str, harness: HarnessConfig, timeout: float)
     workdir = scratch / "run"
     workdir.mkdir(parents=True, exist_ok=True)
     # A real but throwaway QUORUM_HOME for the child: a harness carrying
-    # quorum's own integration hooks *will* run `quorum task
-    # hook-session-start` during the probe, and it must land here rather
+    # quorum's own integration hooks *will* run `quorum task hook
+    # session-start` during the probe, and it must land here rather
     # than in the user's live home.
     scratch_home = scratch / "home"
     home_mod.scaffold(scratch_home)
@@ -1052,7 +1173,3 @@ def tally(checks: list[Check]) -> dict[str, int]:
         "na": sum(1 for c in checks if c.status == NA),
     }
 
-
-def report(home: Path, checks: list[Check]) -> dict[str, Any]:
-    """The `--json` shape: the same lines a human sees, plus the tally."""
-    return {"home": str(home), "checks": [c.as_dict() for c in checks], **tally(checks)}

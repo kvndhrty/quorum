@@ -611,9 +611,23 @@ def run_ledger(home: Path, name: str, run_id: str) -> dict | None:
     return None
 
 
-def _action_lines(home: Path, entries: list[dict]) -> list[str]:
+def journal_entries(home: Path, name: str, limit: int) -> list[dict]:
+    """An agent's recent journal entries, newest last, across every run."""
+    return [
+        e
+        for e in fsio.read_jsonl_tail(actor.journal_path(home, name), limit=limit)
+        if isinstance(e, dict)
+    ]
+
+
+def _action_lines(home: Path, entries: list[dict], *, with_run: bool = False) -> list[str]:
     """Journaled actions with their then-vs-now outcome — the same reading the
-    next digest gives the manager, so `agent log manager` and the digest agree."""
+    next digest gives the manager, so `agent log manager` and the digest agree.
+
+    `with_run` tags each line with the run that took the action, which is
+    what a listing spanning several runs (`agent log <name> --actions`)
+    needs and a single run's section does not.
+    """
     from .tasks import TaskStore
 
     try:
@@ -623,7 +637,9 @@ def _action_lines(home: Path, entries: list[dict]) -> list[str]:
     out = []
     for e in entries:
         target = str(e.get("target") or "")
-        line = f"[{_clock(e.get('at'))}] {e.get('action', '')}"
+        run = str(e.get("run") or "")
+        tag = f" ({run[-6:].lower()})" if with_run and run else ""
+        line = f"[{_clock(e.get('at'))}]{tag} {e.get('action', '')}"
         if target:
             line += f" -> {target}"
         if e.get("args"):
@@ -635,6 +651,15 @@ def _action_lines(home: Path, entries: list[dict]) -> list[str]:
             line += f"  [{changed}]"
         out.append(line)
     return out or ["(no actions journaled)"]
+
+
+def render_journal(home: Path, name: str, limit: int) -> list[str]:
+    """`agent log <name> --actions`: the journal across runs, rendered by the
+    same `_action_lines` the per-run section uses."""
+    entries = journal_entries(home, name, limit)
+    if not entries:
+        return [f"no {name} actions recorded yet"]
+    return _action_lines(home, entries, with_run=True)
 
 
 def render_run(

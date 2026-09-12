@@ -349,7 +349,7 @@ def test_cli_reported_column_says_what_the_cost_covers(home: Path):
     assert codex.split()[:3] == ["codex", "2", "1/2"]
     assert "tasks the cost covers" in r.output
 
-def test_cli_by_agent_and_since_and_json(home: Path):
+def test_cli_by_agent_and_since(home: Path):
     usage.record_agent_run(home, "manager", "r1", CLAUDE_RUN, now=T0, outcome="ok", duration_seconds=12)
     usage.record_agent_run(home, "manager", "r2", None, now=T0 + timedelta(hours=1), outcome="timeout", duration_seconds=900)
     r = runner.invoke(app, ["usage", "--by", "agent"])
@@ -358,17 +358,16 @@ def test_cli_by_agent_and_since_and_json(home: Path):
     assert lines[1].split() == ["agent", "runs", "reported", "timeout", "cost", "tokens", "duration"]
     assert lines[2].split() == ["manager", "2", "1/2", "1", "$1.50", "500", "7m36s"]
 
-    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m", "--json"])
+    # T0 is years before now, so the window empties the listing
+    r = runner.invoke(app, ["usage", "--by", "agent", "--since", "30m"])
     assert r.exit_code == 0, r.output
-    payload = json.loads(r.output)
-    assert payload["by"] == "agent" and payload["since_seconds"] == 1800
-    assert payload["rows"] == [] and payload["total"] is None  # T0 is years before now
+    assert "usage by agent, agent runs since" in r.output
+    assert "nothing recorded in that window" in r.output
 
     build_home(home)
-    r = runner.invoke(app, ["usage", "--since", "1w", "--json"])
-    payload = json.loads(r.output)
-    assert payload["by"] == "project" and payload["cutoff"] is not None
-    assert all(row["queue_to_run"] is None or "median_seconds" in row["queue_to_run"] for row in payload["rows"])
+    r = runner.invoke(app, ["usage", "--since", "1w"])
+    assert r.exit_code == 0, r.output
+    assert r.output.startswith("usage by project, tasks queued since")
 
 
 def test_cli_says_when_nothing_is_recorded(home: Path):

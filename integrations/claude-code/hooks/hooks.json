@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "quorum task hook-stop"
+            "command": "quorum task hook stop"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "quorum task hook-session-end"
+            "command": "quorum task hook session-end"
           }
         ]
       }

@@ -1,4 +1,4 @@
-"""`views.task_history` and `quorum task history`: one chronological list of
+"""`views.task_history` and `quorum task show --history`: one chronological list of
 a task's life, read back out of the files that already record it — task.json,
 reports.jsonl, the inbox and message archive, the agents' journals, the
 archive directory. Nothing is recorded for the list's sake, so every test
@@ -63,10 +63,10 @@ def build_life(home: Path) -> tasks.Task:
     # 06:00 a second run, stopped by `task stop` at 07:00 (SIGTERM = 15)
     run2 = TaskRun(started_at=fsio.iso(at(6)), ended_at=fsio.iso(at(7)), exit_code=-15,
                    stopped=True)
-    # 08:00 a fresh-session relaunch that stalled and was auto-committed at 09:00
+    # 08:00 a fresh-session relaunch that stalled at 09:00
     run3 = TaskRun(
         started_at=fsio.iso(at(8)), ended_at=fsio.iso(at(9)), exit_code=143,
-        stalled=True, fresh_session=True, auto_commit="auto-committed 2 path(s) as abc123",
+        stalled=True, fresh_session=True,
     )
     store.update(task.id, runs=[r.model_dump() for r in (run1, run2, run3)])
     # 10:00 the user sent guidance that is still waiting; 10:30 one a run
@@ -114,10 +114,7 @@ def test_every_kind_of_entry_appears_once_and_in_order(home: Path):
     assert text[5] == "run 1 ended · exit 0 · $0.42 · 11.0k tok"
     assert text[7] == "run 2 ended · stopped by `task stop` (SIGTERM)"
     assert text[8] == "run 3 started · fresh session"
-    assert text[9] == (
-        "run 3 ended · exit 143 · stalled (no harness output) · "
-        "auto-committed 2 path(s) as abc123"
-    )
+    assert text[9] == "run 3 ended · exit 143 · stalled (no harness output)"
     assert text[10] == "guidance from user (waiting): try harder"
     assert text[11] == "guidance from user@tui (claimed): mid-flight"
     assert text[12] == "reported done: shipped · https://github.com/o/r/pull/7"
@@ -229,8 +226,8 @@ def test_history_is_fail_soft_over_bad_files(home: Path):
 def test_history_survives_a_corrupt_deflate_stream_in_the_archive(home: Path):
     """gzip reports damage three ways and only two of them are OSErrors:
     corruption inside the compressed data raises zlib.error, which used to
-    escape the archive scan and take `task history` (and the TUI tab and the
-    web task detail) down with it."""
+    escape the archive scan and take `task show --history` (and the TUI tab)
+    down with it."""
     task = TaskStore(home).add("proj", "x", "fake", now=at(1))
     archive = home / "messages" / "archive"
     archive.mkdir(parents=True, exist_ok=True)
@@ -240,13 +237,13 @@ def test_history_survives_a_corrupt_deflate_stream_in_the_archive(home: Path):
 
     assert MessageBus(home).archived_records(inbox_name(task.id)) == []
     assert kinds(views.task_history(home, task)) == ["queued"]
-    r = runner.invoke(app, ["task", "history", task.short_id])
+    r = runner.invoke(app, ["task", "show", task.short_id, "--history"])
     assert r.exit_code == 0, r.output
 
 
-def test_cli_prints_the_life_and_emits_json(home: Path):
+def test_cli_prints_the_life(home: Path):
     task = build_life(home)
-    r = runner.invoke(app, ["task", "history", task.short_id])
+    r = runner.invoke(app, ["task", "show", task.short_id, "--history"])
     assert r.exit_code == 0, r.output
     lines = r.output.splitlines()
     assert lines[0].startswith(f"task {task.short_id}  ({task.id})  14 event(s)")
@@ -255,14 +252,21 @@ def test_cli_prints_the_life_and_emits_json(home: Path):
     assert lines[-1] == (
         "[2026-01-01 12:00:00] pr state observed: merged · https://github.com/o/r/pull/7"
     )
+    # one line per row the reader produced, in the reader's order
+    assert lines[1:] == [views.history_line(row) for row in views.task_history(home, task)]
 
-    r = runner.invoke(app, ["task", "history", task.short_id, "--json"])
-    rows = json.loads(r.output)
-    assert kinds(rows) == kinds(views.task_history(home, task))
-    assert rows[0]["issue_url"] == "https://github.com/o/r/issues/95"
-
-    r = runner.invoke(app, ["task", "history", "zzzzzz"])
+    r = runner.invoke(app, ["task", "show", "zzzzzz", "--history"])
     assert r.exit_code == 1 and "no task matching" in r.output
+
+
+def test_show_without_history_is_the_record_not_the_life(home: Path):
+    """One command, two readings: `--history` is how it got here, and the
+    plain form is where it stands."""
+    task = build_life(home)
+    r = runner.invoke(app, ["task", "show", task.short_id])
+    assert r.exit_code == 0, r.output
+    assert "status:   done" in r.output
+    assert "queued on proj" not in r.output
 
 
 def test_cli_still_answers_for_a_pruned_task(home: Path):
@@ -273,21 +277,25 @@ def test_cli_still_answers_for_a_pruned_task(home: Path):
     prune.archive_task(home, task.id)
     assert TaskStore(home).get(task.id) is None
 
-    r = runner.invoke(app, ["task", "history", task.short_id, "--json"])
+    r = runner.invoke(app, ["task", "show", task.short_id, "--history"])
     assert r.exit_code == 0, r.output
-    rows = json.loads(r.output)
+    rows = views.task_history(
+        home, prune.resolve_archived(home, task.id),
+        root=prune.archived_task_dir(home, task.id),
+    )
     assert kinds(rows)[-1] == "archived" and kinds(rows)[0] == "queued"
     assert len(rows) == 15  # everything the live task had, plus the move
     assert rows[-1]["at"] > rows[-2]["at"]  # stamped now, off the directory
     assert "task prune" in rows[-1]["text"]
+    assert "15 event(s)" in r.output and "task prune" in r.output
 
     # the same grammar as the live resolver: a prefix works, an ambiguous one is refused
     twin = TaskStore(home).add("proj", "twin", "fake", now=at(1))
     prune.archive_task(home, twin.id)
     shared = task.id[:2]
-    r = runner.invoke(app, ["task", "history", shared])
+    r = runner.invoke(app, ["task", "show", shared, "--history"])
     assert r.exit_code == 1 and "ambiguous" in r.output
-    r = runner.invoke(app, ["task", "history", twin.id])
+    r = runner.invoke(app, ["task", "show", twin.id, "--history"])
     assert r.exit_code == 0 and "queued on proj" in r.output
 
 
