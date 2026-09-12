@@ -53,6 +53,11 @@ Then check the setup against reality:
 quorum doctor          # one line per check; exit 1 if anything is ✗
 ```
 
+A finished home is easier to read than a scaffold full of comments:
+[examples/dogfood-home/](../examples/dogfood-home/) is the one that builds
+quorum itself — its real `config.toml`, the house rules its manager follows,
+and the issue-driven loop they serve, with what a cycle cost.
+
 ### 2. Register a project
 
 A project is a directory, usually a git repo. Tasks run against projects.

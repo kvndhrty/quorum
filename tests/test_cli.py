@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import harness_table, install_gh, make_repo
+from conftest import (
+    cli_command_names,
+    harness_table,
+    install_gh,
+    make_repo,
+    names_a_real_command,
+    quorum_invocations,
+)
 from quorum import fsio
 from quorum.cli import app
 
@@ -702,50 +709,20 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     assert r.exit_code == 1 and "drop the prompt argument" in r.output
 
 
-def _quorum_invocations(text: str) -> list[str]:
-    """Every `quorum ...` command a prompt tells an agent to run: inline code
-    spans, list-item tool lines, and indented example blocks."""
-    import re
-
-    found = [span for span in re.findall(r"`([^`\n]+)`", text) if span.startswith("quorum ")]
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            stripped = stripped[2:]
-        if stripped.startswith("quorum "):
-            found.append(stripped)
-    return found
-
-
 def test_shipped_prompts_only_name_real_cli_commands():
     """The packaged prompts ARE the product's policy layer; a command that
     was renamed out from under one fails silently at 3am, in a transcript
-    nobody reads."""
-    import re
+    nobody reads. The example home gets the same check in
+    tests/test_example_home.py."""
     from importlib import resources
 
-    def cmd_name(info) -> str:
-        # An unnamed @app.command() takes its name from the callback.
-        return info.name or info.callback.__name__.rstrip("_").replace("_", "-")
-
-    known = {cmd_name(c) for c in app.registered_commands}
-    for group in app.registered_groups:
-        known |= {
-            f"{group.name} {cmd_name(c)}" for c in group.typer_instance.registered_commands
-        }
-
+    known = cli_command_names(app)
     checked = 0
     for entry in (resources.files("quorum") / "default_prompts").iterdir():
         if not entry.name.endswith(".md"):
             continue
-        for invocation in _quorum_invocations(entry.read_text(encoding="utf-8")):
-            words: list[str] = []
-            for token in invocation.split()[1:]:
-                if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
-                    break
-                words.append(token)
-            assert words, f"{entry.name}: bare `quorum` in {invocation!r}"
-            assert " ".join(words) in known or words[0] in known, (
+        for invocation in quorum_invocations(entry.read_text(encoding="utf-8")):
+            assert names_a_real_command(invocation, known), (
                 f"{entry.name} names a command that does not exist: {invocation!r}"
             )
             checked += 1
