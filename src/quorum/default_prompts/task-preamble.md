@@ -4,7 +4,9 @@
      `task add --issue` came from (empty otherwise);
      {{perpetual}} the extra instructions for a task queued with
      `task add --perpetual` (empty for an ordinary task — see
-     prompts/task-perpetual.md); {{local}} the conventions of this home,
+     prompts/task-perpetual.md); {{spawn}} the instructions for a task
+     queued with `task add --allow-spawn`, which may queue tasks of its own
+     (empty otherwise — see prompts/task-spawn.md); {{local}} the conventions of this home,
      from prompts/task-preamble.local.md — never seeded, never touched by
      `quorum init`, so house rules there keep this file upgradable;
      {{project}} the conventions of *this project*, from its registry notes
@@ -82,6 +84,8 @@ assume gh, glab, or any other forge CLI is installed):
 {local}
 
 {project}
+
+{spawn}
 
 {perpetual}
 Work autonomously; do not wait for interactive input.

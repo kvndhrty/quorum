@@ -33,10 +33,19 @@ FAILING_PR = {
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A scaffolded QUORUM_HOME in tmp_path, exported via env for CLI calls."""
+    """A scaffolded QUORUM_HOME in tmp_path, exported via env for CLI calls.
+
+    The actor tag is cleared with it: `quorum`'s own home runs these tests
+    inside task runs, whose environment carries `QUORUM_ACTOR=task-<id>`
+    (actor.py) — and a CLI call under that tag journals, is attributed, and
+    is held to the spawn rails. A test that wants an actor sets one; nobody
+    should inherit the one the suite happens to be running under.
+    """
     target = tmp_path / "qhome"
     home_mod.scaffold(target)
     monkeypatch.setenv("QUORUM_HOME", str(target))
+    for var in ("QUORUM_ACTOR", "QUORUM_ACTOR_RUN", "QUORUM_ACTOR_CAP"):
+        monkeypatch.delenv(var, raising=False)
     return target
 
 

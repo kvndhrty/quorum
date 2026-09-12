@@ -50,6 +50,11 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     hung session, and what the stall watchdog must end
     ignore_sigterm  print one line, ignore SIGTERM, then sleep forever: the
                     harness `task stop` has to escalate to SIGKILL for
+    task_spawn      echo + act like a task that found work of its own: call
+                    `quorum task add` under the actor tag the runner set,
+                    once plainly and once with `--after self`, printing each
+                    exit code and any refusal. FAKE_HARNESS_SPAWN_PROJECT
+                    names the project to queue them on.
     manager_restart echo + act like a manager following the hung-session
                     policy in prompts/manager.md, one step per run, reading
                     which step it is at off the digest's own marks: STALLED
@@ -72,6 +77,8 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
                              its own task, "tell" sends `manager tell`
   FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
+  FAKE_HARNESS_SPAWN_PROJECT   task_spawn mode: the project slug to queue the
+                               new tasks on
 """
 
 import json
@@ -248,6 +255,19 @@ def main() -> int:
         print(f"ACT| manager remember -> exit {r.returncode}")
         if r.returncode != 0 and r.stderr.strip():
             print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+        print(f"ACTOR| {os.environ.get('QUORUM_ACTOR', '')}")
+
+    elif mode == "task_spawn":
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        project = os.environ.get("FAKE_HARNESS_SPAWN_PROJECT", "proj")
+        for extra in ([], ["--after", "self"]):
+            r = quorum("task", "add", project, "work this run found", *extra)
+            print(f"ACT| task add {' '.join(extra)} -> exit {r.returncode}")
+            if r.returncode != 0 and r.stderr.strip():
+                print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
         print(f"ACTOR| {os.environ.get('QUORUM_ACTOR', '')}")
 
     elif mode == "manager_restart":

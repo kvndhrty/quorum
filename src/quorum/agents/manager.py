@@ -389,6 +389,38 @@ def _dependency_marks(state: dict | None) -> str:
     return marks
 
 
+def _spawn_marks(state: dict | None) -> str:
+    """The greppable lineage part of a task line: `parent=<short-id>` for a
+    task another task's run queued, and `SPAWN-CAP` for a parent that has
+    created as many tasks as `[tasks].max_spawn_per_task` allows. Empty for a
+    task with no family, which is most of them."""
+    if not state:
+        return ""
+    marks = ""
+    if state["parent"]:
+        marks += f" parent={state['parent']}"
+    if state["children"]:
+        marks += f" spawned={','.join(state['children'])}"
+    if state["capped"]:
+        marks += " SPAWN-CAP"
+    return marks
+
+
+def _spawn_lines(state: dict | None) -> list[str]:
+    """The prose behind SPAWN-CAP. Nothing to say about an ordinary parent or
+    child: a spawned task is an ordinary queued task, and the mark on its line
+    is the whole observation."""
+    if not state or not state["capped"]:
+        return []
+    return [
+        "  SPAWN-CAP: this task has created as many tasks as "
+        "[tasks].max_spawn_per_task allows, so `task add` now refuses it — a rate "
+        "limit, not a verdict on the work. Its reports are where the refused idea "
+        "went: read them and decide whether to queue it yourself, raise the cap, or "
+        "let it go"
+    ]
+
+
 def _dependency_lines(state: dict | None) -> list[str]:
     """The prose behind the marks. Every one of these is an *observation* the
     manager judges — quorum refuses a premature `task run` (a substrate rail,
@@ -453,6 +485,9 @@ def build_digest(
     budget = _budget(home, tasks_config)
     # Dependencies, read once over the listing we already hold (tasks.py).
     deps = tasks.dependency_states(all_tasks)
+    # Lineage, the same way: which tasks came out of another task's run, and
+    # which parent has used up its share of the queue (#43).
+    spawn = tasks.spawn_states(all_tasks, budget.max_spawn_per_task)
     live = [t for t in all_tasks if t.status not in tasks.TERMINAL_STATUSES]
     active = [t for t in live if not t.attached]
     attached = [t for t in live if t.attached]
@@ -557,6 +592,7 @@ def build_digest(
             + _restart_marks(t)
             + (" STALLED" if stalled is not None else "")
             + _dependency_marks(deps.get(t.id))
+            + _spawn_marks(spawn.get(t.id))
             + _overlap_marks(overlaps.get(t.id))
         )
         first = t.prompt.strip().splitlines()[0] if t.prompt.strip() else ""
@@ -579,6 +615,7 @@ def build_digest(
                 "keeps happening)"
             )
         lines.extend(_dependency_lines(deps.get(t.id)))
+        lines.extend(_spawn_lines(spawn.get(t.id)))
         lines.extend(_overlap_lines(overlaps.get(t.id)))
         git = tasks.workdir_git_state(t)
         if git and (git["dirty"] or git["unpushed"]):
@@ -677,6 +714,9 @@ def build_digest(
                 # only. The body goes into the dependents' prompts and
                 # `task show`; the digest has no reason to carry it.
                 + (" handoff=true" if tasks.has_handoff(home, t.id) else "")
+                # Lineage outlives the task: a child queued by a run that has
+                # since finished still has to be readable as follow-up work.
+                + _spawn_marks(spawn.get(t.id))
             )
             git = tasks.workdir_git_state(t)
             if git and (git["dirty"] or git["unpushed"]):

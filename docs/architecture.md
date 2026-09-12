@@ -87,7 +87,7 @@ projects/<slug>.json              canonical project records
 tasks/<id>/task.json              task spec, reported status, session, runs
                                   (times, exit code, auto-commit note, usage),
                                   attached / perpetual, depends_on, pr_state /
-                                  pr_state_at, issue_url
+                                  pr_state_at, issue_url, allow_spawn / parent
 tasks/<id>/attached.json          attached-session liveness (latest hook event)
 tasks/<id>/transcript.jsonl       harness stdout, one JSON line per line seen
 tasks/<id>/reports.jsonl          `quorum task report` entries
@@ -652,6 +652,64 @@ to put in it. Nothing in Python writes a handoff for a task that did not,
 and nothing summarizes one: what to keep is the model's decision, the file
 is where it keeps it.
 
+### Tasks that spawn tasks
+
+(User-facing how-to: [guide.md](guide.md#letting-tasks-create-work).)
+
+A run finds work it should not do in this worktree — something out of scope,
+a follow-up for after this lands, an experiment. Before #43 it could only say
+so in a report; `quorum task add` would have worked from inside a run (the
+CLI does not care who calls it), but the resulting task looked
+user-created, had no link back, and nothing capped it. The feature is that
+call made legible: **opt-in, attributed, linked, capped.**
+
+- **Opt-in.** `task add --allow-spawn` sets `allow_spawn = true` on the task
+  record, defaulted by `[tasks].allow_spawn`. Only a task carrying it may
+  create tasks, and `compose_prompt` renders `prompts/task-spawn.md` into the
+  preamble's `{spawn}` slot only for such a task — the same conditional
+  shape as `{perpetual}`, prepended when an edited preamble has no slot. A
+  task that may not spawn is never told about a command that would refuse it.
+- **Attributed.** The actor tag the runner already sets
+  (`QUORUM_ACTOR=task-<id>`, identity only) is what makes the call
+  attributable; `task add` resolves it to the calling task, and a tag naming
+  a task with no record is refused rather than queued unparented.
+- **Linked.** The child records `parent` — the full id of the task whose run
+  created it — written once at `add`, beside `depends_on`. That is the *only*
+  new field: a parent's children, its spawn count and the depth of a chain
+  are read back from the listing (`tasks.spawn_children` / `spawn_depth` /
+  `spawn_states`, total over a missing ancestor and a hand-edited loop), so
+  there is no second record to keep true. `--after self` resolves to the
+  calling task's id, which makes a post-task an ordinary dependency and gives
+  it the parent's handoff for free; outside a task run it is an error.
+- **Capped.** `tasks.spawn_refusal` is the one decision quorum makes in
+  Python here, and it is a rate limit of the action cap's family: refuse when
+  the task is not spawn-enabled, when the chain is already
+  `[tasks].max_spawn_depth` deep (1 by default, so a spawned task may not
+  spawn again), and when the parent has created `[tasks].max_spawn_per_task`
+  tasks already (5 by default) across all its runs. It never looks at what
+  the new task would be. Each message names the setting behind it and points
+  at `quorum task report`, so a refused idea goes where the manager and the
+  human already read.
+
+Everything else is the substrate that already existed. A spawned task is an
+ordinary queued task: nobody launches it but the manager or a person, the
+merge gate is unchanged, and it inherits its parent's harness only as a
+default `--harness` overrides. **Nothing cascades** — cancelling a parent
+leaves its children queued, and a post-task behind a cancelled parent reads
+as `DEP-FAILED` like any other unsatisfiable dependency, because whether the
+child still makes sense is a judgement and judgements are the manager's.
+
+Two observations carry it to the supervisor, and neither is a rail. The
+spawn and the refusal are journaled to the manager's journal
+(`_actor_guard(always_journal=True)` — the one thing a task actor journals),
+so the next digest shows them with the actions the manager took itself. And
+the digest's task lines carry `parent=<short-id>`, `spawned=<short ids>` and
+`SPAWN-CAP` on a parent at its cap, with one line of prose under it;
+`prompts/manager.md` gains a rule reading those marks and nothing else — no
+new mechanics. Views render the same facts once
+(`views.task_badges` `⇗`, `task_flags` `parent <id>` / `SPAWN-CAP`), so the
+CLI and the TUI cannot disagree.
+
 ### The task notebook
 
 A task's only memory between runs used to be its harness session, and the
@@ -668,10 +726,12 @@ generalized to a task, on the same substrate and under the same rules:
   as its inbox name — so one name addresses a task on the bus and in the
   CLI. The runner sets `QUORUM_ACTOR=task-<id>` on the harness it spawns for
   *identity only*: `_actor_guard` treats a task actor like a human, with no
-  run id, no journal and no action cap, because reports.jsonl and the
-  transcript are a task's record and the runner is its rail. One side
-  effect: a task's `task nudge` and `board post` carry `task-<id>` as
-  sender, not `user`.
+  run id and no action cap, because reports.jsonl and the transcript are a
+  task's record and the runner is its rail. It journals nothing either, with
+  one deliberate exception — a spawn and a refused spawn
+  ([below](#tasks-that-spawn-tasks)), because work entering the queue from a
+  run is a fact the next digest has to carry. One side effect: a task's
+  `task nudge` and `board post` carry `task-<id>` as sender, not `user`.
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to
   one-shot guidance) and an untagged human; any other task and any prompt
@@ -1370,9 +1430,10 @@ result two ways.
 
 The marks *inside* those cells are views', not the CLI's: `task_marker` (the
 character before the short id — `⚭` attached, `▶` running, `✓` done, `✗`
-blocked, `·` anything else), `task_badges` (`∞` perpetual, then `✔` or `⊘`
-for what the forge last said about the PR), `task_flags` (`⚠` stranded work,
-`waiting-on <ids>`, `DEP-*`) and `usage_badge` (the spend plus `$!` or `$!
+blocked, `·` anything else), `task_badges` (`∞` perpetual, `⇗` may spawn
+tasks, then `✔` or `⊘` for what the forge last said about the PR),
+`task_flags` (`⚠` stranded work, `waiting-on <ids>`, `DEP-*`, `parent <id>`,
+`SPAWN-CAP`) and `usage_badge` (the spend plus `$!` or `$!
 GATED`). The CLI task table and the TUI task table call all four, which is
 what stops the two from disagreeing about where a dependency mark goes;
 `task show` calls `task_badges` for the two marks it has room for and spells
