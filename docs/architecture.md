@@ -1183,7 +1183,8 @@ the configured harness on a schedule, sharing the manager's exact run
 mechanics (`agents/harness_run.py`): actor-tagged env, per-agent journal and
 action cap, transcript at `state/agents/<name>/transcript.jsonl`, and
 mid-run guidance from the agent's own inbox when the harness supports
-injection (rendered at the template's `{directives}` placeholder). There is
+injection (rendered at the template's `{directives}` placeholder, and put
+there by `quorum agent tell <name>`). There is
 deliberately no wake condition and no digest — a prompt agent runs every
 scheduled tick, and anything conditional belongs in its prompt. A template
 that writes `{notes}` gets its notebook *and*, above it, the same
@@ -1263,6 +1264,22 @@ One `Message` schema serves two channels:
   highlighted line through `_write`. That list carries
   `views.ATTENTION_LIST_LIMIT` entries rather than the banner's handful,
   since every line it renders is one the reader may want to dismiss.
+
+**Guidance** is what direct mail otherwise carries, and there are two
+senders of it: `quorum task nudge <id>` into a task's inbox (`tasks.nudge`,
+which also rings the herdr doorbell when the task is attached) and `quorum
+agent tell <name>` into an agent's (`cli/agent.py::tell_agent`, with `quorum
+manager tell` the same function with the name fixed, and the TUI's `n` and
+`m` bindings the same two sends). Both write `type = "guidance"` — one word
+for one idea; nothing branches on the field, since `runner.guidance_note`
+renders the payload text and the `guidance` row kind in `views.py` comes from
+which inbox was read — and both attribute the message to `current_actor()`,
+so guidance from the manager or another agent renders `[from <actor> at …]`
+instead of being reported as a person's. `agent tell` goes through
+`_actor_guard` like every other mutating command, so an agent's guidance is
+journaled and counts against its per-run action cap, and it refuses a
+recipient that is not a configured agent: nothing would ever claim that
+inbox.
 
 The **control channel** rides the same machinery: `quorum agent
 pause|resume|run-now|reload` sends to the `supervisor` inbox, which the

@@ -148,7 +148,7 @@ def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path, tu
         await pilot.pause()
         claimed = [c for c in MessageBus(home).claim("manager")]
         assert [c.message.payload["text"] for c in claimed] == ["start the oldest queued task"]
-        assert claimed[0].message.type == "directive"
+        assert claimed[0].message.type == "guidance"  # one word for it everywhere
 
     tui(home, script)
 

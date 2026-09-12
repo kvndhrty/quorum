@@ -382,6 +382,43 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     assert msg["type"] == "agent.pause" and msg["payload"]["agent"] == "manager"
 
 
+def test_agent_tell_queues_guidance_and_refuses_an_unknown_agent(home: Path, monkeypatch):
+    """`quorum agent tell` is the CLI half of a prompt agent's `{directives}`
+    (#129). It is also the manager's guidance path, so the two defects it
+    fixed there are asserted here: the send is journaled and capped like any
+    other agent action, and the sender is the actor, not always "user"."""
+    from quorum import fsio
+    from quorum.actor import journal_path
+    from quorum.messages import MessageBus
+
+    r = runner.invoke(app, [
+        "agent", "create", "standup", "post a standup note", "--harness", "fake",
+    ])
+    assert r.exit_code == 0, r.output
+
+    r = runner.invoke(app, ["agent", "tell", "standup", "skip the retro section"])
+    assert r.exit_code == 0, r.output
+    msgs = [fsio.read_json(p) for p in fsio.sorted_entries(MessageBus(home).inbox_dir / "standup" / "new")]
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "guidance" and msgs[0]["from"] == "user"
+    assert msgs[0]["payload"]["text"] == "skip the retro section"
+
+    # an agent nothing schedules would never read it: refused, and nothing sent
+    r = runner.invoke(app, ["agent", "tell", "ghost", "hello?"])
+    assert r.exit_code == 1 and "no agent 'ghost'" in r.output
+    assert not (MessageBus(home).inbox_dir / "ghost").exists()
+
+    # a manager-tagged call is attributed to the manager and journaled
+    monkeypatch.setenv("QUORUM_ACTOR", "manager")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TELLRUN")
+    r = runner.invoke(app, ["agent", "tell", "standup", "and keep it short"])
+    assert r.exit_code == 0, r.output
+    msgs = [fsio.read_json(p) for p in fsio.sorted_entries(MessageBus(home).inbox_dir / "standup" / "new")]
+    assert [m["from"] for m in msgs] == ["user", "manager"]
+    entries = fsio.read_jsonl(journal_path(home, "manager"))
+    assert [(e["action"], e["target"]) for e in entries] == [("agent.tell", "standup")]
+
+
 def test_agent_create_remove_and_reload(home: Path):
     from quorum import fsio
     from quorum.messages import MessageBus
@@ -450,7 +487,10 @@ def test_manager_tell_note_and_journal(home: Path):
     r = runner.invoke(app, ["manager", "tell", "focus on the api task"])
     assert r.exit_code == 0
     inbox = MessageBus(home).inbox_dir / "manager" / "new"
-    assert len(fsio.sorted_entries(inbox)) == 1
+    entries = fsio.sorted_entries(inbox)
+    assert len(entries) == 1
+    # `agent tell manager` under another name: one write path, one vocabulary
+    assert fsio.read_json(entries[0])["type"] == "guidance"
 
     r = runner.invoke(app, ["manager", "note", "human-added context"])
     assert r.exit_code == 0
