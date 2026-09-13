@@ -165,7 +165,7 @@ def test_full_loop_launch_nudge_journal_and_directives(home: Path, clock, projec
 def test_mid_run_guidance_reaches_a_live_manager_run(
     home: Path, clock, project: str, monkeypatch
 ):
-    """`quorum board post --to manager` while a tick's harness is in flight:
+    """`quorum agent tell manager` while a tick's harness is in flight:
     the pump forwards the guidance as a user turn instead of holding it for the
     next tick (the fake posts it itself mid-run, for determinism)."""
     monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
