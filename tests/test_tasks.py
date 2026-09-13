@@ -174,10 +174,12 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
     harness posts a nudge and then emits its `result`; the pump claims the
     nudge (rename out of new/) and only *then* counts the delivery. A result
     landing in that gap saw "answered, nothing pending" and closed stdin
-    with the nudge in flight — one result event instead of two, and the
-    nudge bounced back to new/. This forces that interleaving: the result
-    arrives while the claim is mid-way, on another thread, exactly as the
-    transcript reader delivers it."""
+    with the nudge in flight — the write hit a closed pipe and the nudge
+    bounced back to new/. This forces that interleaving: the result arrives
+    while the claim is mid-way, on another thread, exactly as the transcript
+    reader delivers it. What the claim window guarantees is that the message
+    is *written*; whether that write opened a turn of its own or folded into
+    the one already running is the close rule's business, tested below."""
     bus = MessageBus(home)
     inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
     bus.send("user", inbox, text="switch to the fallback plan")
@@ -206,7 +208,6 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
             time.sleep(0.01)
         assert len(stdin.turns) == 2, stdin.turns  # prompt turn, then the nudge
         assert "switch to the fallback plan" in stdin.turns[1]
-        assert not stdin.closed  # the nudge's answer is still owed
         inbox_dir = bus.inbox_dir / inbox
         assert fsio.sorted_entries(inbox_dir / "new") == []  # delivered, not bounced
         while fsio.sorted_entries(inbox_dir / "cur") and time.monotonic() < deadline:
@@ -217,6 +218,47 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
         assert stdin.closed  # now the run is idle: every turn answered
     finally:
         pump.stop()
+
+
+def test_pump_holds_stdin_open_for_a_turn_written_to_an_idle_harness(home: Path):
+    """Half the close rule, and the half the #109 fix must not break: a
+    message written *after* the last result reached an idle harness, which
+    answers it in a turn of its own, so stdin stays open until that turn's
+    result arrives. Driven turn by turn on one thread — the pump has exactly
+    one delivering thread, so this is its real order of operations."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    assert pump._write_turn(pump._prompt)  # the opening turn
+    bus.send("user", inbox, text="switch to the fallback plan")
+    pump.on_event({"type": "result"})  # that turn ends, the nudge still in new/
+    assert not stdin.closed  # pending guidance is never closed out
+
+    pump._deliver_pending()  # written to an idle harness: a turn of its own
+    assert len(stdin.turns) == 2 and not stdin.closed
+    pump.on_event({"type": "result"})  # the answer that turn is owed
+    assert stdin.closed
+
+
+def test_pump_expects_no_second_result_for_a_turn_written_mid_turn(home: Path):
+    """The other half, and the #109 hang in one unit: a message written
+    while a turn is still running is drained into it, so the run's one
+    `result` answers both turns and ends the run. Counting a result per
+    delivery left stdin open on a harness with nothing left to do."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    assert pump._write_turn(pump._prompt)  # the opening turn, still running
+    bus.send("user", inbox, text="switch to the fallback plan")
+    pump._deliver_pending()  # written mid-turn: folded into the one in flight
+    assert len(stdin.turns) == 2 and not stdin.closed
+
+    pump.on_event({"type": "result"})  # one result covers both turns
+    assert stdin.closed
 
 
 def test_build_harness_argv_strips_prompt_for_inject_harnesses():
@@ -264,6 +306,36 @@ def test_inject_pump_closes_an_idle_run(home: Path, project: str, monkeypatch):
     assert run_task(home, config, task.id) == 0
     fresh = TaskStore(home).get(task.id)
     assert fresh.runs[0].exit_code == 0
+
+
+def test_inject_pump_closes_a_run_whose_nudge_was_folded_into_its_turn(
+    home: Path, project: str, monkeypatch
+):
+    """The #109 hang: a real stream-json CLI drains a nudge that arrives
+    mid-turn into the turn already running and emits ONE `result` for both.
+    The pump counted one result per delivery, so `results >= 1 + delivered`
+    was never satisfied, stdin stayed open on an idle harness, and
+    `runner.lock` stayed held on a task that had already reported done until
+    someone ran `task stop`. The run has to end on its own."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject_fold")
+    monkeypatch.setenv("FAKE_HARNESS_WATCHDOG", "15")  # a stuck pump fails, not wedges
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0  # exit 7 = the harness's watchdog
+
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.runs[0].exit_code == 0
+    assert not tasks.runner_lock_path(home, task.id).exists()  # released
+    entries = fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    results = [e for e in entries if e.get("event", {}).get("type") == "result"]
+    assert len(results) == 1  # one result covered the prompt turn and the nudge
+    assert "switch to the fallback plan" in transcript_text(home, task.id)
+    inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
+    assert fsio.sorted_entries(inbox / "new") == []  # delivered, not bounced back
+    assert fsio.sorted_entries(inbox / "cur") == []  # ...and acked
 
 
 def test_run_records_the_usage_the_harness_reported(home: Path, project: str, monkeypatch):

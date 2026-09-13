@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from .. import fsio
+from .. import home as home_mod
 from .. import prompts as prompts_mod
 from ._common import (
     _fail,
@@ -47,11 +48,28 @@ def _read_prompt_file(target: Path) -> str | None:
         return None
 
 
+_UNREADABLE = "? unreadable (not UTF-8, or no permission) — every render of it fails"
+
+# How this listing spells each state `home.classify_prompts` reports. "missing"
+# is not here: a name with no home copy never reaches the lookup.
+_STATE_NOTES = {
+    "default": "seeded, matches the packaged default",
+    "upgradable": "seeded by an older quorum, never edited — `quorum init` upgrades it",
+    "edited": "edited — `quorum prompt diff {name}` vs the packaged default",
+    "unreadable": _UNREADABLE,
+}
+
+
 @prompt_app.command("list")
 def prompt_list() -> None:
     """Show each prompt template: home copy vs packaged default, and overlay."""
     target = get_home()
     names = _prompt_names(target)
+    # One classifier, two readers: `home.classify_prompts` is what `quorum
+    # init` acts on and `quorum doctor` reports, seed record and all. Comparing
+    # text to the packaged default here instead called an unedited copy of an
+    # older seed "edited", hiding the upgrade init was offering (#126).
+    states = home_mod.classify_prompts(target)
     for name in names:
         default = prompts_mod.packaged(name)
         home_copy = prompts_mod.path(target, name)
@@ -61,13 +79,14 @@ def prompt_list() -> None:
         else:
             text = _read_prompt_file(home_copy)
             if text is None:
-                state = "? unreadable (not UTF-8, or no permission) — every render of it fails"
+                state = _UNREADABLE
             elif default is None:
                 state = "yours (quorum packages no default)"
-            elif text == default:
-                state = "seeded, matches the packaged default"
             else:
-                state = f"edited — `quorum prompt diff {name}` vs the packaged default"
+                # An unknown state reads as an edit: the direction that never
+                # claims `quorum init` will replace the file.
+                note = _STATE_NOTES.get(states.get(f"{name}.md", ""), _STATE_NOTES["edited"])
+                state = note.format(name=name)
         overlay = prompts_mod.local_path(target, name)
         if overlay.is_file():
             if _read_prompt_file(overlay) is None:
@@ -181,8 +200,19 @@ def prompt_diff(
             typer.secho(line, fg="cyan")
         else:
             typer.echo(line)
-    overlay = prompts_mod.local_path(target, name)
     typer.echo("")
+    if home_mod.classify_prompts(target).get(f"{name}.md") == "upgradable":
+        # The same classifier the listing, doctor and init read: this copy is
+        # the seed an older init wrote and nobody edited, so calling it "yours"
+        # here would send its owner to hand-merge what one `quorum init` does
+        # (#126) — the closing paragraph below is for an edited copy only.
+        typer.echo(
+            f"prompts/{name}.md is still the seed an older `quorum init` wrote, and you "
+            f"never edited it, so `quorum init` upgrades it in place — the diff above is "
+            f"what that brings."
+        )
+        return
+    overlay = prompts_mod.local_path(target, name)
     typer.echo(
         f"prompts/{name}.md is yours, so `quorum init` never upgrades it. To take the "
         f"packaged default again, keep your own lines in prompts/{name}.local.md "
