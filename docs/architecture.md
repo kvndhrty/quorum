@@ -158,6 +158,16 @@ copies are pristine. Keeping the fact in the home rather than in a list of
 superseded hashes in Python is what lets a change to `default_prompts/` ship
 without bookkeeping in `home.py`.
 
+`home.classify_prompts` is that rule as one read-only function — `default`,
+`upgradable`, `edited`, `missing`, plus `unreadable` for a copy it could not
+decode — and every surface that talks about prompt state reads it: `quorum
+init` acts on it, `quorum doctor` reports it, `quorum prompt list` renders
+it, and `quorum prompt diff` closes with the advice for the state it names.
+Two of them once disagreed, because `prompt list` compared text
+to the packaged default and had no third state to call an untouched older
+seed (#126); a listing that says "edited" about a file the user never opened
+sends them to hand-merge work `init` would have done.
+
 That rule has a cliff: the first edit to `<name>.md`, however small, opts
 the home out of every future upgrade to that prompt, silently — a home that
 prepends five lines of house policy to `manager.md` keeps running the
@@ -379,13 +389,22 @@ picks up at its next turn boundary. Stdin is the whole prompt channel here —
 a stream-json CLI ignores an argv prompt and blocks until a turn arrives, so
 an inject harness that only got its prompt via argv would hang silently
 until the run timeout. Because such a harness runs until stdin closes, the
-pump also owns ending the run: the protocol emits one `result` event per
-completed user turn (the prompt turn is the first), so the pump closes stdin
-once every delivered turn has its result and `new/` is empty — a run extends
-while guidance keeps arriving and ends at the first idle turn boundary. The
-claim of a message and its count as a delivered turn happen under the same
-lock the close check takes, so a `result` arriving mid-claim sees the
-message either still pending or already owed an answer, never neither.
+pump also owns ending the run, and the close rule counts *turns*, not
+deliveries: a turn written to an idle harness gets a `result` event of its
+own, while a turn written into a turn that is still running is drained into
+it and shares that turn's single result. The pump therefore tracks whether a
+turn is in flight and closes stdin at the first `result` that leaves no turn
+open, nothing claimed but unwritten, and `new/` empty — a run extends while
+guidance keeps arriving and ends at the first idle turn boundary. Expecting
+one result per *delivery* was the #109 hang: a nudge answered inside the
+running turn left the run one result short of its own close condition, and
+stdin stayed open on an idle harness — `runner.lock` held on a task that had
+already reported done, until someone ran `task stop`. The claim of a message
+and its write happen across the same lock the close check takes, so a
+`result` arriving mid-claim sees the message either still pending in `new/`
+or claimed and not yet written, never neither; whether a write folded into a
+running turn or opened a new one is settled under that lock right after the
+write, when the CLI has actually been handed the bytes.
 Guidance that arrives after close, or that lands on a harness without
 `inject`, waits in `new/` for the next run start; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgement: a message
@@ -1549,6 +1568,61 @@ nothing, because archival is the last thing that happens to a task and the
 answer to "what happened to it" must not vanish with the move. That is the
 one reader that looks into the dot-prefixed directory on purpose; every
 listing, view and digest keeps skipping it.
+
+### Intervention outcomes
+
+`views.agent_interventions(home, name, since=None)` is the second post-hoc
+reader (#97, theme #88), and the mirror of the first: `task_history` asks what
+happened to one task, this asks what one agent's supervision did and what
+happened next. The question it answers — does a nudge change the next report,
+does a relaunch finish the task, does an escalation get acted on — decides how
+much supervision is worth running, and before this it was answered by
+hand-written Python over JSONL.
+
+It reads the agent's own journal (`state/<name>/journal.jsonl`, the split
+`actor.journal_path` makes) for four things: `task.nudge`, `task.run` and
+`task.stop`, which `INTERVENTION_KINDS` maps to the words `nudge`, `launch`
+and `stop`, and a `board.post` whose journaled args name the `attention`
+topic, which reads as an `escalation`. A task row then adds what that target
+said next, out of its own `reports.jsonl`: the first report stamped at or
+after the action (`next_report`, `wait_seconds`), the first `done` report
+after it (`done_at`) and the status the task carries now. Every row is `{at,
+at_text, kind, text, …}` like a history row, `text` being the rest of the line
+`views.intervention_line` prints, and `views.intervention_summary_line`
+renders the counts under the list (with `INTERVENTION_PLURALS`, because
+"relaunchs" is not a word and the kinds do not pluralize alike). `task.run`
+reads as `launch` rather than `relaunch` because the journal does not
+distinguish the two; the status it recorded does, and reading that is the
+person's job, not a guess the view makes. `quorum agent interventions <name>`
+is the only surface; there is no `manager interventions` alias, because the
+manager is an agent like any other here, exactly as `agent log manager` is.
+
+Three properties make it honest. It **judges nothing**: the payload is the
+status before, the action, and what came after, and the summary counts only
+facts the files state — a report happened, a `done` report happened, a message
+is no longer live. There is no "a nudge works if a report follows within N
+hours" threshold to tune, because that reading belongs to the person. It
+**records nothing**: no new file, no cache, and the reader works with the
+supervisor stopped, like every view. And it is **bounded, and says so**: the
+journal is read as a tail over `HISTORY_JOURNAL_BYTES`, so the payload carries
+`horizon` (the oldest entry that tail reached) and `scrolled` (whether the
+file is larger than the window read), and the command prints the one or the
+other as its last line. An entry whose stamp does not parse is dropped rather
+than placed, because the list is ordered by time and `--since` is a claim
+about time.
+
+Two matching problems are resolved in the open rather than papered over. A
+`board.post` is journaled *before* the message exists, so the journal line
+carries no message id, and the post is found by content instead: the earliest
+message on the topic — live, or in the archive through
+`MessageBus.archived_records(topic=...)`, which is still the one scan of
+`messages/archive/` — stamped at or after the action and whose text starts
+with the 80-character prefix the journal kept. No match reads as `acked:
+None`, never as unacked. And `acked` means the message has left the board,
+which is what `ack_board_message` does — but the janitor's retention sweep
+archives an old escalation too, and the record does not say which archived it,
+so over a long window an escalation nobody ever saw can read as acked. The
+guide says both of these where a person meets them.
 
 ### Reading a run
 

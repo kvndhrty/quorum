@@ -332,18 +332,27 @@ def append_jsonl(path: Path, obj: Any) -> None:
 
 
 def read_jsonl(path: Path) -> list[Any]:
+    """Every well-formed line of an append-only log.
+
+    Decoded with `errors="replace"`, like `read_jsonl_tail` below, because a
+    line torn mid-append is torn at a byte and not at a character: a write
+    cut inside a multi-byte sequence leaves bytes that are not UTF-8, and
+    decoding strictly would raise out of a reader — a digest build, `task
+    show`, the TUI — rather than cost the one line, which is what
+    `append_jsonl` says readers do. The replacement character makes such a
+    line unparseable as JSON, so it is skipped like any other torn one.
+    """
     out: list[Any] = []
     if not path.exists():
         return out
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue  # torn final line from a crash mid-append
+    for line in path.read_bytes().decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # torn final line from a crash mid-append
     return out
 
 

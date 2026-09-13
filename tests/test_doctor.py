@@ -443,6 +443,18 @@ def test_prompts_check_agrees_with_home_classification(home: Path):
     assert "edited" in find(doctor.check_prompts(home), "prompts.manager").summary
 
 
+def test_prompts_check_reports_a_prompt_it_cannot_read(home: Path):
+    """A prompt file quorum cannot decode is neither missing nor an edit, and
+    reading it must not raise inside the classifier: doctor exists to name
+    such a file, and `quorum prompt list` marks it from the same states."""
+    (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
+    assert home_mod.classify_prompts(home)["manager.md"] == "unreadable"
+    check = find(doctor.check_prompts(home), "prompts.manager")
+    assert check.status == PROBLEM
+    assert "cannot be read" in check.summary
+    assert "quorum init" in check.fix
+
+
 def test_prompts_check_notes_an_unseeded_prompt(home: Path):
     (home / "prompts" / "manager.md").unlink()
     check = find(doctor.check_prompts(home), "prompts.manager")
