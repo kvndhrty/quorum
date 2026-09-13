@@ -53,15 +53,18 @@ A few things that are easy to miss:
 
 ## What it costs
 
-From this home's own ledger, over the 0.2.0 development cycle, with workers on
-`--model opus`:
+From this home's own ledger, over the nine days after 0.2.0 — eighteen tasks,
+all of them finished — with workers on `--model opus` (six of the eighteen ran
+a second model in an A/B, at the same order of cost):
 
-- **$3–$12 per issue-sized task**, most of them $3–$8. An issue like "move
+- **$3–$14 per issue-sized task**, most of them $3–$8. An issue like "move
   `task show` into the shared read model" — one new view function, a CLI and
-  JSON surface, tests, docs, changelog — came in at $6.52 and 8.0M tokens.
-- **$66 for eighteen queued tasks**, twelve of them finished, over nine days.
-- **The hourly manager tick is the cheap part**: 15 ticks for $3.33, a median
-  of 15 seconds each. It reads a digest and spends a few actions, not a work
+  JSON surface, tests, docs, changelog — came in at $6.52 and 8.0M tokens. One
+  task was much bigger than an issue, a review of the whole CLI surface, and
+  cost $37.
+- **$153 and 181M tokens for the eighteen together**, over nine days.
+- **The hourly manager tick is the cheap part**: 18 ticks for $3.95, a median
+  of 16 seconds each. It reads a digest and spends a few actions, not a work
   session.
 
 Where those come from: `quorum usage --by project` and `--by agent` (spend per
