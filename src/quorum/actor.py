@@ -13,6 +13,7 @@ acts under its own identity rather than as nobody.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 ACTOR_ENV = "QUORUM_ACTOR"
@@ -118,6 +119,98 @@ def current_actor() -> str:
     """The tagged agent name when running under an actor-tagged environment,
     else "user"."""
     return os.environ.get(ACTOR_ENV) or "user"
+
+
+def current_run() -> str:
+    """The run id this process is tagged with, or "" — a task run carries
+    none, and neither does an untagged one."""
+    return os.environ.get(ACTOR_RUN_ENV, "")
+
+
+def current_cap() -> int:
+    """The per-run action cap this process is tagged with.
+
+    A tag that is missing or unreadable falls back to the default rather
+    than raising, because both readers — the guard that enforces the cap and
+    `show self`, which reports it — run in front of an agent mid-run. The
+    one implementation of that fallback, so the number a run is told is the
+    number it is held to.
+    """
+    try:
+        return int(os.environ.get(ACTOR_CAP_ENV, DEFAULT_MAX_ACTIONS_PER_RUN))
+    except ValueError:
+        return DEFAULT_MAX_ACTIONS_PER_RUN
+
+
+def self_task_id() -> str | None:
+    """The task id this process is acting as, or None when the tag names an
+    agent or is absent. The resolution behind `quorum task show self`."""
+    actor = current_actor()
+    return actor[len(TASK_ACTOR_PREFIX) :] if is_task_actor(actor) else None
+
+
+def self_agent_name() -> str | None:
+    """The agent name this process is acting as, or None when the tag names
+    a task or is absent. The resolution behind `quorum agent show self`."""
+    actor = current_actor()
+    return None if actor == "user" or is_task_actor(actor) else actor
+
+
+@dataclass(frozen=True)
+class SelfRun:
+    """Who a process is acting as, and what its own run has spent.
+
+    The whole of the run-scoped half of `quorum task show self` /
+    `quorum agent show self`: the actor tag, the run id it was tagged with,
+    the action cap it is held to and how much of that cap it has used. Read
+    from the environment and the journal, never from a model's self-report,
+    and handed to `views` so the rendering stays a pure file reader.
+
+    A task run is tagged for identity only — no run id and no cap (see
+    `task_actor_env`) — so `run` is "" and `capped` is False for one.
+    """
+
+    actor: str
+    run: str
+    cap: int
+    actions: int
+
+    @property
+    def capped(self) -> bool:
+        """Whether an action cap applies at all: only a tagged agent run."""
+        return bool(self.run)
+
+
+def self_run(home: Path) -> SelfRun:
+    """The calling process's own actor facts. `actor` is "user" outside a
+    tagged run, which is what the CLI turns into the error naming the fix."""
+    actor = current_actor()
+    run = current_run()
+    return SelfRun(actor=actor, run=run, cap=current_cap(), actions=actions_used(home, actor, run))
+
+
+def actions_used(home: Path, name: str, run_id: str) -> int:
+    """How many actions `name` has journalled under `run_id` so far.
+
+    The number the cap is checked against, read back out of the journal
+    rather than counted in memory — the CLI calls that spend the cap are
+    separate processes, so the file is the only place the count exists. A
+    `cap.hit` line records a refusal, not an action, and does not count; a
+    torn line is skipped like everywhere else. Returns 0 for an untagged
+    run, which has no cap to spend.
+    """
+    from . import fsio
+
+    if not run_id:
+        return 0
+    entries = fsio.read_jsonl_tail(journal_path(home, name))
+    return len(
+        [
+            e
+            for e in entries
+            if isinstance(e, dict) and e.get("run") == run_id and e.get("action") != "cap.hit"
+        ]
+    )
 
 
 def actor_env(name: str, run_id: str, cap: int) -> dict[str, str]:
