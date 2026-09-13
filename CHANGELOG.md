@@ -21,6 +21,16 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Guidance for any agent (#129): `quorum agent tell <name> "..."` puts a
+  message in that agent's inbox, where a prompt agent's next tick renders it
+  into its `{directives}` placeholder — the capability the guide already
+  described, which until now meant calling `MessageBus.send` from Python. An
+  unconfigured recipient is refused. `quorum manager tell` is the same
+  function with the name fixed to the manager, which also gives it the two
+  things it lacked: the send is journaled and counted against a sending
+  agent's action cap, and it is attributed to the actual sender instead of
+  always to `user`. All three senders now write `type = "guidance"`, the one
+  word the glossary fixes for it.
 - Tasks that spawn tasks (#43): a task queued with `task add --allow-spawn`
   (or in a home with `[tasks].allow_spawn`) may run `quorum task add` itself,
   and `--after self` inside a run queues the new work behind the task that

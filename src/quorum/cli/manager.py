@@ -6,7 +6,6 @@ import typer
 
 from .. import fsio
 from ..actor import journal_path
-from ..messages import MessageBus
 from ._common import (
     _AGENT_OPT,
     _actor_guard,
@@ -15,16 +14,20 @@ from ._common import (
     get_home,
     manager_app,
 )
+from .agent import tell_agent
 
 # -- manager ---------------------------------------------------------------
 
 
 @manager_app.command("tell")
 def manager_tell(text: str) -> None:
-    """Send the manager guidance; its next run starts with it in the digest."""
-    target = get_home()
-    MessageBus(target).send("user", "manager", type="directive", text=text)
-    typer.secho("guidance queued for the manager's next run", fg="green")
+    """Send the manager guidance; its next run starts with it in the digest.
+
+    `quorum agent tell manager` with the name spelled for you — one write
+    path, so the manager's guidance is journaled, capped and attributed like
+    any other agent's.
+    """
+    tell_agent("manager", text)
 
 
 @manager_app.command("note")

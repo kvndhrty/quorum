@@ -345,6 +345,9 @@ everything else.
 quorum manager tell "prioritize the api task; park the docs work"
 ```
 
+Any other agent takes guidance the same way — `quorum agent tell <name>
+"..."`, read at the start of its next tick ([Agents](#agents)).
+
 **Standing notes** are the third channel, and the difference matters:
 guidance is read once and consumed, a note stays until it expires or someone
 retires it. Both the manager and each task have a **notebook**
@@ -429,8 +432,9 @@ this guide all use.
 - **notebook** — an agent's or a task's standing memory. Written with
   `remember`, retired with `forget`; its entries are **notes**.
 - **guidance** — a message steering one recipient, read once and then
-  consumed. Sent to a task with `quorum task nudge`, to the manager with
-  `quorum manager tell`.
+  consumed. Sent to a task with `quorum task nudge`, to any agent with
+  `quorum agent tell <name>`, and to the manager with `quorum manager tell`
+  (the same command with the name spelled for you).
 - **message** — the one record type on both channels. It lands either on a
   **board topic** (append-only, public, any number of readers) or in a
   recipient's **inbox** (claimed by exactly one reader).
@@ -1410,9 +1414,18 @@ with the same authority and the same rails as the manager: every mutating
 (`max_actions_per_run`, default 20). From inside its own run it can read how
 much of that cap is left with `quorum agent show self`
 ([Knowing your own limits](#knowing-your-own-limits)); from outside,
-`quorum agent show <name>` prints the same record without that section. Send it guidance through its own inbox —
-it appears in its `{directives}` placeholder. Useful settings in
-`agents/<name>.toml`:
+`quorum agent show <name>` prints the same record without that section. Send
+it guidance through its own inbox and it appears in its `{directives}`
+placeholder at the next tick:
+
+```bash
+quorum agent tell standup "skip the retro section today"
+```
+
+That is the same command as `quorum manager tell`, with the recipient named
+rather than assumed, and it is read once and consumed — `quorum manager
+remember --agent standup` is how to write something that stays. Useful
+settings in `agents/<name>.toml`:
 
 ```toml
 type = "prompt"
