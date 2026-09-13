@@ -25,6 +25,7 @@ from ._common import (
     _fail,
     _follow,
     _load_config,
+    _parse_window,
     _print_table,
     _verbatim_text,
     agent_app,
@@ -216,6 +217,57 @@ def agent_log(
         _run_tail(name, lines, follow, verbose, raw)
         return
     _run_log(name, last, run, verbose, raw)
+
+
+@agent_app.command("interventions")
+def agent_interventions(
+    name: str,
+    since: str | None = typer.Option(
+        None, "--since", help="Only interventions made in the last 30d / 36h / 2w / 90m."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
+) -> None:
+    """What an agent's supervision did, and what happened next.
+
+    Every nudge, relaunch, stop and escalation the agent's journal records,
+    each with the target's status at the time, the next report the target
+    made after it and how long that took — the reads `agent log` makes for
+    one tick, made across ticks. The manager is an agent:
+    `quorum agent interventions manager`.
+
+    It shows the before, the action and the after; whether an intervention
+    worked is your call, so nothing here scores one. A pure reader over the
+    journal, the targets' reports and the board — the supervisor need not be
+    running. The journal is read as a bounded tail, and the last line says
+    how far back that reaches.
+    """
+    from .. import views
+
+    _check_agent_name(name)
+    target = get_home()
+    window = _parse_window(since) if since is not None else None
+    payload = views.agent_interventions(target, name, since=window)
+    if json_out:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    scope = (
+        f"since {payload['cutoff']} ({since.strip()})"
+        if window
+        else "everything the journal tail holds"
+    )
+    typer.echo(f"{name} interventions, {scope}")
+    for row in payload["rows"]:
+        typer.echo(views.intervention_line(row))
+    typer.echo(views.intervention_summary_line(payload["summary"]))
+    horizon = payload["horizon"]
+    if horizon is None:
+        typer.echo(f"{name} has journaled nothing yet")
+    elif payload["scrolled"]:
+        typer.echo(
+            f"the journal tail reaches back to {horizon}; anything older is not read"
+        )
+    else:
+        typer.echo(f"the journal starts at {horizon}")
 
 
 def _agent_command(name: str, command: str, note: str) -> None:
