@@ -1265,21 +1265,28 @@ One `Message` schema serves two channels:
   `views.ATTENTION_LIST_LIMIT` entries rather than the banner's handful,
   since every line it renders is one the reader may want to dismiss.
 
-**Guidance** is what direct mail otherwise carries, and there are two
+**Guidance** is what direct mail otherwise carries, and there are two CLI
 senders of it: `quorum task nudge <id>` into a task's inbox (`tasks.nudge`,
 which also rings the herdr doorbell when the task is attached) and `quorum
 agent tell <name>` into an agent's (`cli/agent.py::tell_agent`, with `quorum
-manager tell` the same function with the name fixed, and the TUI's `n` and
-`m` bindings the same two sends). Both write `type = "guidance"` — one word
-for one idea; nothing branches on the field, since `runner.guidance_note`
-renders the payload text and the `guidance` row kind in `views.py` comes from
-which inbox was read — and both attribute the message to `current_actor()`,
-so guidance from the manager or another agent renders `[from <actor> at …]`
-instead of being reported as a person's. `agent tell` goes through
-`_actor_guard` like every other mutating command, so an agent's guidance is
-journaled and counts against its per-run action cap, and it refuses a
-recipient that is not a configured agent: nothing would ever claim that
-inbox.
+manager tell` the same function with the name fixed). Both write `type =
+"guidance"` — one word for one idea; nothing branches on the field, since
+`runner.guidance_note` renders the payload text and the `guidance` row kind
+in `views.py` comes from which inbox was read — and both attribute the
+message to `current_actor()`, so guidance from the manager or another agent
+renders `[from <actor> at …]` instead of being reported as a person's.
+`agent tell` goes through `_actor_guard` like every other mutating command,
+so an agent's guidance is journaled and counts against its per-run action
+cap, and it refuses a recipient that is not a configured agent: nothing
+would ever claim that inbox.
+
+The TUI's two guidance bindings are not equally shared. `n` calls
+`tasks.nudge`, the same function `task nudge` calls. `m` still writes its
+own `MessageBus.send("user", "manager", ...)`, so it queues the same message
+without going through `tell_agent`, and therefore without the configured-agent
+refusal. The attribution is unaffected — a person at a dashboard is the only
+sender `m` can have — but the two paths are separate code, and a rule that
+changes in one has to be carried to the other by hand.
 
 The **control channel** rides the same machinery: `quorum agent
 pause|resume|run-now|reload` sends to the `supervisor` inbox, which the
@@ -1414,9 +1421,11 @@ The reads are pure; the writes are deliberately not absent. The TUI
 that each is a thin call into the same code path the CLI uses — a
 `MessageBus` send, a `TaskStore.update`, `runner.launch_detached`,
 `config.create_agent` — never write logic that lives in a view: send a task
-guidance (`n`), send the manager guidance (`m` — the `manager` inbox,
-exactly `quorum manager tell`, and the reason the TUI needs no task-add
-form: the manager runs `task add` itself, journaled and capped), start a
+guidance (`n`), send the manager guidance (`m` — the same message `quorum
+manager tell` queues into the `manager` inbox, minus that command's
+configured-agent refusal, since the send is still written here rather than
+in `tell_agent`; and the reason the TUI needs no task-add form: the manager
+runs `task add` itself, journaled and capped), start a
 detached run (`s`), cancel a task (`c`). `t` is a read, not a write: the
 detail pane's second tab, the task's history. `s` refuses an attached task
 and one whose runner is alive, mirroring the runner's own substrate rails;

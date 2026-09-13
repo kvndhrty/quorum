@@ -501,6 +501,24 @@ def test_manager_tell_note_and_journal(home: Path):
     assert "human-added context" in r.output
 
 
+def test_manager_tell_refuses_a_home_with_no_manager_agent(home: Path):
+    """Routing `manager tell` through `tell_agent` gave it that command's
+    configured-agent refusal, which it did not have before: a home whose
+    config declares no `[agents.manager]` schedules no manager, so the
+    message would sit in a maildir nothing ever claims."""
+    from quorum import fsio
+    from quorum.messages import MessageBus
+
+    config = (home / "config.toml").read_text()
+    head, _, _ = config.partition("[agents.manager]")
+    (home / "config.toml").write_text(head)
+
+    r = runner.invoke(app, ["manager", "tell", "focus on the api task"])
+    assert r.exit_code == 1
+    assert "no agent 'manager'" in r.output
+    assert not fsio.sorted_entries(MessageBus(home).inbox_dir / "manager" / "new")
+
+
 def test_mutating_commands_journal_only_for_the_manager_actor(
     home: Path, tmp_path: Path, monkeypatch
 ):
