@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import harness_config, make_repo
+from conftest import FakeClock, harness_config, make_repo
 from quorum import actor, fsio, notes, tasks, views
 from quorum.cli import app
 from quorum.projects import ProjectRegistry
@@ -309,6 +309,10 @@ def test_agent_show_self_prints_the_rows_its_json_carries(
     agent_home: Path, monkeypatch: pytest.MonkeyPatch
 ):
     as_agent(monkeypatch, "scout", run="01RUN", cap=7)
+    # An agent that never ran has its `next run` estimated from the clock, so
+    # two invocations a second apart would print two different rows. Pin the
+    # clock: the contract under test is text == json, not the estimate.
+    monkeypatch.setattr(fsio, "utc_now", FakeClock())
 
     text = runner.invoke(app, ["agent", "show", "self"])
     assert text.exit_code == 0, text.output
