@@ -741,6 +741,10 @@ def _escalation_state(
     saw can read as acked. None for both when no post matches — a journal
     that has outlived its message's month in the archive, or a text edited
     since.
+
+    An archived record is raw: `archived_records` hands back what the file
+    holds, including a record the current schema would reject, so a payload
+    that is not an object is skipped here rather than dereferenced.
     """
     best: tuple[str, str, bool] | None = None  # (created_at, short id, acked)
     for record, acked in [(m, False) for m in live] + [(r, True) for r in archived]:
@@ -749,7 +753,9 @@ def _escalation_state(
         if moment is None or moment < at:
             continue
         payload = record.get("payload") if isinstance(record, dict) else record.payload
-        text = str((payload or {}).get("text", ""))
+        if not isinstance(payload, dict):
+            continue
+        text = str(payload.get("text", ""))
         if not text.startswith(prefix):
             continue
         ident = str(record.get("id") or "") if isinstance(record, dict) else record.id

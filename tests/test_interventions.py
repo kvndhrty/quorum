@@ -139,6 +139,31 @@ def test_an_escalation_still_on_the_board(home: Path):
     assert f"still on the board ({msg.short_id})" in views.intervention_line(row)
 
 
+def test_an_archived_record_the_schema_would_reject_is_skipped(home: Path):
+    """`archived_records` hands back raw records, and the archive is where a
+    record the current schema would reject survives — so one whose payload is
+    not an object must be stepped over, not dereferenced."""
+    from quorum.messages import _archive_one
+
+    bus = MessageBus(home, now=lambda: at(3))
+    _archive_one(
+        bus.archive_dir,
+        {
+            "id": "01JQPZ8MFAKEARCHIVEDRECORD",
+            "from": "manager",
+            "topic": "attention",
+            "created_at": fsio.iso(at(3)),
+            "payload": "a string, from a schema quorum no longer writes",
+        },
+        when=at(3),
+    )
+    msg = bus.post("manager", "attention", text="the escalation that is really there")
+    journal(home, "board.post", at(3), args="attention: the escalation that is really there")
+    (row,) = views.agent_interventions(home, "manager")["rows"]
+    assert row["message"] == msg.short_id
+    assert row["acked"] is False
+
+
 def test_an_escalation_whose_post_cannot_be_found(home: Path):
     """The journal line carries no message id, so a post whose text no longer
     matches — or whose archive month has been swept away — reads as unknown
