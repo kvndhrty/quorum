@@ -712,11 +712,22 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
 
 
 def _quorum_invocations(text: str) -> list[str]:
-    """Every `quorum ...` command a prompt tells an agent to run: inline code
-    spans, list-item tool lines, and indented example blocks."""
+    """Every `quorum ...` command a prompt or a doc names: inline code spans,
+    list-item tool lines, and indented example blocks.
+
+    A code span may be wrapped across a line break in prose, so newlines
+    inside one are folded away rather than ending it — a command that only
+    reads as a command once its two lines are joined is still a command.
+    Fenced blocks are cut out before that, or their own ``` fences would
+    pair with the spans around them; their lines are read below anyway."""
     import re
 
-    found = [span for span in re.findall(r"`([^`\n]+)`", text) if span.startswith("quorum ")]
+    prose = re.sub(r"^```.*?^```", "", text, flags=re.MULTILINE | re.DOTALL)
+    found = [
+        flat
+        for span in re.findall(r"`([^`]+)`", prose)
+        if (flat := " ".join(span.split())).startswith("quorum ")
+    ]
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("- "):
@@ -726,12 +737,8 @@ def _quorum_invocations(text: str) -> list[str]:
     return found
 
 
-def test_shipped_prompts_only_name_real_cli_commands():
-    """The packaged prompts ARE the product's policy layer; a command that
-    was renamed out from under one fails silently at 3am, in a transcript
-    nobody reads."""
-    import re
-    from importlib import resources
+def _known_commands() -> set[str]:
+    """Every spelling the CLI answers to: a root `verb`, or a `group verb`."""
 
     def cmd_name(info) -> str:
         # An unnamed @app.command() takes its name from the callback.
@@ -742,23 +749,81 @@ def test_shipped_prompts_only_name_real_cli_commands():
         known |= {
             f"{group.name} {cmd_name(c)}" for c in group.typer_instance.registered_commands
         }
+    return known
 
+
+def _named_command(invocation: str) -> str:
+    """The command an invocation names: its leading word tokens, at most two
+    (a group and its verb), stopping at the first option or argument.
+
+    `--home` is the one option that comes *before* the command, so it and its
+    value are stepped over rather than read as the verb."""
+    import re
+
+    tokens = invocation.split()[1:]
+    if tokens[:1] == ["--home"]:
+        tokens = tokens[2:]
+    words: list[str] = []
+    for token in tokens:
+        if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
+            break
+        words.append(token)
+    return " ".join(words)
+
+
+def test_shipped_prompts_only_name_real_cli_commands():
+    """The packaged prompts ARE the product's policy layer; a command that
+    was renamed out from under one fails silently at 3am, in a transcript
+    nobody reads."""
+    from importlib import resources
+
+    known = _known_commands()
     checked = 0
     for entry in (resources.files("quorum") / "default_prompts").iterdir():
         if not entry.name.endswith(".md"):
             continue
         for invocation in _quorum_invocations(entry.read_text(encoding="utf-8")):
-            words: list[str] = []
-            for token in invocation.split()[1:]:
-                if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
-                    break
-                words.append(token)
-            assert words, f"{entry.name}: bare `quorum` in {invocation!r}"
-            assert " ".join(words) in known or words[0] in known, (
+            named = _named_command(invocation)
+            assert named, f"{entry.name}: bare `quorum` in {invocation!r}"
+            assert named in known or named.split()[0] in known, (
                 f"{entry.name} names a command that does not exist: {invocation!r}"
             )
             checked += 1
     assert checked > 10  # the extractor still finds things
+
+
+def test_user_facing_docs_only_name_real_cli_commands():
+    """Same rule for the prose a person reads: the README, the guide, the
+    architecture record and the shipped adapters' READMEs. A doc that tells
+    someone to run a command a surface review removed is a dead end in front
+    of a person, where the prompts' version of this is one in front of a
+    model. The CHANGELOG is exempt — naming the old spelling beside the new
+    one is exactly what its Upgrading notes are for."""
+    known = _known_commands()
+    groups = {group.name for group in app.registered_groups}
+    root = Path(__file__).parent.parent
+    docs = [
+        root / "README.md",
+        *sorted((root / "docs").glob("*.md")),
+        *sorted((root / "integrations").rglob("*.md")),
+    ]
+    checked = 0
+    for doc in docs:
+        for invocation in _quorum_invocations(doc.read_text(encoding="utf-8")):
+            named = _named_command(invocation)
+            first = named.split()[0] if named else ""
+            if first not in groups:
+                # a root command with its arguments, or — since these files are
+                # prose and a code span may hold a sentence — not an
+                # invocation at all
+                continue
+            # every command a group can name is `group verb`; a bare group is
+            # a reference to the group itself
+            assert named == first or named in known, (
+                f"{doc.name} names a command that does not exist: {invocation!r}"
+            )
+            checked += 1
+    assert checked > 50  # the extractor still finds things
 
 
 def test_init_records_what_it_seeds(tmp_path: Path):

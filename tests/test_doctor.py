@@ -300,12 +300,20 @@ def test_gh_check_reads_an_offline_gh_as_unknown_not_broken(
     home: Path, path_without_gh: Path, monkeypatch
 ):
     """A laptop on a plane is not a misconfigured home: gh that never
-    answered says nothing about auth, so it is a `–` and exits 0."""
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n", encoding="utf-8")
+    answered says nothing about auth, so it is a `–` and exits 0.
+
+    The bound is `forge.TIMEOUT_SECONDS`, a module constant since #128 took
+    `[ci].timeout_seconds` away — so the line must name the bound quorum
+    actually applies rather than a key nothing reads any more."""
+    from quorum import forge
+
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)
     install_gh(path_without_gh, monkeypatch, mode="hang")
-    check = doctor.check_gh(home, Config(ci=CIConfig(timeout_seconds=0.5)))
+    check = doctor.check_gh(home, Config())
     assert check.status == NA
     assert "unknown" in check.summary
+    assert "0.5s" in check.summary
+    assert "timeout_seconds" not in check.summary + check.fix
 
 
 @pytest.mark.parametrize(

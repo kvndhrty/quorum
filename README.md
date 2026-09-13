@@ -36,7 +36,8 @@ quorum tui                              # the same, live
 ```
 
 From there: `quorum task log <id> -f` follows a run, `quorum task nudge <id>
-"..."` steers one, and `quorum manager tell "..."` steers the manager.
+"..."` steers one, and `quorum board post --to manager "..."` steers the
+manager.
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
 

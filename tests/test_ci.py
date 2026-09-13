@@ -100,7 +100,9 @@ def test_every_gh_disappointment_degrades_to_none(
 def test_a_hung_gh_is_bounded_by_the_timeout(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
+    from quorum import forge
+
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)  # the bound, since #128
     install_gh(path_without_gh, monkeypatch, mode="hang")
     assert ci.pr_state(home, make_task(home, make_repo(tmp_path))) is None
 

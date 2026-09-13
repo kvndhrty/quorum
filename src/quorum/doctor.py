@@ -354,7 +354,7 @@ def check_gh(home: Path, config: Config) -> Check:
     Its `None` ("no answer": gh timed out, or the probe declined) is a `–`,
     not a `✗`: a laptop on a plane is not a misconfigured home.
     """
-    from .forge import auth_status
+    from .forge import TIMEOUT_SECONDS, auth_status
 
     if not config.ci.enabled:
         return na("ci.gh", "[ci].enabled = false — the manager sees no PR/check state")
@@ -370,8 +370,9 @@ def check_gh(home: Path, config: Config) -> Check:
         return na(
             "ci.gh",
             f"gh auth state unknown ({exe} did not answer within "
-            "[ci].timeout_seconds) — ci: lines may or may not appear",
-            "run `gh auth status` by hand; raise [ci].timeout_seconds if it is just slow",
+            f"{TIMEOUT_SECONDS:g}s) — ci: lines may or may not appear",
+            "run `gh auth status` by hand; a forge CLI that is merely slow is "
+            "over the bound quorum gives it",
         )
     if not authenticated:
         return problem(
