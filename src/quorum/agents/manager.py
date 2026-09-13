@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .. import actor, ci, fsio, herdr, notes, tasks, transcript, usage
-from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, journal_path
+from ..actor import DEFAULT_MAX_ACTIONS_PER_RUN, is_task_actor, journal_path
 from ..agent import Agent
 from ..config import TasksConfig, load_config_or_default
 from ..runner import guidance_note
@@ -754,7 +754,17 @@ def build_digest(
             changed = " (UNCHANGED since)"
         else:
             changed = " (changed)"
-        line = f"- [{e.get('at', '')}] {e.get('action', '')} target={target or '-'}"
+        line = f"- [{e.get('at', '')}] {e.get('action', '')}"
+        # This section is headed "your recent actions", and almost every
+        # entry is one. A task's spawn and refused spawn (#43) are the
+        # exception: they land in this journal so the next digest carries
+        # them, and an unattributed line would read as an intervention the
+        # manager itself made and saw fail — which is exactly what the
+        # "never repeat an intervention that had no effect" rule acts on.
+        # Name the actor instead, so the line is an observation about a task.
+        if is_task_actor(str(e.get("actor") or "")):
+            line += f" by={e['actor']}"
+        line += f" target={target or '-'}"
         if e.get("args"):
             line += f" args={str(e['args'])[:100]}"
         if target:

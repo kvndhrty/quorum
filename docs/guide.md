@@ -834,6 +834,14 @@ see it. A refused spawn — and every spawn — is journalled, so the next diges
 carries it, and a parent that hit its cap is flagged `SPAWN-CAP` for the
 manager to read.
 
+These refusals know which task is calling because the run's harness carries
+`QUORUM_ACTOR=task-<id>` in its environment, which a determined harness could
+clear — they are a convention against an accident, not a security boundary,
+the same as the [notebook's](#notebooks). What actually confines a run is
+[sandboxing](#sandboxing). So `--allow-spawn` is about legibility and pace: a
+task queued without it will not grow the queue by mistake, and one queued with
+it grows it in a way you and the manager can see.
+
 **Nothing cascades.** Cancelling a parent does not touch its children: once
 queued they are independent work, and whether a child still makes sense
 without its parent is a judgement, which means it belongs to the manager or to

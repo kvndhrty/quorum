@@ -31,7 +31,8 @@ minute it is posted.
   unless the task is spawn-enabled, over `[tasks].max_spawn_per_task` (5) or
   beyond `[tasks].max_spawn_depth` (1), each refusal naming its setting and
   telling the harness to put the idea in its report instead. Spawns and
-  refusals are journaled for the manager, whose digest lines gain
+  refusals are journaled for the manager, marked `by=task-<id>` in its
+  digest so it does not read them as actions of its own; task lines gain
   `parent=` / `spawned=` / `SPAWN-CAP`; `quorum status`, `task list`, the
   TUI and `task show` show the link and a `⇗` badge.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per

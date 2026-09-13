@@ -672,7 +672,12 @@ call made legible: **opt-in, attributed, linked, capped.**
 - **Attributed.** The actor tag the runner already sets
   (`QUORUM_ACTOR=task-<id>`, identity only) is what makes the call
   attributable; `task add` resolves it to the calling task, and a tag naming
-  a task with no record is refused rather than queued unparented.
+  a task with no record is refused rather than queued unparented. The tag is
+  an environment variable any process that can run the CLI can unset, so the
+  rails below are a **convention against an accident, not a security
+  boundary** — the sandbox is. A harness that clears `QUORUM_ACTOR` queues
+  tasks the way a person does, with no parent and no cap; `[sandbox]` is
+  what confines a run, and this is what makes an honest one legible.
 - **Linked.** The child records `parent` — the full id of the task whose run
   created it — written once at `add`, beside `depends_on`. That is the *only*
   new field: a parent's children, its spawn count and the depth of a chain
@@ -687,9 +692,12 @@ call made legible: **opt-in, attributed, linked, capped.**
   `[tasks].max_spawn_depth` deep (1 by default, so a spawned task may not
   spawn again), and when the parent has created `[tasks].max_spawn_per_task`
   tasks already (5 by default) across all its runs. It never looks at what
-  the new task would be. Each message names the setting behind it and points
-  at `quorum task report`, so a refused idea goes where the manager and the
-  human already read.
+  the new task would be. The count is read from the listing, so a child
+  moved to `tasks/.archive/` stops counting — the same rule every reader
+  here follows, and one more reason the cap is a rate limit rather than a
+  ledger. Each message names the setting behind it and points at `quorum
+  task report`, so a refused idea goes where the manager and the human
+  already read.
 
 Everything else is the substrate that already existed. A spawned task is an
 ordinary queued task: nobody launches it but the manager or a person, the
@@ -702,7 +710,9 @@ child still makes sense is a judgement and judgements are the manager's.
 Two observations carry it to the supervisor, and neither is a rail. The
 spawn and the refusal are journaled to the manager's journal
 (`_actor_guard(always_journal=True)` — the one thing a task actor journals),
-so the next digest shows them with the actions the manager took itself. And
+so the next digest carries them; the digest marks such a line `by=task-<id>`
+so the manager reads it as something a task did rather than as an
+intervention of its own that had no effect. And
 the digest's task lines carry `parent=<short-id>`, `spawned=<short ids>` and
 `SPAWN-CAP` on a parent at its cap, with one line of prose under it;
 `prompts/manager.md` gains a rule reading those marks and nothing else — no

@@ -52,6 +52,12 @@ def _spawner(store):
     The actor tag is identity only (`task-<id>`, actor.py), so a tag naming a
     task whose record is gone is a call quorum cannot attribute: refuse it
     rather than queue an unparented task, which would look user-created.
+
+    The tag is read off `QUORUM_ACTOR`, which any process that can run the
+    CLI can unset: the spawn rails below are a **convention against an
+    accident, not a security boundary** — the sandbox is. A harness that
+    clears the tag queues tasks as a person does, with no parent and no cap,
+    and what stops it is `[sandbox]`, not this function.
     """
     from ..actor import TASK_ACTOR_PREFIX, is_task_actor
 

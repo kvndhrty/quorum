@@ -332,6 +332,23 @@ def test_an_actor_tag_naming_no_task_is_refused(home: Path, tmp_path: Path, monk
     assert TaskStore(home).list() == []
 
 
+def test_an_untagged_call_is_not_held_to_the_rails(home: Path, tmp_path: Path, monkeypatch):
+    """The rails read `QUORUM_ACTOR`, which any process that can run the CLI
+    can clear: they are a convention against an accident, not a security
+    boundary (the sandbox is), and the docs say so rather than overselling
+    them. Pinned here so the claim stays true."""
+    slug = setup(home, tmp_path)
+    store = TaskStore(home)
+    parent = store.add(slug, "an ordinary task", "fake")
+    as_task(monkeypatch, parent)
+    assert runner.invoke(app, ["task", "add", slug, "work it found"]).exit_code == 1
+
+    monkeypatch.delenv("QUORUM_ACTOR")
+    assert runner.invoke(app, ["task", "add", slug, "work it found"]).exit_code == 0
+    queued = [t for t in store.list() if t.id != parent.id][0]
+    assert queued.parent is None  # unattributable, so attributed to nobody
+
+
 def test_after_self_chains_the_new_work_behind_the_caller(
     home: Path, tmp_path: Path, monkeypatch
 ):
@@ -540,6 +557,27 @@ def test_the_digest_flags_a_parent_that_wanted_more_than_its_share(home: Path, t
     assert "read them and decide" in text  # what to do about it stays a judgement
 
 
+def test_the_journal_says_which_lines_a_task_wrote(home: Path, tmp_path: Path, monkeypatch):
+    """The journal section is headed "your recent actions", and a spawn is the
+    one entry in it the manager did not make. Unattributed it reads as an
+    intervention of the manager's own that changed nothing — which is what the
+    "never repeat an intervention that had no effect" rule acts on."""
+    slug = setup(home, tmp_path)
+    store = TaskStore(home)
+    parent = store.add(slug, "an ordinary task", "fake")
+    as_task(monkeypatch, parent)
+    assert runner.invoke(app, ["task", "add", slug, "work it found"]).exit_code == 1
+    monkeypatch.delenv("QUORUM_ACTOR")
+
+    text = digest(home)
+    line = [ln for ln in text.splitlines() if "task.add.refused" in ln][0]
+    assert f"by={task_actor(parent.id)}" in line
+    # and a line the manager itself wrote carries no such mark
+    assert runner.invoke(app, ["manager", "note", "launched nothing"]).exit_code == 0
+    note_line = [ln for ln in digest(home).splitlines() if "] note " in ln][0]
+    assert "by=" not in note_line
+
+
 def test_the_manager_prompt_teaches_the_marks_it_will_see():
     """The digest's vocabulary and the prompt's have to match: a mark the
     prompt never mentions is a mark the manager ignores."""
@@ -547,7 +585,7 @@ def test_the_manager_prompt_teaches_the_marks_it_will_see():
 
     text = (resources.files("quorum") / "default_prompts" / "manager.md").read_text()
     rule = manager_rule(text, "parent=")
-    for mark in ("spawned=", "SPAWN-CAP", "--allow-spawn"):
+    for mark in ("spawned=", "SPAWN-CAP", "--allow-spawn", "by=task-"):
         assert mark in rule
     assert "Cancelling a parent never cancels its children" in rule
 

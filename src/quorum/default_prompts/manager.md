@@ -211,7 +211,10 @@ How to work:
     has created as many tasks as `[tasks].max_spawn_per_task` allows, so
     `task add` now refuses it — a rate limit, not a verdict. Whatever it
     could not queue is in its reports: read them and decide whether to queue
-    it yourself, or let it go.
+    it yourself, or let it go. A journal line marked `by=task-<id>` is that
+    task's own `task add` call, not an action of yours — read it as a fact
+    about the queue, and never as an intervention you made that had no
+    effect.
 16. **Never repeat an intervention your journal shows had no effect.** If you
     nudged a task and its status is UNCHANGED since, do something different:
     sharper guidance naming the obstacle, a relaunch, decomposing the work
