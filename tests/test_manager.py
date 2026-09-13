@@ -105,6 +105,15 @@ def manager_transcript_text(home: Path) -> str:
     )
 
 
+def manager_prompt_text(home: Path) -> str:
+    """Only the prompt the fake harness echoed back, without the lines it
+    printed about what it then did."""
+    return "\n".join(
+        line for line in manager_transcript_text(home).splitlines()
+        if line.startswith("PROMPT|")
+    )
+
+
 @pytest.fixture
 def project(home: Path, tmp_path: Path) -> str:
     repo = make_repo(tmp_path, "mgrproj")
@@ -1001,18 +1010,15 @@ def test_a_note_written_this_tick_is_in_the_next_ticks_prompt(
     TaskStore(home).add(project, "something to manage", "tasktool")
 
     make_manager(home, clock).tick()
-    first = manager_transcript_text(home)
-    assert "ACT| remember -> exit 0" in first
+    assert "ACT| remember -> exit 0" in manager_transcript_text(home)
     # tick one saw an empty notebook — the note did not exist when it started
+    first = manager_prompt_text(home)
     assert notes.EMPTY_LINE in first
     assert standing not in first
 
     clock.advance(minutes=5)
     make_manager(home, clock).tick()
-    prompt = "\n".join(
-        line for line in manager_transcript_text(home).splitlines()
-        if line.startswith("PROMPT|")
-    )
+    prompt = manager_prompt_text(home)
     assert notes.SECTION_HEADER in prompt
     assert standing in prompt
     # and it is attributed to the manager itself, tagged with its run
