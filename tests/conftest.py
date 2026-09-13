@@ -212,3 +212,53 @@ def tui():
         asyncio.run(main())
 
     return drive
+
+
+# -- documented CLI commands --------------------------------------------------
+
+# The packaged prompts, and the example home's README and overlays, teach the
+# CLI by naming commands in prose. A command renamed out from under one of
+# them fails silently at 3am, in a transcript nobody reads — so both suites
+# extract what a file tells a reader to run and check it against the real app.
+
+
+def quorum_invocations(text: str) -> list[str]:
+    """Every `quorum ...` command a document tells someone to run: inline code
+    spans, list-item tool lines, and indented example blocks."""
+    import re
+
+    found = [span for span in re.findall(r"`([^`\n]+)`", text) if span.startswith("quorum ")]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            stripped = stripped[2:]
+        if stripped.startswith("quorum "):
+            found.append(stripped)
+    return found
+
+
+def cli_command_names(app) -> set[str]:
+    """"task run", "up", ... — every command name the typer app registers."""
+
+    def cmd_name(info) -> str:
+        # An unnamed @app.command() takes its name from the callback.
+        return info.name or info.callback.__name__.rstrip("_").replace("_", "-")
+
+    known = {cmd_name(c) for c in app.registered_commands}
+    for group in app.registered_groups:
+        known |= {f"{group.name} {cmd_name(c)}" for c in group.typer_instance.registered_commands}
+    return known
+
+
+def names_a_real_command(invocation: str, known: set[str]) -> bool:
+    """Does `invocation` start with a command in `known`? Its leading words up
+    to the first non-word token are the command; the rest are arguments."""
+    import re
+
+    words: list[str] = []
+    for token in invocation.split()[1:]:
+        if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
+            break
+        words.append(token)
+    assert words, f"bare `quorum` in {invocation!r}"
+    return " ".join(words) in known or words[0] in known
