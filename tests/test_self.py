@@ -232,6 +232,32 @@ def test_a_notebook_over_its_byte_budget_reports_what_it_is_dropping(home: Path)
     assert size["bytes"] <= size["max_bytes"]
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        pytest.param("manager", "`quorum manager remember \"…\"`", id="manager"),
+        pytest.param("scout", "`quorum manager remember --agent scout \"…\"`", id="prompt-agent"),
+    ],
+)
+def test_the_notebook_row_names_a_command_that_exists(
+    agent_home: Path, name: str, expected: str
+):
+    """A row that tells a run what to type has to name a real command: every
+    agent's notebook is written by `quorum manager remember`, another
+    agent's with `--agent <name>`. There is no `quorum agent <name>
+    remember`."""
+    book = notes.agent_notebook(agent_home, name)
+    for i in range(30):
+        book.remember(f"note {i} " + "x" * 300)
+
+    rows = views.agent_detail_rows(agent_home, name, run=actor.SelfRun(name, "01RUN", 5, 0))
+    text = labels(rows)["notebook"]["text"]
+    assert "already being dropped" in text and expected in text
+
+    typed = expected.strip("`").removeprefix("quorum ").replace('"…"', "consolidated").split()
+    assert runner.invoke(app, typed).exit_code == 0
+
+
 def test_agent_detail_rows_carry_the_action_cap_only_for_the_agents_own_run(
     agent_home: Path,
 ):

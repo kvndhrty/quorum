@@ -853,11 +853,15 @@ def agent_detail_rows(
         )
         book = notes_mod.agent_notebook(home, name)
         size = book.size()
+        # Every agent's notebook is written by `quorum manager remember`;
+        # another agent's needs `--agent <name>` (cli/manager.py). The row
+        # tells a run what to type, so it has to name a command that exists.
+        remember = "quorum manager remember" + ("" if name == "manager" else f" --agent {name}")
         add(
             "self",
             "field",
             "notebook",
-            _notebook_text(size, f"quorum {'manager' if name == 'manager' else f'agent {name}'} remember"),
+            _notebook_text(size, remember),
             notebook=size,
         )
     book = notes_mod.agent_notebook(home, name)
