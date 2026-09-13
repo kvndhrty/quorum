@@ -160,9 +160,10 @@ without bookkeeping in `home.py`.
 
 `home.classify_prompts` is that rule as one read-only function — `default`,
 `upgradable`, `edited`, `missing`, plus `unreadable` for a copy it could not
-decode — and the three surfaces that talk about prompt state all read it:
-`quorum init` acts on it, `quorum doctor` reports it, `quorum prompt list`
-renders it. Two of them once disagreed, because `prompt list` compared text
+decode — and every surface that talks about prompt state reads it: `quorum
+init` acts on it, `quorum doctor` reports it, `quorum prompt list` renders
+it, and `quorum prompt diff` closes with the advice for the state it names.
+Two of them once disagreed, because `prompt list` compared text
 to the packaged default and had no third state to call an untouched older
 seed (#126); a listing that says "edited" about a file the user never opened
 sends them to hand-merge work `init` would have done.

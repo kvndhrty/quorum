@@ -200,8 +200,19 @@ def prompt_diff(
             typer.secho(line, fg="cyan")
         else:
             typer.echo(line)
-    overlay = prompts_mod.local_path(target, name)
     typer.echo("")
+    if home_mod.classify_prompts(target).get(f"{name}.md") == "upgradable":
+        # The same classifier the listing, doctor and init read: this copy is
+        # the seed an older init wrote and nobody edited, so calling it "yours"
+        # here would send its owner to hand-merge what one `quorum init` does
+        # (#126) — the closing paragraph below is for an edited copy only.
+        typer.echo(
+            f"prompts/{name}.md is still the seed an older `quorum init` wrote, and you "
+            f"never edited it, so `quorum init` upgrades it in place — the diff above is "
+            f"what that brings."
+        )
+        return
+    overlay = prompts_mod.local_path(target, name)
     typer.echo(
         f"prompts/{name}.md is yours, so `quorum init` never upgrades it. To take the "
         f"packaged default again, keep your own lines in prompts/{name}.local.md "

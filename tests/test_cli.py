@@ -693,10 +693,16 @@ def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
 
 
 @pytest.mark.parametrize(
-    ("edit", "state", "listed", "doctor_status", "doctor_says"),
+    ("edit", "state", "listed", "doctor_status", "doctor_says", "diff_says"),
     [
         pytest.param(
-            False, "default", "seeded, matches the packaged default", "ok", "matches", id="default"
+            False,
+            "default",
+            "seeded, matches the packaged default",
+            "ok",
+            "matches",
+            "identical to the packaged default",
+            id="default",
         ),
         pytest.param(
             False,
@@ -704,6 +710,7 @@ def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
             "seeded by an older quorum, never edited — `quorum init` upgrades it",
             "problem",
             "older packaged default, never edited",
+            "`quorum init` upgrades it in place",
             id="upgradable",
         ),
         pytest.param(
@@ -712,6 +719,7 @@ def test_prompt_list_and_diff_degrade_over_an_unreadable_file(home: Path):
             "edited — `quorum prompt diff manager`",
             "na",
             "is edited",
+            "is yours, so `quorum init` never upgrades it",
             id="edited",
         ),
     ],
@@ -724,12 +732,15 @@ def test_prompt_list_and_doctor_agree_on_every_state(
     listed: str,
     doctor_status: str,
     doctor_says: str,
+    diff_says: str,
 ):
     """`prompt list` classified with `text == default`, so a copy an older
     `quorum init` seeded and nobody ever touched read as "edited" there while
     doctor called it an upgradable seed — and the fix init was offering stayed
     hidden (#126). Both read `home.classify_prompts` now, so all three states
-    agree."""
+    agree, and so does the closing advice of `quorum prompt diff` — which used
+    to call an untouched older seed "yours" and say init would never upgrade
+    it, the same false claim one command further on."""
     from quorum import home as home_mod
     from quorum import prompts as prompts_mod
 
@@ -756,6 +767,12 @@ def test_prompt_list_and_doctor_agree_on_every_state(
     check = {c["name"]: c for c in json.loads(r.output)["checks"]}["prompts.manager"]
     assert check["status"] == doctor_status
     assert doctor_says in check["summary"]
+
+    r = runner.invoke(app, ["prompt", "diff", "manager"])
+    assert r.exit_code == 0, r.output
+    assert diff_says in _plain(r.output)
+    if state == "upgradable":
+        assert "is yours" not in _plain(r.output)
 
 
 def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
