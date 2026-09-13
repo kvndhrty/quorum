@@ -489,6 +489,21 @@ minute it is posted.
   unaffected: `build_task_capabilities` leaves the network open as before.
 
 ### Fixed
+- `quorum prompt list` no longer calls an unedited prompt "edited". It
+  compared the home copy's text to the packaged default, which has only two
+  answers, so a copy an earlier `quorum init` seeded and nobody ever touched
+  read as an edit while `quorum doctor` called it an upgradable seed — and
+  the one-command fix (`quorum init`) stayed hidden behind advice to
+  hand-merge. Both now render `home.classify_prompts`, which consults the
+  seed record: *seeded, matches the packaged default*, *seeded by an older
+  quorum, never edited* or *edited*. That classifier also no longer raises on
+  a prompt file it cannot decode — a non-UTF-8 `prompts/<name>.md` crashed
+  `quorum doctor` with a traceback; it is now a ✗ naming the file, a `?` in
+  `prompt list` and a line from `quorum init`, which leaves the file alone.
+  `quorum prompt diff` reads the same classifier for its closing advice: on
+  an unedited older seed it said "prompts/<name>.md is yours, so `quorum
+  init` never upgrades it", which was the opposite of the truth, and now
+  says init upgrades it in place. (#126)
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
   stall readings called `.get()` / `["started_at"]` on whatever the file

@@ -158,6 +158,16 @@ copies are pristine. Keeping the fact in the home rather than in a list of
 superseded hashes in Python is what lets a change to `default_prompts/` ship
 without bookkeeping in `home.py`.
 
+`home.classify_prompts` is that rule as one read-only function — `default`,
+`upgradable`, `edited`, `missing`, plus `unreadable` for a copy it could not
+decode — and every surface that talks about prompt state reads it: `quorum
+init` acts on it, `quorum doctor` reports it, `quorum prompt list` renders
+it, and `quorum prompt diff` closes with the advice for the state it names.
+Two of them once disagreed, because `prompt list` compared text
+to the packaged default and had no third state to call an untouched older
+seed (#126); a listing that says "edited" about a file the user never opened
+sends them to hand-merge work `init` would have done.
+
 That rule has a cliff: the first edit to `<name>.md`, however small, opts
 the home out of every future upgrade to that prompt, silently — a home that
 prepends five lines of house policy to `manager.md` keeps running the
