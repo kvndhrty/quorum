@@ -32,7 +32,6 @@ from ..tasks import (
     Task,
     TaskStore,
     nudge,
-    read_reports,
     read_transcript_tail,
     runner_alive,
 )
@@ -661,9 +660,20 @@ class QuorumTUI(App):
         # the same renderer `quorum task log` uses, so the surfaces cannot
         # drift into two readings of one file
         lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
-        reports = read_reports(self.home, task_id, limit=8)
+        # and the reports exactly as `quorum task show` prints them: the rows
+        # views assembles once (views.task_detail), through the one line
+        # formatter, rather than a second spelling of the same fact here.
+        task = TaskStore(self.home).get(task_id)
+        reports = (
+            [
+                row
+                for row in views.task_detail(self.home, task, reports=8)
+                if row["section"] == "reports" and row["kind"] == "body"
+            ]
+            if task is not None
+            else []
+        )
         if reports:
             lines.append("— reports —")
-            for r in reports:
-                lines.append(f"[{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
+            lines += [views.detail_line(row) for row in reports]
         return lines

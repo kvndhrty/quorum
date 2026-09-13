@@ -158,6 +158,16 @@ copies are pristine. Keeping the fact in the home rather than in a list of
 superseded hashes in Python is what lets a change to `default_prompts/` ship
 without bookkeeping in `home.py`.
 
+`home.classify_prompts` is that rule as one read-only function — `default`,
+`upgradable`, `edited`, `missing`, plus `unreadable` for a copy it could not
+decode — and every surface that talks about prompt state reads it: `quorum
+init` acts on it, `quorum doctor` reports it, `quorum prompt list` renders
+it, and `quorum prompt diff` closes with the advice for the state it names.
+Two of them once disagreed, because `prompt list` compared text
+to the packaged default and had no third state to call an untouched older
+seed (#126); a listing that says "edited" about a file the user never opened
+sends them to hand-merge work `init` would have done.
+
 That rule has a cliff: the first edit to `<name>.md`, however small, opts
 the home out of every future upgrade to that prompt, silently — a home that
 prepends five lines of house policy to `manager.md` keeps running the
@@ -379,13 +389,22 @@ picks up at its next turn boundary. Stdin is the whole prompt channel here —
 a stream-json CLI ignores an argv prompt and blocks until a turn arrives, so
 an inject harness that only got its prompt via argv would hang silently
 until the run timeout. Because such a harness runs until stdin closes, the
-pump also owns ending the run: the protocol emits one `result` event per
-completed user turn (the prompt turn is the first), so the pump closes stdin
-once every delivered turn has its result and `new/` is empty — a run extends
-while guidance keeps arriving and ends at the first idle turn boundary. The
-claim of a message and its count as a delivered turn happen under the same
-lock the close check takes, so a `result` arriving mid-claim sees the
-message either still pending or already owed an answer, never neither.
+pump also owns ending the run, and the close rule counts *turns*, not
+deliveries: a turn written to an idle harness gets a `result` event of its
+own, while a turn written into a turn that is still running is drained into
+it and shares that turn's single result. The pump therefore tracks whether a
+turn is in flight and closes stdin at the first `result` that leaves no turn
+open, nothing claimed but unwritten, and `new/` empty — a run extends while
+guidance keeps arriving and ends at the first idle turn boundary. Expecting
+one result per *delivery* was the #109 hang: a nudge answered inside the
+running turn left the run one result short of its own close condition, and
+stdin stayed open on an idle harness — `runner.lock` held on a task that had
+already reported done, until someone ran `task stop`. The claim of a message
+and its write happen across the same lock the close check takes, so a
+`result` arriving mid-claim sees the message either still pending in `new/`
+or claimed and not yet written, never neither; whether a write folded into a
+running turn or opened a new one is settled under that lock right after the
+write, when the CLI has actually been handed the bytes.
 Guidance that arrives after close, or that lands on a harness without
 `inject`, waits in `new/` for the next run start; the maildir claim makes
 the two delivery points race-free. Delivery is acknowledgement: a message
@@ -671,7 +690,9 @@ generalized to a task, on the same substrate and under the same rules:
   run id, no journal and no action cap, because reports.jsonl and the
   transcript are a task's record and the runner is its rail. One side
   effect: a task's `task nudge` and `board post` carry `task-<id>` as
-  sender, not `user`.
+  sender, not `user`. The tag is also what a task reads *itself* back
+  through: `quorum task show self`
+  ([Reading your own record](#reading-your-own-record-show-self)).
 - **Fence.** `notes.Notebook.may_write` admits the owner, the manager (a
   standing instruction for a task's next run is the natural complement to
   one-shot guidance) and an untagged human; any other task and any prompt
@@ -1375,8 +1396,9 @@ for what the forge last said about the PR), `task_flags` (`⚠` stranded work,
 `waiting-on <ids>`, `DEP-*`) and `usage_badge` (the spend plus `$!` or `$!
 GATED`). The CLI task table and the TUI task table call all four, which is
 what stops the two from disagreeing about where a dependency mark goes;
-`task show` calls `task_badges` for the two marks it has room for and spells
-the rest out in words, and `quorum status --legend` describes the set. A
+the task record rows call `task_badges` for the two marks they have room
+for and spell the rest out in words, and `quorum status --legend` describes
+the set. A
 surface may choose where it puts a mark — the TUI has no flags column, so it
 appends the flags to the status cell — but not how it is spelled.
 
@@ -1418,6 +1440,83 @@ No view holds a lock, spawns an agent tick, or writes state of its own
 invention. This revises the earlier "the views are pure readers whose one
 write affordance is a task nudge" stance (issue #11); the invariant that
 survived it is *thin, shared, no view-local write logic*.
+
+### The task record as rows
+
+`views.task_detail(home, task)` is the record itself, assembled once: the
+header, the labelled fields, both directions of the dependency graph, the
+runs and what they spent, the recent reports, the notebook and the handoff.
+Every row is `{section, kind, label, text, style, …}` — `section` one of
+`record`, `reports`, `notebook`, `handoff`, `more`; `kind` `heading`,
+`field` or `body`; `text` the rest of the line every surface prints
+(`views.detail_line`); `style` `warning` for the budget lines a surface
+colours; and the raw fields of its kind alongside, so a consumer reads
+`dependents` as a list rather than parsing it back out of a rendered line.
+The sources are the ones already on disk: the loaded `task.json`, the task
+listing (for the reverse read of `depends_on`), `reports.jsonl`, the
+notebook and the handoff file. It is a pure reader and fail-soft in the read
+model's way; like `task_history`, it records nothing.
+
+`quorum task show` prints those rows and `--json` dumps them under `detail`,
+so the two cannot say different things about one task — which they had
+already started doing: the text printed `dependents:` and the handoff body,
+and the early-returning `--json` path printed neither (#110, fixed by
+construction in #127). The raw record stays at the top level of that JSON
+because it is a read interface of its own: the packaged `babysitter` prompt
+takes a task's `workdir` straight off it. The TUI's transcript tab renders
+the `reports` rows through `detail_line`, the one fact it and `task show`
+both display.
+
+`quorum status` and the agent listing have the same shape at smaller scale
+and still render their own lines; they are tables over `views.*_rows`, where
+the cells are already views', so the drift this closes is not the one they
+have.
+
+### Reading your own record (`show self`)
+
+A run acts as itself through `QUORUM_ACTOR`; `self` is the read side of the
+same tag (#94). `quorum task show self` and `quorum agent show self` resolve
+who is asking from the environment, print the record any reader would see,
+and add one section of the facts that exist only inside the run.
+
+The split is deliberate and is what keeps `views.py` a pure file reader:
+
+- **`actor.py` resolves.** `self_task_id()` and `self_agent_name()` split the
+  tag — exactly one of them answers, which is what lets a mistyped `self`
+  be told which command it wanted. `self_run(home)` returns a `SelfRun`
+  (`actor`, `run`, `cap`, `actions`), where `cap` comes from
+  `QUORUM_ACTOR_CAP` through the one fallback `_actor_guard` also uses, and
+  `actions` is `actions_used`, counted back out of the journal because the
+  CLI calls that spend the cap are separate processes. A task's tag carries
+  no run id and no cap (identity only), so `SelfRun.capped` is False for
+  one and the rendering says so instead of naming a number a task is not
+  held to.
+- **`views.py` renders what it is handed.** `task_self_detail` is
+  `task_detail` with the `self` section spliced in after the record's own
+  fields, so every other line is byte-identical to what `task show <id>`
+  prints; `agent_detail_rows` is the agent-side record in the same row shape,
+  with the `self` section added only when a `SelfRun` is passed.
+- **The CLI joins them.** `SELF` is the one spelling of the handle, and an
+  unresolvable `self` is a typer error naming the fix rather than a
+  traceback.
+
+What the sections hold is chosen by one rule: a fact the run cannot get from
+outside itself, or cannot get before it is refused for it. For a task that is
+the per-run budget stated as a limit rather than as the refusal `task run`
+raises once it is exceeded, what the last run spent, how full the notebook is
+(`notes.Notebook.size`, the numbers behind the rendering, which only reports
+a dropped note once it has already dropped it), and whether a handoff is owed
+— the check the preamble sends a task here for before it reports `done`. For
+an agent it is how much of `max_actions_per_run` this run has used.
+
+It is **read-only, and that is a rule rather than an omission**: nothing here
+changes a cap, a budget, a schedule or a rail, and `show` is not a mutating
+command, so it writes no journal line and reading the cap does not spend it.
+Reading a rail is not a way around it — the gate still refuses the next run.
+The counterpart on the agent side already existed in the prompt rather than
+the CLI: `harness_run.self_observations` puts the same three facts at the top
+of a tick's digest, and `agent show self` is how a run asks again mid-tick,
+once the `0 of <cap>` the header was rendered with has stopped being true.
 
 ### Task history
 
@@ -1469,6 +1568,61 @@ nothing, because archival is the last thing that happens to a task and the
 answer to "what happened to it" must not vanish with the move. That is the
 one reader that looks into the dot-prefixed directory on purpose; every
 listing, view and digest keeps skipping it.
+
+### Intervention outcomes
+
+`views.agent_interventions(home, name, since=None)` is the second post-hoc
+reader (#97, theme #88), and the mirror of the first: `task_history` asks what
+happened to one task, this asks what one agent's supervision did and what
+happened next. The question it answers — does a nudge change the next report,
+does a relaunch finish the task, does an escalation get acted on — decides how
+much supervision is worth running, and before this it was answered by
+hand-written Python over JSONL.
+
+It reads the agent's own journal (`state/<name>/journal.jsonl`, the split
+`actor.journal_path` makes) for four things: `task.nudge`, `task.run` and
+`task.stop`, which `INTERVENTION_KINDS` maps to the words `nudge`, `launch`
+and `stop`, and a `board.post` whose journaled args name the `attention`
+topic, which reads as an `escalation`. A task row then adds what that target
+said next, out of its own `reports.jsonl`: the first report stamped at or
+after the action (`next_report`, `wait_seconds`), the first `done` report
+after it (`done_at`) and the status the task carries now. Every row is `{at,
+at_text, kind, text, …}` like a history row, `text` being the rest of the line
+`views.intervention_line` prints, and `views.intervention_summary_line`
+renders the counts under the list (with `INTERVENTION_PLURALS`, because
+"relaunchs" is not a word and the kinds do not pluralize alike). `task.run`
+reads as `launch` rather than `relaunch` because the journal does not
+distinguish the two; the status it recorded does, and reading that is the
+person's job, not a guess the view makes. `quorum agent interventions <name>`
+is the only surface; there is no `manager interventions` alias, because the
+manager is an agent like any other here, exactly as `agent log manager` is.
+
+Three properties make it honest. It **judges nothing**: the payload is the
+status before, the action, and what came after, and the summary counts only
+facts the files state — a report happened, a `done` report happened, a message
+is no longer live. There is no "a nudge works if a report follows within N
+hours" threshold to tune, because that reading belongs to the person. It
+**records nothing**: no new file, no cache, and the reader works with the
+supervisor stopped, like every view. And it is **bounded, and says so**: the
+journal is read as a tail over `HISTORY_JOURNAL_BYTES`, so the payload carries
+`horizon` (the oldest entry that tail reached) and `scrolled` (whether the
+file is larger than the window read), and the command prints the one or the
+other as its last line. An entry whose stamp does not parse is dropped rather
+than placed, because the list is ordered by time and `--since` is a claim
+about time.
+
+Two matching problems are resolved in the open rather than papered over. A
+`board.post` is journaled *before* the message exists, so the journal line
+carries no message id, and the post is found by content instead: the earliest
+message on the topic — live, or in the archive through
+`MessageBus.archived_records(topic=...)`, which is still the one scan of
+`messages/archive/` — stamped at or after the action and whose text starts
+with the 80-character prefix the journal kept. No match reads as `acked:
+None`, never as unacked. And `acked` means the message has left the board,
+which is what `ack_board_message` does — but the janitor's retention sweep
+archives an old escalation too, and the record does not say which archived it,
+so over a long window an escalation nobody ever saw can read as acked. The
+guide says both of these where a person meets them.
 
 ### Reading a run
 
@@ -1659,4 +1813,9 @@ session capture. Sandbox glue is pinned by injecting a fake `nono_py` into
 `sys.modules`; real kernel enforcement runs under `-m nono_integration`,
 with a dedicated CI job asserting platform support so it can never silently
 skip. The example plugin is loaded by file path and tested in
-`test_example_steward.py`, so the worked example in the guide stays true.
+`test_example_steward.py`, so the worked example in the guide stays true;
+the example home in `examples/dogfood-home/` is installed into a scaffolded
+home and put through `load_config` and `prompts.render` in
+`test_example_home.py`, for the same reason — a config key or a `{local}`
+slot that moved must break the example loudly rather than in someone's
+first hour.

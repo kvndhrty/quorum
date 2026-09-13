@@ -33,6 +33,42 @@ minute it is posted.
   supervisor's up/down spans, because a tick that spent no harness run writes
   no transcript and would otherwise read as no tick at all. It is the evidence
   half of round two of the surface review; the verdicts are recorded in #128.
+- The dogfood home as a worked example (#64): `examples/dogfood-home/`
+  ships the home that builds quorum — its real `config.toml` (the
+  `[harness.claude]` block with a comment on why each `--allowedTools` entry
+  is there, the hourly manager, a commented `[notify]` hook), the two prompt
+  overlays it runs on (`manager.local.md`: two tasks at a time, oldest
+  first, the human owns PRs; `task-preamble.local.md`: the delivery
+  conventions), and a README with the issue-driven loop in ten lines and
+  what a cycle cost, read off `quorum usage`. `tests/test_example_home.py`
+  installs it into a scaffolded home, loads the config and renders both
+  overlays, so a renamed option, prompt slot or CLI command cannot leave the
+  example quietly wrong. Linked from the README and the guide's setup.
+- A run can read its own record (#94): `quorum task show self` and
+  `quorum agent show self` resolve the actor tag the runner and the agents
+  set (`QUORUM_ACTOR`) and print the record any reader would see plus a
+  `this run:` section of the facts that only exist inside the run — the
+  per-run budget stated as a limit rather than as the refusal `task run`
+  raises once it is exceeded, what the last run spent, how full the notebook
+  is, whether a handoff is owed, and (for an agent) how much of
+  `max_actions_per_run` this run has used. `--json` dumps the same rows
+  under `detail`. `quorum agent show <name>` is the same record for a
+  person, the manager included. Read-only throughout: nothing here changes a
+  cap or a budget, and reading one is not a way around it. The task preamble
+  names the two moments worth a call — before a long tool-heavy step, and
+  before reporting `done`. Outside a tagged run, `self` is an error naming
+  the fix.
+- Intervention outcomes (#97): `quorum agent interventions <name> [--since 30d]
+  [--json]` lists every nudge, launch, stop and `attention` escalation an
+  agent journaled, each with the target's status at the time, the next report
+  the target made after it and how long that took, under a summary line
+  counting nudges followed by a report, launches whose task later reported
+  done and escalations that have left the board. A pure reader over
+  `state/<name>/journal.jsonl` and the targets' `reports.jsonl` that adds no
+  state and judges nothing — it shows the before, the action and the after —
+  and, since the journal is read as a bounded tail, says how far back it can
+  see. The manager is an agent like any other here, so there is no
+  `manager interventions` alias.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,
@@ -327,6 +363,16 @@ minute it is posted.
   could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
+- One renderer for a task's record (#127): `views.task_detail(home, task)`
+  assembles every section `quorum task show` prints — the fields, both
+  directions of the dependency graph, the runs and their spend, the recent
+  reports, the notebook, the handoff — as rows, `views.detail_line` prints
+  one, and `task show --json` dumps them under `detail` beside the raw
+  record. The text is unchanged apart from its last line; the `--json`
+  omissions the #110 review found (`dependents:` and the handoff body,
+  printed but never dumped) are closed by construction, and the TUI's
+  transcript tab now lists reports through the same rows. `quorum status`
+  and the agent listing were left alone.
 - Docs restructured; one name per concept; glossary added (#102). The guide
   opens with a five-step path (install, register a project, queue a task,
   start the supervisor, read status), then Watching and Steering, then a
@@ -490,6 +536,34 @@ minute it is posted.
   unaffected: `build_task_capabilities` leaves the network open as before.
 
 ### Fixed
+- A message archive that decompresses to bytes which are not UTF-8 no longer
+  takes `quorum task history` (and the TUI tab that renders it) down: the
+  archive scan already treated a bad gzip header, a truncated stream and
+  corrupt deflate data as a skipped month, and a `UnicodeDecodeError` off the
+  text wrapper is the fourth shape of the same damage. Found by the existing
+  random-deflate test, which hits it a fraction of the time.
+- A damaged `reports.jsonl` no longer takes down the readers of a task. A
+  line torn mid-append is torn at a byte, so it can end inside a multi-byte
+  character; `fsio.read_jsonl` now decodes with `errors="replace"` like
+  `read_jsonl_tail` already did, so such a line costs itself and not the
+  read. `tasks.read_reports` also drops a line that is valid JSON and not an
+  object, which every caller reads with `.get()` — `views.task_detail`, the
+  task listing and the manager digest.
+- `quorum prompt list` no longer calls an unedited prompt "edited". It
+  compared the home copy's text to the packaged default, which has only two
+  answers, so a copy an earlier `quorum init` seeded and nobody ever touched
+  read as an edit while `quorum doctor` called it an upgradable seed — and
+  the one-command fix (`quorum init`) stayed hidden behind advice to
+  hand-merge. Both now render `home.classify_prompts`, which consults the
+  seed record: *seeded, matches the packaged default*, *seeded by an older
+  quorum, never edited* or *edited*. That classifier also no longer raises on
+  a prompt file it cannot decode — a non-UTF-8 `prompts/<name>.md` crashed
+  `quorum doctor` with a traceback; it is now a ✗ naming the file, a `?` in
+  `prompt list` and a line from `quorum init`, which leaves the file alone.
+  `quorum prompt diff` reads the same classifier for its closing advice: on
+  an unedited older seed it said "prompts/<name>.md is yours, so `quorum
+  init` never upgrades it", which was the opposite of the truth, and now
+  says init upgrades it in place. (#126)
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
   stall readings called `.get()` / `["started_at"]` on whatever the file
@@ -551,6 +625,15 @@ minute it is posted.
   counts, so each one can be acked; and `quorum down` asks an in-flight
   notification drain to stop after the message it is delivering instead of
   waiting for the whole batch.
+- A stream-json run whose nudge was answered *inside* the turn already
+  running never ended (#109). The guidance pump expected one `result` event
+  per delivered turn, but a CLI that drains queued input into the turn in
+  flight emits one result for both, so the close condition was never met:
+  stdin stayed open on an idle harness and `runner.lock` stayed held on a
+  task that had reported done — 35 minutes, until someone ran `task stop`.
+  The pump now tracks whether a turn is in flight rather than counting
+  deliveries, and closes stdin at the first result that leaves no turn open
+  and nothing waiting in the inbox.
 - The guidance pump could close a stream-json harness's stdin with a nudge
   in flight: a message was claimed (renamed out of `new/`) before it was
   counted as delivered, so a `result` event landing in that gap saw an

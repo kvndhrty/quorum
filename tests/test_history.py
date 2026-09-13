@@ -244,6 +244,22 @@ def test_history_survives_a_corrupt_deflate_stream_in_the_archive(home: Path):
     assert r.exit_code == 0, r.output
 
 
+def test_history_survives_an_archive_that_inflates_to_non_utf8(home: Path):
+    """The fourth way archive damage shows up: bytes that decompress fine and
+    are not text. That comes back off the text wrapper as a
+    UnicodeDecodeError rather than a gzip or zlib failure, and it is the
+    shape the random-deflate test above hits a fraction of the time."""
+    task = TaskStore(home).add("proj", "x", "fake", now=at(1))
+    archive = home / "messages" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "2026-01.jsonl.gz").write_bytes(gzip.compress(b"\xff\xfe not utf-8\n"))
+
+    assert MessageBus(home).archived_records(inbox_name(task.id)) == []
+    assert kinds(views.task_history(home, task)) == ["queued"]
+    r = runner.invoke(app, ["task", "history", task.short_id])
+    assert r.exit_code == 0, r.output
+
+
 def test_cli_prints_the_life_and_emits_json(home: Path):
     task = build_life(home)
     r = runner.invoke(app, ["task", "history", task.short_id])
