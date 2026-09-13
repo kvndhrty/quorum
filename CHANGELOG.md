@@ -494,6 +494,13 @@ minute it is posted.
   corrupt deflate data as a skipped month, and a `UnicodeDecodeError` off the
   text wrapper is the fourth shape of the same damage. Found by the existing
   random-deflate test, which hits it a fraction of the time.
+- A damaged `reports.jsonl` no longer takes down the readers of a task. A
+  line torn mid-append is torn at a byte, so it can end inside a multi-byte
+  character; `fsio.read_jsonl` now decodes with `errors="replace"` like
+  `read_jsonl_tail` already did, so such a line costs itself and not the
+  read. `tasks.read_reports` also drops a line that is valid JSON and not an
+  object, which every caller reads with `.get()` — `views.task_detail`, the
+  task listing and the manager digest.
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
   stall readings called `.get()` / `["started_at"]` on whatever the file

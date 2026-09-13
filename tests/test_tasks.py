@@ -1647,16 +1647,28 @@ def test_task_detail_omits_the_sections_a_bare_task_has_nothing_for(
     assert "task remember" in detail_by_label(rows)["notebook"]["text"]
 
 
-def test_task_detail_is_fail_soft_over_a_torn_reports_file(home: Path, project: str):
-    """Views degrade rather than fail: a half-written reports line costs its
-    own row, never the record — `task show` is how a person finds out what
-    happened to a task whose files are in a bad way."""
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(b'{"at": "2026-01-01T00:00:00Z", "status": "do', id="torn-json"),
+        pytest.param('{"at": "2026-01-01T00:00:00Z", "text": "café'.encode()[:-1], id="torn-char"),
+        pytest.param(b'"a report that is not an object"\n', id="not-an-object"),
+    ],
+)
+def test_task_detail_is_fail_soft_over_a_damaged_reports_file(
+    home: Path, project: str, damage: bytes
+):
+    """Views degrade rather than fail: a bad reports line costs its own row,
+    never the record — `task show` is how a person finds out what happened to
+    a task whose files are in a bad way. Three shapes of the same damage, and
+    two of them are not JSON errors: a write cut mid-append can end inside a
+    multi-byte character, and a line that parses need not be an object."""
     from quorum import views
 
     task = TaskStore(home).add(project, "do it", "fake")
     tasks.report(home, task.id, "executing", "working")
-    with open(tasks.reports_path(home, task.id), "a", encoding="utf-8") as f:
-        f.write('{"at": "2026-01-01T00:00:00Z", "status": "do')
+    with open(tasks.reports_path(home, task.id), "ab") as f:
+        f.write(damage)
 
     rows = views.task_detail(home, task)
     reports = [r for r in rows if r["section"] == "reports" and r["kind"] == "body"]
