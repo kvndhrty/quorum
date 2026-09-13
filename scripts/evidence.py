@@ -97,10 +97,12 @@ ACTORS = ("person", "manager", "agent", "task")
 CHECKOUT = "checkout"
 SCRATCH = "scratch"
 
-#: Commands a person can run without the home recording anything. Removal by
-#: default (issue #128) cannot apply to these on evidence alone, so they are
-#: marked rather than counted. `tests/test_evidence.py` asserts every entry
-#: names a real command, so a rename cannot leave a stale exemption here.
+#: Commands whose use this home cannot record: a person's read-only ones, and
+#: `task hook`, which a harness runs from its own hook config rather than from
+#: a shell quorum ever sees. Removal by default (issue #128) cannot apply to
+#: these on evidence alone, so they are marked rather than counted.
+#: `tests/test_evidence.py` asserts every entry names a real command, so a
+#: rename cannot leave a stale exemption here.
 NO_TRACE = frozenset(
     {
         "agent list",
@@ -108,15 +110,10 @@ NO_TRACE = frozenset(
         "board read",
         "doctor",
         "integration install",
-        "integration list",
-        "manager journal",
         "manager notes",
-        "project list",
         "prompt diff",
-        "prompt list",
         "status",
-        "task export",
-        "task history",
+        "task hook",
         "task list",
         "task log",
         "task show",
@@ -126,9 +123,36 @@ NO_TRACE = frozenset(
     }
 )
 
-#: Verbs #102 removed. A home that still records someone reaching for one is
-#: evidence that removal cost something; silence is evidence it did not.
-REMOVED_IN_102 = frozenset({"web", "hold", "release", "set-priority", "tail"})
+#: Verbs a surface review removed, in #102 and again in #128. A home that
+#: still records someone reaching for one is evidence that the removal cost
+#: something; silence is evidence it did not. `tests/test_evidence.py` asserts
+#: none of them is a real command any more, so a verb that came back cannot
+#: sit here being counted as gone.
+REMOVED = frozenset(
+    {
+        # #102
+        "web",
+        "hold",
+        "release",
+        "set-priority",
+        "tail",
+        # #128, round two
+        "agent pause",
+        "agent run-now",
+        "board ack",
+        "integration list",
+        "manager journal",
+        "manager tell",
+        "project list",
+        "project remove",
+        "prompt list",
+        "task export",
+        "task history",
+        "task hook-session-end",
+        "task hook-session-start",
+        "task hook-stop",
+    }
+)
 
 #: Tokens that may stand in front of the `quorum` word without changing which
 #: program runs. The second set marks the invocation as the checkout's CLI.
@@ -148,7 +172,6 @@ ROOT_VALUE_OPTIONS = frozenset({"--home"})
 STATE_IMPLIED_OPTIONS = {
     "issue_url": "--issue",
     "depends_on": "--after",
-    "perpetual": "--perpetual",
     "herdr_pane": "--herdr-pane",
 }
 
@@ -167,6 +190,8 @@ JOURNAL_ACTIONS = {
     "remember": "manager remember",
     "forget": "manager forget",
     "board.post": "board post",
+    "board.clear": "board clear",
+    "agent.tell": "agent tell",
     "agent.reload": "agent reload",
 }
 
@@ -355,12 +380,16 @@ def parse_invocation(tokens: list[str], command_paths: set[str], groups: set[str
         candidate = " ".join(words[:depth])
         if candidate in command_paths:
             return candidate, options, named_home
+    # Before the group fallback: `manager tell` must read as a removed verb,
+    # not as `manager` with its own help, now that a removal can be two words.
+    for depth in (2, 1):
+        candidate = " ".join(words[:depth])
+        if candidate in REMOVED:
+            return candidate + " (removed)", options, named_home
     if words and words[0] in groups:
         # `quorum task` or `quorum task --help`: the group's own help, not a
         # verb, and not evidence for any command under it.
         return words[0] + " (group only)", options, named_home
-    if words and words[0] in REMOVED_IN_102:
-        return " ".join(words[:2]).strip() + " (removed in #102)", options, named_home
     if not words and options:
         return "(root)", options, named_home
     return None
@@ -904,9 +933,9 @@ def placeholder_evidence(ev: Evidence, name: str, templates: list[str]) -> str:
     if name == "issue":
         n = sum(1 for t in ev.tasks if t.get("issue_url"))
         return f"{n}/{len(ev.tasks)} tasks carry an issue"
-    if name == "perpetual":
-        n = sum(1 for t in ev.tasks if t.get("perpetual"))
-        return f"{n}/{len(ev.tasks)} tasks are perpetual"
+    if name == "spawn":
+        n = sum(1 for t in ev.tasks if t.get("allow_spawn"))
+        return f"{n}/{len(ev.tasks)} tasks may queue tasks of their own"
     if name in ("task_id", "project_path"):
         return f"substituted on every run ({len(ev.tasks)} tasks)"
     # a prompt-agent slot: only observable if an agent here runs that template

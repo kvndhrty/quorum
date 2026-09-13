@@ -249,8 +249,8 @@ class Supervisor:
     def _finish_heartbeat(self, name: str, **fields) -> None:
         """End-of-tick heartbeat write that respects an external pause.
 
-        A `quorum agent pause` (or auto-pause) that lands while a tick is in
-        flight writes status="paused"; the tick's completion write must not
+        An auto-pause that lands while a tick is in flight writes
+        status="paused"; the tick's completion write must not
         clobber that back to idle/error, or every dashboard would show a
         paused agent as healthy forever (the paused job never runs again to
         correct it). Timing fields still land either way.
@@ -362,9 +362,9 @@ class Supervisor:
     # -- control channel ------------------------------------------------------
 
     def _control(self) -> None:
-        """Apply `quorum agent pause|resume|run-now` commands from the
-        supervisor's inbox. This is the only runtime lever that doesn't
-        require editing config.toml and restarting."""
+        """Apply `quorum agent reload|resume` commands from the supervisor's
+        inbox. This is the only runtime lever that doesn't require editing
+        config.toml and restarting."""
         for claimed in self.bus.claim("supervisor"):
             msg = claimed.message
             name = (msg.payload or {}).get("agent", "")
@@ -384,11 +384,7 @@ class Supervisor:
         if job is None:
             log.warning("control command %s for unknown/unscheduled agent %r", command, name)
             return
-        if command == "agent.pause":
-            job.pause()
-            self._write_heartbeat(name, status="paused", error="paused by user")
-            log.info("agent %s paused by user", name)
-        elif command == "agent.resume":
+        if command == "agent.resume":
             # A human resume is the end of the streak by definition — clear the
             # escalation stamp too, or the *next* outage would find one already
             # set and never reach the attention banner.
@@ -398,9 +394,6 @@ class Supervisor:
                 name, status="idle", error=None, consecutive_failures=0, escalated_at=None
             )
             log.info("agent %s resumed by user", name)
-        elif command == "agent.run-now":
-            job.modify(next_run_time=fsio.utc_now())
-            log.info("agent %s scheduled to run now", name)
         else:
             log.warning("unknown control command %r", command)
 

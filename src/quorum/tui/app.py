@@ -2,10 +2,10 @@
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
 CLI makes: `n` sends guidance into a task's inbox, `m` sends a
-guidance to the manager's inbox (`quorum manager tell`), `s` launches a
+guidance to the manager's inbox (`quorum agent tell manager`), `s` launches a
 detached run, `c` cancels a task — the one destructive binding, so it confirms
 first — and `a` acks an escalation off the #attention banner
-(`quorum board ack`).
+(`quorum board clear --id`).
 
 Two rules hold for all of them. They act on what the reader is *looking at* —
 the highlighted row while the task table has focus, the open task while
@@ -270,7 +270,7 @@ class QuorumTUI(App):
         self._open_input("task", f"guidance for {task.short_id} — enter sends, esc cancels")
 
     def action_directive(self) -> None:
-        """`quorum manager tell`, from the dashboard: the manager's next run
+        """`quorum agent tell manager`, from the dashboard: the manager's next run
         starts with that guidance in its digest. No task selection needed."""
         self._open_input("manager", "guidance for the manager — enter sends, esc cancels")
 
@@ -391,7 +391,7 @@ class QuorumTUI(App):
 
         Every row the dashboard offers is a *snapshot*, so the thing a write
         names can also be gone by the time the key is pressed — an escalation
-        the janitor or another `board ack` archived out of band.
+        the janitor or another `board clear` archived out of band.
         That surfaces as the KeyError/ValueError board resolution raises, not
         as OSError, and it is the same class of disappointment: say so and keep
         the view up."""
@@ -649,7 +649,7 @@ class QuorumTUI(App):
         return self._history_lines
 
     def _task_history_lines(self, task_id: str) -> list[str]:
-        """The task's life as `quorum task history` prints it — the same
+        """The task's life as `quorum task show --history` prints it — the same
         rows, the same line per row."""
         task = TaskStore(self.home).get(task_id)
         if task is None:

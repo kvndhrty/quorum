@@ -1,5 +1,9 @@
-"""`quorum prompt`: what each template resolves to, and how it differs from
-the packaged default."""
+"""`quorum prompt`: how a home's copy of a template differs from the packaged
+default.
+
+Which templates exist, which are edited, and what overlays them is `quorum
+doctor`'s prompt lines — the one classifier (`home.classify_prompt`) reports
+there, and this is the diff behind an "edited" line."""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from pathlib import Path
 
 import typer
 
-from .. import fsio
 from .. import home as home_mod
 from .. import prompts as prompts_mod
 from ._common import (
@@ -19,139 +22,12 @@ from ._common import (
 # -- prompts ---------------------------------------------------------------
 
 
-def _prompt_names(home: Path) -> list[str]:
-    """Every template name that resolves here: packaged defaults plus
-    anything the user wrote into prompts/ (overlays are not templates)."""
-    from importlib import resources
-
-    names = set()
-    try:
-        defaults = resources.files("quorum") / "default_prompts"
-        names |= {e.name[:-3] for e in defaults.iterdir() if e.name.endswith(".md")}
-    except (FileNotFoundError, ModuleNotFoundError, OSError):
-        pass
-    for entry in fsio.sorted_entries(home / "prompts", suffix=".md"):
-        if entry.name.endswith(prompts_mod.LOCAL_SUFFIX):
-            continue
-        names.add(entry.name[:-3])
-    return sorted(names)
-
-
 def _read_prompt_file(target: Path) -> str | None:
-    """A prompt file's text, or None when it cannot be read or decoded.
-
-    One unreadable file must not take the whole listing down with it — see
-    `prompt_list`, which marks it `?` and carries on."""
+    """A prompt file's text, or None when it cannot be read or decoded."""
     try:
         return target.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return None
-
-
-_UNREADABLE = "? unreadable (not UTF-8, or no permission) — every render of it fails"
-
-# How this listing spells each state `home.classify_prompts` reports. "missing"
-# is not here: a name with no home copy never reaches the lookup.
-_STATE_NOTES = {
-    "default": "seeded, matches the packaged default",
-    "upgradable": "seeded by an older quorum, never edited — `quorum init` upgrades it",
-    "edited": "edited — `quorum prompt diff {name}` vs the packaged default",
-    "unreadable": _UNREADABLE,
-}
-
-
-@prompt_app.command("list")
-def prompt_list() -> None:
-    """Show each prompt template: home copy vs packaged default, and overlay."""
-    target = get_home()
-    names = _prompt_names(target)
-    # One classifier, two readers: `home.classify_prompts` is what `quorum
-    # init` acts on and `quorum doctor` reports, seed record and all. Comparing
-    # text to the packaged default here instead called an unedited copy of an
-    # older seed "edited", hiding the upgrade init was offering (#126).
-    states = home_mod.classify_prompts(target)
-    for name in names:
-        default = prompts_mod.packaged(name)
-        home_copy = prompts_mod.path(target, name)
-        text = default
-        if not home_copy.is_file():
-            state = "packaged default (no home copy)"
-        else:
-            text = _read_prompt_file(home_copy)
-            if text is None:
-                state = _UNREADABLE
-            elif default is None:
-                state = "yours (quorum packages no default)"
-            else:
-                # An unknown state reads as an edit: the direction that never
-                # claims `quorum init` will replace the file.
-                note = _STATE_NOTES.get(states.get(f"{name}.md", ""), _STATE_NOTES["edited"])
-                state = note.format(name=name)
-        overlay = prompts_mod.local_path(target, name)
-        if overlay.is_file():
-            if _read_prompt_file(overlay) is None:
-                # render() ignores an overlay it cannot decode; say so here,
-                # because silently dead policy is the failure that hurts.
-                note = "? unreadable — ignored when rendering"
-            elif text is None:
-                note = "merged where the template says, once it is readable"
-            else:
-                note = "{local} slot" if prompts_mod.has_slot(text) else "prepended"
-            state += f" + {overlay.name} ({note})"
-        typer.echo(f"  {name:<16} {state}")
-    # an overlay for a template that does not exist is silently dead policy
-    for entry in fsio.sorted_entries(target / "prompts", suffix=prompts_mod.LOCAL_SUFFIX):
-        stem = entry.name[: -len(prompts_mod.LOCAL_SUFFIX)]
-        if stem not in names:
-            typer.secho(
-                f"  {entry.name}: no prompt named {stem!r} — this overlay is never rendered",
-                fg="yellow",
-            )
-    _print_project_blocks(target)
-
-
-PREAMBLE = "task-preamble"
-
-
-def _print_project_blocks(target: Path) -> None:
-    """The fourth prompt layer: the project overlay each project puts in the
-    preamble's `{project}` slot (its registry notes, its own .quorum file, or
-    both).
-
-    Only projects that actually contribute one are listed — the point is to
-    make per-project prompt text findable, not to re-list the registry.
-    """
-    from ..projects import ProjectRegistry
-
-    rows: list[tuple[str, str]] = []
-    for project in ProjectRegistry(target).list():
-        sources = []
-        if project.notes.strip():
-            sources.append("notes (registry)")
-        block = prompts_mod.project_local_path(project.dir, PREAMBLE)
-        if block.is_file():
-            shown = f"{prompts_mod.PROJECT_DIR_NAME}/{block.name}"
-            # render() ignores a block it cannot decode, exactly as it does
-            # an overlay; silently dead policy is the failure that hurts.
-            unreadable = _read_prompt_file(block) is None
-            sources.append(f"? {shown} unreadable — ignored when rendering" if unreadable else shown)
-        if sources:
-            rows.append((project.slug, " + ".join(sources)))
-    if not rows:
-        return
-    typer.echo(f"  per-project overlay in {PREAMBLE} ({{project}} slot):")
-    for slug, sources in rows:
-        typer.echo(f"    {slug:<14} {sources}")
-    try:
-        template = prompts_mod.load(target, PREAMBLE)
-    except (KeyError, OSError, UnicodeDecodeError):
-        return  # already reported above as missing or unreadable
-    if not prompts_mod.has_slot(template, "project"):
-        typer.secho(
-            f"    prompts/{PREAMBLE}.md has no {{project}} slot —"
-            " these overlays are never rendered",
-            fg="yellow",
-        )
 
 
 @prompt_app.command("diff")
@@ -170,7 +46,9 @@ def prompt_diff(
     name = name[:-3] if name.endswith(".md") else name
     default = prompts_mod.packaged(name)
     if default is None:
-        raise _fail(f"quorum packages no default prompt named {name!r} — `quorum prompt list`")
+        raise _fail(
+            f"quorum packages no default prompt named {name!r} — `quorum doctor` lists them"
+        )
     home_copy = prompts_mod.path(target, name)
     if not home_copy.is_file():
         typer.echo(f"no prompts/{name}.md — this home uses the packaged default unchanged")
@@ -202,7 +80,7 @@ def prompt_diff(
             typer.echo(line)
     typer.echo("")
     if home_mod.classify_prompts(target).get(f"{name}.md") == "upgradable":
-        # The same classifier the listing, doctor and init read: this copy is
+        # The same classifier doctor and init read: this copy is
         # the seed an older init wrote and nobody edited, so calling it "yours"
         # here would send its owner to hand-merge what one `quorum init` does
         # (#126) — the closing paragraph below is for an edited copy only.

@@ -5,8 +5,9 @@
      prompts/manager.md at that file's {local} slot, which sits near the top,
      above the general guidance. manager.md keeps receiving packaged upgrades
      because it is never edited; everything this home decided for itself is
-     in these ten lines. `quorum prompt list` shows which overlays are in
-     play, and `quorum manager journal` shows what the manager did with them.
+     in these ten lines. `quorum doctor` shows which overlays are in play,
+     and `quorum agent log manager --actions` shows what the manager did with
+     them.
 
      Why each rule is here:
 
@@ -20,7 +21,7 @@
 
      - Oldest-first. Without an order the manager re-derives priorities every
        tick and drifts; with one, the queue is the plan and a user directive
-       (`quorum manager tell "..."`) is the only override. Quorum's substrate
+       (`quorum agent tell manager "..."`) is the only override. Quorum's substrate
        orders nothing on purpose — `--after` is the only ordering it
        enforces — so ordering policy belongs here, in prose.
 

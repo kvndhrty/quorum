@@ -2,7 +2,7 @@
 
 The canonical record for each project is `projects/<slug>.json` in
 QUORUM_HOME. If the project directory itself contains a `.quorum.toml`
-marker, its fields (name, deadline, tags, notes) merge over the registry
+marker, its fields (name, deadline, notes) merge over the registry
 record at read time — so metadata can travel with a synced/shared repo while
 quorum still only ever *reads* project directories. This function is the
 single merge point; every agent and view goes through it.
@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 from . import fsio
 
 MARKER_NAME = ".quorum.toml"
-MARKER_FIELDS = ("name", "deadline", "tags", "notes")
+MARKER_FIELDS = ("name", "deadline", "notes")
 
 
 class Project(BaseModel):
@@ -27,7 +27,6 @@ class Project(BaseModel):
     slug: str
     name: str
     path: str
-    tags: list[str] = Field(default_factory=list)
     deadline: str | None = None  # ISO date, e.g. "2026-08-27"
     notes: str = ""
     created_at: str = Field(default_factory=lambda: fsio.iso(fsio.utc_now()))
@@ -61,7 +60,6 @@ class ProjectRegistry:
         path: str | Path,
         name: str | None = None,
         deadline: str | None = None,
-        tags: list[str] | None = None,
         notes: str = "",
         write_marker: bool = False,
     ) -> Project:
@@ -77,7 +75,6 @@ class ProjectRegistry:
             name=name,
             path=str(pdir),
             deadline=deadline,
-            tags=tags or [],
             notes=notes,
         )
         fsio.atomic_write_json(self._path(slug), project.model_dump())
@@ -105,15 +102,8 @@ class ProjectRegistry:
             out.append(_merge_marker(record))
         return sorted(out, key=lambda p: (p.deadline is None, p.deadline or "", p.slug))
 
-    def remove(self, slug: str) -> bool:
-        path = self._path(slug)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
-
     def update(self, slug: str, **fields) -> Project:
-        """Update registry fields (deadline, notes, tags, name). The registry
+        """Update registry fields (deadline, notes, name). The registry
         file is machine-owned JSON, so rewriting it is fine — unlike config.toml."""
         path = self._path(slug)
         if not path.exists():
@@ -132,9 +122,6 @@ class ProjectRegistry:
         lines = [f'name = "{project.name}"']
         if project.deadline:
             lines.append(f'deadline = "{project.deadline}"')
-        if project.tags:
-            tags = ", ".join(f'"{t}"' for t in project.tags)
-            lines.append(f"tags = [{tags}]")
         if project.notes:
             lines.append(f'notes = """{project.notes}"""')
         marker = project.dir / MARKER_NAME
@@ -162,8 +149,6 @@ def read_marker(project_dir: Path) -> dict:
             date.fromisoformat(fields["deadline"])
         except ValueError:
             del fields["deadline"]
-    if "tags" in fields and not isinstance(fields["tags"], list):
-        del fields["tags"]
     if "notes" in fields:
         fields["notes"] = str(fields["notes"])
     if "name" in fields:

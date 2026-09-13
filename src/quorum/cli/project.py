@@ -1,18 +1,18 @@
-"""`quorum project`: the registry of directories tasks run against."""
+"""`quorum project`: the registry of directories tasks run against.
+
+The registry is `projects/<slug>.json` — one file per project, which is what
+`quorum status` lists and what unregistering a project is `rm`-ing.
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
 
 from ._common import (
     _actor_guard,
-    _confirm,
     _fail,
-    _print_table,
-    _project_table,
     _verbatim_text,
     get_home,
     project_app,
@@ -26,7 +26,6 @@ def project_add(
     path: Path,
     name: str | None = typer.Option(None, "--name", help="Display name (default: dir name)."),
     deadline: str | None = typer.Option(None, "--deadline", help="ISO date, e.g. 2026-09-15."),
-    tags: str = typer.Option("", "--tags", help="Comma-separated tags."),
     notes: str = typer.Option("", "--notes", help="Free-form notes shown in views."),
     marker: bool = typer.Option(False, "--marker", help="Also write a .quorum.toml into the project dir."),
     force: bool = typer.Option(False, "--force", help="Register even if the directory is not a git repository."),
@@ -51,7 +50,6 @@ def project_add(
             path,
             name=name,
             deadline=deadline,
-            tags=[t.strip() for t in tags.split(",") if t.strip()],
             notes=notes,
             write_marker=marker,
         )
@@ -59,22 +57,6 @@ def project_add(
         raise _fail(str(e)) from None
     typer.secho(f"registered project {project.slug} ({project.path})", fg="green")
 
-
-@project_app.command("list")
-def project_list(
-    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
-) -> None:
-    """List registered projects (marker-file fields merged in)."""
-    from .. import views
-
-    rows = views.project_rows(get_home())
-    if json_out:
-        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
-        return
-    if not rows:
-        typer.echo("no projects registered — `quorum project add <dir>`")
-        return
-    _print_table(_project_table(rows))
 
 @project_app.command("set")
 def project_set(
@@ -87,7 +69,6 @@ def project_set(
         help="Read the notes from a file ('-' for stdin); they fill the preamble's {project} block.",
     ),
     name: str | None = typer.Option(None, "--name"),
-    tags: str | None = typer.Option(None, "--tags", help="Comma-separated tags."),
 ) -> None:
     """Update a project's metadata in the registry.
 
@@ -115,25 +96,8 @@ def project_set(
             deadline=deadline,
             notes=notes,
             name=name,
-            tags=[t.strip() for t in tags.split(",") if t.strip()] if tags is not None else None,
         )
     except KeyError:
         raise _fail(f"no project {slug!r}") from None
     typer.secho(f"updated {project.slug}" + (f" (due {project.deadline})" if project.deadline else ""), fg="green")
 
-
-@project_app.command("remove")
-def project_remove(
-    slug: str,
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
-) -> None:
-    """Unregister a project (its directory is untouched)."""
-    from ..projects import ProjectRegistry
-
-    target = get_home()
-    _confirm(yes, f"unregister project {slug!r}? (its directory is untouched)")
-    _actor_guard(target, "project.remove", target=slug)
-    if ProjectRegistry(target).remove(slug):
-        typer.echo(f"removed {slug}")
-    else:
-        raise _fail(f"no project {slug!r}") from None

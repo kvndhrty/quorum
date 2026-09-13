@@ -151,11 +151,11 @@ def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path, tui)
     tui(home, script)
 
 
-def test_directive_lands_in_the_manager_inbox_without_a_selection(home: Path, tui):
+def test_guidance_lands_in_the_manager_inbox_without_a_selection(home: Path, tui):
     populate(home)
 
     async def script(app, pilot):
-        await pilot.press("m")  # no task selected: directives need none
+        await pilot.press("m")  # no task selected: manager guidance needs none
         box = app.query_one("#nudge", Input)
         assert box.display
         assert "manager" in box.placeholder
@@ -375,20 +375,6 @@ def test_typing_in_the_box_never_fires_the_bindings(home: Path, tui):
     tui(home, script)
 
 
-def test_a_perpetual_task_is_badged_in_the_task_table(home: Path, tui):
-    """`∞` is how "40 runs and counting" reads as working rather than stuck."""
-    store = TaskStore(home)
-    store.add("proj-a", "watch CI", "fake", perpetual=True)
-    store.add("proj-a", "one-off", "fake")
-
-    async def script(app, pilot):
-        table = app.query_one("#tasks", DataTable)
-        statuses = [str(table.get_row_at(i)[2]) for i in range(table.row_count)]
-        assert statuses[0].endswith("∞") and "∞" not in statuses[1]
-
-    tui(home, script)
-
-
 def test_a_merged_pull_request_is_badged_in_the_task_table(home: Path, tui):
     """`✔` distinguishes "done and delivered" from "done and waiting on a
     human" — read off task.json, since the TUI never probes a forge."""
@@ -537,8 +523,8 @@ def test_an_ack_that_cannot_write_notifies_instead_of_crashing(home: Path, tui):
 
 
 def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path, tui):
-    """The attention list is a snapshot: the janitor, a second `board ack` or
-    another `board ack` can archive the line between the render and the keystroke.
+    """The attention list is a snapshot: the janitor, a second dashboard or
+    `board clear --id` can archive the line between the render and the keystroke.
     That failure arrives as the KeyError board resolution raises, not as an
     OSError — and `_write` has to cover it, or the dashboard dies at the very
     keystroke you pressed to tidy up."""

@@ -193,7 +193,12 @@ def test_one_call_announced_twice_counts_once(home: Path):
         pytest.param("quorum has no forge write path", [], id="prose-is-not-a-command"),
         pytest.param("grep -rn quorum src/", [], id="quorum-as-a-search-term"),
         pytest.param("quorum task", [("task (group only)", "task")], id="group-with-no-verb"),
-        pytest.param("quorum web", [("web (removed in #102)", "task")], id="verb-removed-in-102"),
+        pytest.param("quorum web", [("web (removed)", "task")], id="verb-removed-in-102"),
+        pytest.param(
+            "quorum manager tell 'do the thing'",
+            [("manager tell (removed)", "task")],
+            id="two-word-verb-removed-in-128",
+        ),
         pytest.param(
             "quorum --home /elsewhere task list", [("task list", "scratch")], id="another-home"
         ),
@@ -252,8 +257,15 @@ def test_no_trace_list_names_only_real_commands():
 
 
 def test_removed_verbs_are_really_gone():
+    """Every entry of REMOVED must name nothing the CLI still answers to —
+    a one-word entry not even as a group, a two-word one not as a command."""
     paths, groups = tree()
-    assert not (evidence.REMOVED_IN_102 & ({p.split()[0] for p in paths} | groups))
+    roots = {p.split()[0] for p in paths} | groups
+    for entry in evidence.REMOVED:
+        if " " in entry:
+            assert entry not in paths, f"{entry!r} is a real command again"
+        else:
+            assert entry not in roots, f"{entry!r} is a real command again"
 
 
 def test_the_report_renders_against_a_worked_home(worked_home: Path, capsys, monkeypatch):

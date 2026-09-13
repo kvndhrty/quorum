@@ -210,7 +210,6 @@ agent table prints the status word itself.
   before a task's id:
           ▶ running   ⚭ attached to a live session   ✓ done   ✗ blocked   · other
   after its status:
-          ∞ perpetual: never finishes; only you end it (`task add --perpetual`)
           ⇗ may queue tasks of its own (`task add --allow-spawn`)
           ✔ its pull request merged   ⊘ its pull request was closed unmerged.
              Observed by the manager tick, not by this command — no badge
@@ -256,7 +255,7 @@ def status(
     if attention["count"]:
         typer.secho(
             f"⚠ {attention['count']} on #attention in the last {attention['days']}d "
-            "— `quorum board read attention`, then `quorum board ack <id>` "
+            "— `quorum board read attention`, then `quorum board clear --id <id>` "
             "for each one you have handled",
             fg="yellow",
         )

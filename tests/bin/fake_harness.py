@@ -82,7 +82,7 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                        i.e. leave the working tree dirty the way a harness
                        that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
-                             its own task, "tell" sends `manager tell`
+                             its own task, "tell" sends `agent tell manager`
   FAKE_HARNESS_WATCHDOG      seconds an inject-mode harness waits for stdin to
                              close before exiting 7 (default 30): a close bug
                              must fail a test loudly, never wedge CI
@@ -186,7 +186,7 @@ def inject_main(fold: bool = False) -> int:
             return 4
         quorum("task", "nudge", task_id, "switch to the fallback plan")
     elif post == "tell":
-        quorum("manager", "tell", "pause new launches until tests pass")
+        quorum("agent", "tell", "manager", "pause new launches until tests pass")
     print(json.dumps(result), flush=True)
     for line in sys.stdin:
         line = line.strip()

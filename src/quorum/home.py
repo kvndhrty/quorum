@@ -24,9 +24,6 @@ DEFAULT_CONFIG = """\
 [tasks]
 default_harness = ""      # e.g. "claude"
 worktree = true           # each task runs in its own git worktree
-#auto_commit = true       # safety net: commit whatever a run leaves uncommitted
-                          # in its worktree, so a crashed harness loses nothing
-                          # (skipped under [sandbox].use_nono — git is blocked there)
 #max_cost_per_run = 5.0   # budget observation (0 = off): a run that reports
 #max_tokens_per_run = 0   # more spend than this is flagged in the digest and
                           # in `quorum status`. Nothing is killed or refused
@@ -196,7 +193,7 @@ def classify_prompt(existing: str | None, current: str, seeded: str | None) -> s
 
 def classify_prompts(home: Path) -> dict[str, str]:
     """`classify_prompt` for every packaged default — the one read-only view of
-    prompt staleness, shared by `quorum doctor`, `quorum prompt list` and
+    prompt staleness, shared by `quorum doctor`, `quorum init` and
     `_seed_prompts`, so none of them can disagree about what "edited" means.
 
     Adds one state `classify_prompt` cannot see, because it is a property of

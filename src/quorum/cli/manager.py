@@ -1,11 +1,16 @@
-"""`quorum manager`: talk to the manager agent and read what it wrote."""
+"""`quorum manager`: the journal and notebook writes an agent makes about
+itself.
+
+Reading an agent back is `quorum agent log` / `agent list`, and sending it
+guidance is `quorum agent tell`; what is left here is what a run
+writes down — why it did something (`note`) and what the next run needs
+(`remember` / `forget` / `notes`).
+"""
 
 from __future__ import annotations
 
 import typer
 
-from .. import fsio
-from ..actor import journal_path
 from ._common import (
     _AGENT_OPT,
     _actor_guard,
@@ -14,20 +19,8 @@ from ._common import (
     get_home,
     manager_app,
 )
-from .agent import tell_agent
 
 # -- manager ---------------------------------------------------------------
-
-
-@manager_app.command("tell")
-def manager_tell(text: str) -> None:
-    """Send the manager guidance; its next run starts with it in the digest.
-
-    `quorum agent tell manager` with the name spelled for you — one write
-    path, so the manager's guidance is journaled, capped and attributed like
-    any other agent's.
-    """
-    tell_agent("manager", text)
 
 
 @manager_app.command("note")
@@ -87,23 +80,4 @@ def manager_notes(
 ) -> None:
     """Print the notebook exactly as the digest renders it for that agent."""
     for line in _agent_notebook(get_home(), agent).render():
-        typer.echo(line)
-
-
-@manager_app.command("journal")
-def manager_journal(
-    lines: int = typer.Option(20, "-n", "--lines", help="Entries to show."),
-) -> None:
-    """Print the manager's recent action journal (auto-recorded, per-run tagged)."""
-    entries = fsio.read_jsonl_tail(journal_path(get_home()), limit=lines)
-    if not entries:
-        typer.echo("no manager actions recorded yet")
-        return
-    for e in entries:
-        run = e.get("run", "")
-        line = f"[{e.get('at', '')}] ({e.get('actor', '?')}{'/' + run[-6:].lower() if run else ''}) {e.get('action', '')}"
-        if e.get("target"):
-            line += f" -> {e['target']}"
-        if e.get("args"):
-            line += f"  {e['args']}"
         typer.echo(line)

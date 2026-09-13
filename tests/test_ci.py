@@ -100,7 +100,9 @@ def test_every_gh_disappointment_degrades_to_none(
 def test_a_hung_gh_is_bounded_by_the_timeout(
     home: Path, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n")
+    from quorum import forge
+
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)  # the bound, since #128
     install_gh(path_without_gh, monkeypatch, mode="hang")
     assert ci.pr_state(home, make_task(home, make_repo(tmp_path))) is None
 
@@ -454,9 +456,9 @@ def test_a_live_task_still_records_a_merge_it_sees(
     home: Path, clock, tmp_path: Path, path_without_gh: Path, monkeypatch
 ):
     """The narrowing is about `open`, not about live tasks. A PR can land
-    while its task is still working, and a perpetual task never reaches a
-    terminal status at all — so a merge dropped here would be one the views
-    could badge only if the task happened to finish."""
+    while its task is still working, and a task whose harness never reports a
+    terminal status never finishes at all — so a merge dropped here would be
+    one the views could badge only if the task happened to finish."""
     from quorum import views
 
     install_gh(path_without_gh, monkeypatch, pr=merged_pr())

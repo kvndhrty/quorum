@@ -300,12 +300,20 @@ def test_gh_check_reads_an_offline_gh_as_unknown_not_broken(
     home: Path, path_without_gh: Path, monkeypatch
 ):
     """A laptop on a plane is not a misconfigured home: gh that never
-    answered says nothing about auth, so it is a `–` and exits 0."""
-    (home / "config.toml").write_text("[ci]\ntimeout_seconds = 0.5\n", encoding="utf-8")
+    answered says nothing about auth, so it is a `–` and exits 0.
+
+    The bound is `forge.TIMEOUT_SECONDS`, a module constant since #128 took
+    `[ci].timeout_seconds` away — so the line must name the bound quorum
+    actually applies rather than a key nothing reads any more."""
+    from quorum import forge
+
+    monkeypatch.setattr(forge, "TIMEOUT_SECONDS", 0.5)
     install_gh(path_without_gh, monkeypatch, mode="hang")
-    check = doctor.check_gh(home, Config(ci=CIConfig(timeout_seconds=0.5)))
+    check = doctor.check_gh(home, Config())
     assert check.status == NA
     assert "unknown" in check.summary
+    assert "0.5s" in check.summary
+    assert "timeout_seconds" not in check.summary + check.fix
 
 
 @pytest.mark.parametrize(
@@ -435,7 +443,7 @@ def test_prompts_check_lists_a_local_overlay_without_judging_it(home: Path):
 
 
 def test_prompts_check_agrees_with_home_classification(home: Path):
-    """Doctor and `quorum init`/`prompt list` must never disagree about what
+    """Doctor and `quorum init` must never disagree about what
     'edited' means — same function, so they cannot."""
     (home / "prompts" / "manager.md").write_text("mine\n", encoding="utf-8")
     states = home_mod.classify_prompts(home)
@@ -446,7 +454,7 @@ def test_prompts_check_agrees_with_home_classification(home: Path):
 def test_prompts_check_reports_a_prompt_it_cannot_read(home: Path):
     """A prompt file quorum cannot decode is neither missing nor an edit, and
     reading it must not raise inside the classifier: doctor exists to name
-    such a file, and `quorum prompt list` marks it from the same states."""
+    such a file, and doctor marks it from the same states."""
     (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
     assert home_mod.classify_prompts(home)["manager.md"] == "unreadable"
     check = find(doctor.check_prompts(home), "prompts.manager")
@@ -694,7 +702,7 @@ def test_smoke_kills_the_whole_process_tree_not_just_the_wrapper(home: Path, tmp
 
 def test_smoke_never_points_the_harness_at_the_real_home(home: Path, tmp_path: Path):
     """The child inherits the environment, and a harness with quorum's own
-    integration hooks installed runs `quorum task hook-session-start` on
+    integration hooks installed runs `quorum task hook session-start` on
     startup. It must land in a throwaway home, never the live one."""
     seen = tmp_path / "seen-home"
     reporter = tmp_path / "reporter.py"
@@ -819,44 +827,42 @@ def test_doctor_command_says_so_when_a_broken_config_skips_the_smoke(home: Path)
     assert "smoke skipped" in result.output
 
 
-def test_doctor_command_emits_json(home: Path):
+def test_doctor_command_prints_the_home_and_every_check(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-    payload = json.loads(result.output)
-    assert payload["home"] == str(home)
-    assert payload["problems"] == 0
-    assert {"name", "status", "summary", "fix"} == set(payload["checks"][0])
-    assert any(c["name"] == "harness.fake.binary" for c in payload["checks"])
+    assert f"home: {home}" in result.output
+    assert "all checks passed" in result.output
+    # one line per check, each with its glyph — the only rendering there is
+    for check in doctor.run_checks(home):
+        assert f"{check.glyph} {check.summary}" in result.output
 
 
 def test_doctor_command_runs_the_smoke_probe_on_request(home: Path):
     configure(home, mode="inject", inject="stream-json")
-    result = runner.invoke(
-        app, ["doctor", "--json", "--smoke", "--smoke-timeout", "30"]
-    )
-    payload = json.loads(result.output)
-    smoke = {c["name"]: c["status"] for c in payload["checks"] if c["name"].startswith("smoke.")}
+    result = runner.invoke(app, ["doctor", "--smoke", "--smoke-timeout", "30"])
+    checks = doctor.run_checks(home, smoke="", smoke_timeout=30)
+    smoke = {c.name: c.status for c in checks if c.name.startswith("smoke.")}
     assert smoke == {
         "smoke.fake.run": OK,
         "smoke.fake.result": OK,
         "smoke.fake.session": OK,
     }
     assert result.exit_code == 0
+    assert "reported session id sess-fake-123" in result.output  # the probe really ran
 
 
 def test_doctor_command_takes_a_named_harness_for_the_smoke_run(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json", "--smoke", "ghost"])
-    payload = json.loads(result.output)
-    assert any(c["name"] == "smoke.ghost" for c in payload["checks"])
+    result = runner.invoke(app, ["doctor", "--smoke", "ghost"])
+    assert "ghost" in result.output
     assert result.exit_code == 1
 
 
 def test_doctor_command_skips_the_probe_by_default(home: Path):
     configure(home)
-    result = runner.invoke(app, ["doctor", "--json"])
-    assert not [c for c in json.loads(result.output)["checks"] if c["name"].startswith("smoke")]
+    assert not [c for c in doctor.run_checks(home) if c.name.startswith("smoke")]
+    assert "reported session id" not in runner.invoke(app, ["doctor"]).output
 
 
 def test_status_points_at_doctor_when_an_agent_is_failing(home: Path):
@@ -892,11 +898,8 @@ def test_doctor_command_ends_with_the_surfaces_line(home: Path):
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "– surfaces: " in result.output
-    payload = json.loads(
-        runner.invoke(app, ["doctor", "--json"]).output
-    )
-    assert payload["checks"][-1]["name"] == "surfaces"
-    assert payload["checks"][-1]["status"] == NA
+    checks = doctor.run_checks(home)
+    assert checks[-1].name == "surfaces" and checks[-1].status == NA
 
 
 def test_doctor_skips_the_surfaces_line_when_the_config_is_unreadable(home: Path):

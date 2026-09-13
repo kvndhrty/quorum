@@ -43,7 +43,7 @@ A few things that are easy to miss:
   the manager launches. `quorum task run <id> --detach` starts one yourself.
 - **Steering is mid-flight.** `quorum task nudge <id> "..."` reaches a running
   task on this harness (`inject = "stream-json"`), and
-  `quorum manager tell "..."` reaches the manager at its next tick — the house
+  `quorum agent tell manager "..."` reaches the manager at its next tick — the house
   rule about launch order names a user directive as its one exception.
 - **The board is where it asks for help.** `quorum board read attention`, or
   uncomment `[notify]` in config.toml and let it find you.

@@ -344,10 +344,11 @@ class MessageBus:
 
     # -- on-demand archival ----------------------------------------------
     #
-    # The janitor's per-message path, exposed for `quorum board ack`,
-    # `quorum board clear` and `quorum task inbox --clear`. Same destination
-    # file, same "archive, never delete" rule: an acked or cleared message
-    # keeps its created_at in messages/archive/, it just stops being live.
+    # The janitor's per-message path, exposed for `quorum board clear` (a
+    # whole topic, or one message with --id) and `quorum task inbox --clear`.
+    # Same destination file, same "archive, never delete" rule: a cleared
+    # message keeps its created_at in messages/archive/, it just stops being
+    # live.
 
     def archive_board_message(self, path: Path) -> Message | None:
         """Archive one board message file and remove it from its topic.
@@ -395,12 +396,12 @@ class MessageBus:
 
     def ack_board_message(self, handle: str, topic: str | None = None) -> Message:
         """Archive the one board message `handle` names — the per-message half
-        of `archive_topic`, and what `quorum board ack` and both dashboards
-        call.
+        of `archive_topic`, and what `quorum board clear --id` and the TUI's
+        `a` call.
 
-        Ack is *archival*, not a flag on the message: the board still carries
-        no read-state, so acking only ever means "this one stops being live",
-        and every reader keeps coexisting without coordination.
+        Acking is *archival*, not a flag on the message: the board still
+        carries no read-state, so it only ever means "this one stops being
+        live", and every reader keeps coexisting without coordination.
         """
         msg, path = self.resolve_board_message(handle, topic)
         return self.archive_board_message(path) or msg

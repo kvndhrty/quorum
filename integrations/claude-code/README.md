@@ -46,10 +46,10 @@ and add the hooks to `~/.claude/settings.json`:
 {
   "hooks": {
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "quorum task hook-stop" }] }
+      { "hooks": [{ "type": "command", "command": "quorum task hook stop" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "quorum task hook-session-end" }] }
+      { "hooks": [{ "type": "command", "command": "quorum task hook session-end" }] }
     ]
   }
 }
@@ -63,7 +63,7 @@ read stdin, find no matching attached task, and exit 0 silently.
 - `/quorum:adopt` runs `quorum task adopt --session $CLAUDE_SESSION_ID`,
   which creates an attached task pointing at the session's own directory
   (no worktree, no quorum-spawned runs — the runner refuses attached tasks).
-- Every Stop, `quorum task hook-stop` refreshes the task's liveness record
+- Every Stop, `quorum task hook stop` refreshes the task's liveness record
   (`tasks/<id>/attached.json`) and claims any pending guidance from the
   task's inbox; if there is any, it emits `{"decision": "block", "reason":
   …}` so the session continues with the guidance. Delivery consumes the

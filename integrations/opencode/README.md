@@ -10,7 +10,7 @@ Unlike Claude Code and Codex, opencode has no hook-command protocol; its
 extension surface is an in-process JS plugin with an event bus and an SDK
 client. The shipped plugin is a dumb pipe: every decision lives in the same
 quorum CLI entry points the other harnesses use (`task adopt`,
-`task hook-stop --format text`, `task hook-session-end`) — the plugin only
+`task hook stop --format text`, `task hook session-end`) — the plugin only
 translates events and injects what the CLI prints. Requires the `quorum`
 CLI on PATH and an initialized home (`quorum init`); if you use a
 non-default `QUORUM_HOME`, export it in the shell you launch `opencode`
@@ -54,7 +54,7 @@ working-directory match.)
 ## How it works
 
 - On every `session.status` **idle** event (the "agent finished a turn"
-  signal), the plugin calls `quorum task hook-stop --format text` with the
+  signal), the plugin calls `quorum task hook stop --format text` with the
   session id and directory. That refreshes the task's liveness record
   (`tasks/<id>/attached.json`) and claims pending guidance from the task's
   inbox; whatever the CLI prints, the plugin injects as a new user turn via

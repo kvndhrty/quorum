@@ -12,10 +12,10 @@ def registry(home: Path) -> ProjectRegistry:
     return ProjectRegistry(home)
 
 
-def test_add_list_update_remove(registry: ProjectRegistry, tmp_path: Path):
+def test_add_list_and_update(registry: ProjectRegistry, tmp_path: Path):
     pdir = tmp_path / "NeurIPS Rebuttal"
     pdir.mkdir()
-    p = registry.add(pdir, deadline="2026-09-01", tags=["ml"])
+    p = registry.add(pdir, deadline="2026-09-01")
     assert p.slug == "neurips-rebuttal"
     assert registry.get("neurips-rebuttal").deadline == "2026-09-01"
 
@@ -26,7 +26,9 @@ def test_add_list_update_remove(registry: ProjectRegistry, tmp_path: Path):
     got = registry.get("neurips-rebuttal")
     assert got.deadline == "2026-09-15" and got.notes == "pushed back"
 
-    assert registry.remove("neurips-rebuttal")
+    # Unregistering is deleting the file: the registry has no remove path,
+    # because one JSON file per project is the whole record (invariant 2).
+    (registry.dir / "neurips-rebuttal.json").unlink()
     assert registry.get("neurips-rebuttal") is None
 
 
@@ -39,10 +41,10 @@ def test_marker_merges_over_registry(registry: ProjectRegistry, tmp_path: Path):
     pdir = tmp_path / "paper"
     pdir.mkdir()
     registry.add(pdir, deadline="2026-09-01")
-    (pdir / ".quorum.toml").write_text('deadline = "2026-10-01"\ntags = ["synced"]\n')
+    (pdir / ".quorum.toml").write_text('deadline = "2026-10-01"\nnotes = "synced"\n')
     got = registry.get("paper")
     assert got.deadline == "2026-10-01"
-    assert got.tags == ["synced"]
+    assert got.notes == "synced"
     # registry file itself is untouched (canonical record preserved)
     import json
 
@@ -54,14 +56,14 @@ def test_marker_garbage_ignored(registry: ProjectRegistry, tmp_path: Path):
     pdir = tmp_path / "p2"
     pdir.mkdir()
     registry.add(pdir, deadline="2026-09-01")
-    (pdir / ".quorum.toml").write_text('deadline = "whenever"\ntags = "not-a-list"\n')
+    (pdir / ".quorum.toml").write_text('deadline = "whenever"\nnotes = "kept"\n')
     got = registry.get("p2")
-    assert got.deadline == "2026-09-01" and got.tags == []
+    assert got.deadline == "2026-09-01" and got.notes == "kept"
 
 
 def test_write_marker(registry: ProjectRegistry, tmp_path: Path):
     pdir = tmp_path / "p3"
     pdir.mkdir()
-    registry.add(pdir, deadline="2026-12-01", tags=["a", "b"], write_marker=True)
+    registry.add(pdir, deadline="2026-12-01", notes="house style", write_marker=True)
     text = (pdir / ".quorum.toml").read_text()
-    assert 'deadline = "2026-12-01"' in text and '"a", "b"' in text
+    assert 'deadline = "2026-12-01"' in text and "house style" in text

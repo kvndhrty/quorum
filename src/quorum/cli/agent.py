@@ -111,6 +111,9 @@ def _run_tail(
     if follow:
         _follow(path, render, len(entries))
 
+#: What `--actions` shows without an explicit `-n`.
+DEFAULT_JOURNAL_LINES = 20
+
 # -- agents ----------------------------------------------------------------
 
 
@@ -176,10 +179,9 @@ def agent_run_once(
 ) -> None:
     """Construct an agent and run a single tick in this process.
 
-    Use this when the supervisor is stopped, or when you want the tick's
-    output and its failure in front of you. `quorum agent run-now` is the
-    other one: it asks a *running* supervisor to tick the agent on its own
-    schedule thread.
+    Runs whether or not the supervisor is up, with the tick's output and its
+    failure in front of you. It takes the same per-agent tick lock the
+    supervisor takes, so it can never interleave with a scheduled tick.
     """
     from ..agent import AgentContext, success_heartbeat_fields, tick_lock_path, write_heartbeat
     from ..registry import AgentResolutionError, resolve
@@ -236,6 +238,10 @@ def agent_log(
     name: str,
     last: int = _LAST_OPT,
     run: str | None = _RUN_OPT,
+    actions: bool = typer.Option(
+        False, "--actions",
+        help="Print only the agent's action journal, across runs (`-n` bounds it).",
+    ),
     lines: int = _LINES_OPT,
     follow: bool = _FOLLOW_OPT,
     verbose: bool = _VERBOSE_OPT,
@@ -250,7 +256,17 @@ def agent_log(
     id). A tick happening right now has no usage-log line yet, so `-f` follows
     the transcript file as it is written and `-n 40` prints its last forty
     entries; neither can be combined with --last or --run.
+
+    `--actions` drops to the journal alone — every mutating CLI call the
+    agent made, run by run, with what became of each target. That is the
+    "what it did" section of a run, read across all of them.
     """
+    if actions:
+        if run or follow or raw:
+            raise _fail("--actions reads the journal; drop --run/-f/--raw")
+        _check_agent_name(name)
+        _echo(transcript_mod.render_journal(get_home(), name, lines or DEFAULT_JOURNAL_LINES))
+        return
     if lines or follow:
         if run:
             raise _fail("--run reads a finished run; -n/-f follow the transcript itself")
@@ -321,14 +337,14 @@ def _agent_command(name: str, command: str, note: str) -> None:
 
 
 def tell_agent(name: str, text: str) -> None:
-    """Queue guidance in an agent's inbox — the one write path behind both
-    `quorum agent tell` and `quorum manager tell`.
+    """Queue guidance in an agent's inbox — the one write path behind
+    `quorum agent tell`.
 
     The recipient claims its inbox at the start of its next tick and renders
     what it finds into its prompt: a prompt agent's `{directives}`
     placeholder, the manager's digest. An agent that is not configured is
-    refused here for the same reason `agent pause` refuses one — guidance
-    queued for an agent nothing schedules is never read.
+    refused here, because guidance queued for an agent nothing schedules is
+    never read.
 
     The sender is `current_actor()`, not `"user"`: a notebook may only be
     written by its own agent, but guidance may come from anyone — a person,
@@ -350,35 +366,24 @@ def agent_tell(name: str, text: str) -> None:
     """Send an agent guidance; its next run starts with it.
 
     Guidance is read once and then consumed; `quorum manager remember --agent
-    <name>` writes the kind that stays. `quorum manager tell` is this command
-    with the name fixed to the manager.
+    <name>` writes the kind that stays. The manager is an agent like any
+    other: `quorum agent tell manager "..."`.
 
     Example: quorum agent tell standup "skip the retro section today"
     """
     tell_agent(name, text)
 
 
-@agent_app.command("pause")
-def agent_pause(name: str) -> None:
-    """Pause an agent's schedule (applied by a running supervisor within seconds)."""
-    _agent_command(name, "pause", f"pause queued for {name} — takes effect while `quorum up` is running")
-
-
 @agent_app.command("resume")
 def agent_resume(name: str) -> None:
-    """Resume a paused agent (also clears the auto-pause failure counter)."""
-    _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
+    """Resume an auto-paused agent (also clears its failure counter).
 
-
-@agent_app.command("run-now")
-def agent_run_now(name: str) -> None:
-    """Ask the running supervisor to tick an agent immediately.
-
-    This is a message to `quorum up`, so it needs the supervisor running and
-    returns before the tick does. With the supervisor stopped, or to watch
-    the tick happen, use `quorum agent run-once`.
+    The supervisor pauses an agent after repeated failures, and that pause is
+    durable — it lands in the heartbeat and survives a restart, so this is
+    the only way to clear it. To stop scheduling an agent on purpose, set
+    `enabled = false` in agents/<name>.toml and `quorum agent reload` it.
     """
-    _agent_command(name, "run-now", f"run-now queued for {name} — takes effect while `quorum up` is running")
+    _agent_command(name, "resume", f"resume queued for {name} — takes effect while `quorum up` is running")
 
 
 def _prompt_exists(home: Path, name: str) -> bool:

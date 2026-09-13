@@ -67,7 +67,7 @@ project if it isn't one.
 
 ## How it works
 
-- Every **Stop**, `quorum task hook-stop` refreshes the task's liveness
+- Every **Stop**, `quorum task hook stop` refreshes the task's liveness
   record (`tasks/<id>/attached.json`) and claims any pending guidance from
   the task's inbox; if there is any, it emits `{"decision": "block",
   "reason": …}` and Codex continues with the guidance as a new user prompt.

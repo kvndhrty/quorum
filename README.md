@@ -36,7 +36,8 @@ quorum tui                              # the same, live
 ```
 
 From there: `quorum task log <id> -f` follows a run, `quorum task nudge <id>
-"..."` steers one, and `quorum manager tell "..."` steers the manager.
+"..."` steers one, and `quorum agent tell manager "..."` steers the
+manager.
 
 For a home that is already working rather than a scaffold to fill in, copy
 [examples/dogfood-home/](https://github.com/kvndhrty/quorum/tree/main/examples/dogfood-home) —
@@ -65,7 +66,7 @@ only in hosted products, where the inputs and the decisions stay in someone
 else's cloud. Here every input and decision is a file you can open: the task
 records the digest is computed from, the policy that reads it
 (`~/.quorum/prompts/manager.md`), and the journal of what it did and why
-(`quorum manager journal`).
+(`quorum agent log manager --actions`).
 
 ## Documentation
 

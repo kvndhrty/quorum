@@ -64,11 +64,11 @@ A project is a directory, usually a git repo. Tasks run against projects.
 
 ```bash
 quorum project add ~/work/my-api
-quorum project list
 ```
 
 The slug is a slugified form of the directory name, or of `--name` when you
-pass one.
+pass one; `quorum status` lists what is registered. Each project is one file,
+`projects/<slug>.json`, so unregistering one is deleting that file.
 
 ### 3. Queue a task
 
@@ -162,7 +162,7 @@ detail on one of those four.
 
 ## Watching
 
-Six commands answer "what is happening", and all of them are pure readers of
+Five commands answer "what is happening", and all of them are pure readers of
 `~/.quorum` — they work with the supervisor stopped, over SSH, and never hold
 a lock.
 
@@ -171,7 +171,7 @@ quorum status                 # supervisor, agents, tasks, projects
 quorum task list              # every task, one line each
 quorum task show a3f2k9       # one task in full (--json for the same rows plus the record)
 quorum task log a3f2k9        # one run, rendered readably (-f follows a live one)
-quorum task history a3f2k9    # one task's whole life, oldest first
+quorum task show a3f2k9 --history   # one task's whole life, oldest first
 quorum tui                    # all of it, live, in the terminal
 ```
 
@@ -195,12 +195,12 @@ unfolds everything it folded (reasoning, full arguments, full results), and
 not recognize prints as its raw line rather than disappearing, so a harness it
 has never seen is still readable, just less pretty.
 
-**`task history`** answers "what happened to this task" from every file that
+**`task show --history`** answers "what happened to this task" from every file that
 records part of it — the task record, its reports, its guidance, the manager's
 journal:
 
 ```
-$ quorum task history a3f2k9
+$ quorum task show a3f2k9 --history
 task a3f2k9  (01M1…A3F2K9)  9 event(s), oldest first
 [2026-09-03 09:00:12] queued on my-api · harness claude · from #62
 [2026-09-03 09:00:40] manager: task.run — a3f2k9 (status then queued)
@@ -214,9 +214,8 @@ task a3f2k9  (01M1…A3F2K9)  9 event(s), oldest first
 ```
 
 Guidance is stamped when it was *sent*, since delivery writes no time of its
-own; one the task has not consumed yet says `(waiting)`. `--json` gives the
-same rows with their raw fields. The list still answers for a task you have
-archived with `task prune`.
+own; one the task has not consumed yet says `(waiting)`. The list still
+answers for a task you have archived with `task prune`.
 
 **`quorum tui`** is the live dashboard: tasks on top, agents and projects
 below, a detail pane at the bottom. Arrow to a task and press `enter` for its
@@ -314,7 +313,7 @@ first 80 characters of it, which is all the journal keeps. An escalation is
 matched to its post by text, since the journal line is written before the
 message exists, so a post whose text you have edited since reads as
 `no matching post`. `acked` means the message has left the board — which
-`board ack` does, and so does the janitor's retention sweep, so over a long
+`board clear --id` does, and so does the janitor's retention sweep, so over a long
 window an escalation nobody saw can read as acked. And the journal is read as
 a bounded tail: the last line says how far back that reaches, and says so
 explicitly when the file is larger than the window read.
@@ -342,11 +341,12 @@ start of its next tick. Its prompt is told to follow your guidance above
 everything else.
 
 ```bash
-quorum manager tell "prioritize the api task; park the docs work"
+quorum agent tell manager "prioritize the api task; park the docs work"
 ```
 
-Any other agent takes guidance the same way — `quorum agent tell <name>
-"..."`, read at the start of its next tick ([Agents](#agents)).
+Every other agent takes guidance the same way — `quorum agent tell <name>
+"..."`, read at the start of its next tick ([Agents](#agents)). The manager
+is an agent like any other; there is no separate command for it.
 
 **Standing notes** are the third channel, and the difference matters:
 guidance is read once and consumed, a note stays until it expires or someone
@@ -365,7 +365,7 @@ quorum task run a3f2k9 --detach       # launch or relaunch it yourself
 quorum task stop a3f2k9               # end the RUN, keep the task
 quorum task cancel a3f2k9             # end the TASK (--kill also stops a live run)
 quorum board read attention           # what the manager escalated to you
-quorum board ack 7c1af2               # say you have handled one escalation
+quorum board clear --id 7c1af2        # say you have handled one escalation
 ```
 
 `quorum status` and the TUI show a banner while anything posted to the
@@ -373,10 +373,10 @@ quorum board ack 7c1af2               # say you have handled one escalation
 
 ```
 ⚠ 1 on #attention in the last 7d — `quorum board read attention`, then
-`quorum board ack <id>` for each one you have handled
+`quorum board clear --id <id>` for each one you have handled
 ```
 
-The board has no read-state, so `board ack` is what makes an escalation leave
+The board has no read-state, so `board clear --id` is what makes an escalation leave
 the banner. It archives the message rather than flagging it, so the history
 still says what was escalated when. Message ids resolve like task ids — a full
 id, a unique prefix, or the short suffix `board read` prints.
@@ -420,7 +420,6 @@ this guide all use.
   it, written with `task report --handoff`.
 - **dependency** — a task listed with `task add --after <id>`, which must
   finish before this one starts.
-- **perpetual task** — one queued with `--perpetual`, not meant to finish.
 - **spawned task** — a task created by another task's run (`task add` from
   inside a task queued with `--allow-spawn`). It records its **parent**: the
   full id of the task whose run created it. An ordinary queued task in every
@@ -432,18 +431,17 @@ this guide all use.
 - **notebook** — an agent's or a task's standing memory. Written with
   `remember`, retired with `forget`; its entries are **notes**.
 - **guidance** — a message steering one recipient, read once and then
-  consumed. Sent to a task with `quorum task nudge`, to any agent with
-  `quorum agent tell <name>`, and to the manager with `quorum manager tell`
-  (the same command with the name spelled for you).
+  consumed. Sent to a task with `quorum task nudge`, to any agent — the
+  manager included — with `quorum agent tell <name>`.
 - **message** — the one record type on both channels. It lands either on a
   **board topic** (append-only, public, any number of readers) or in a
   recipient's **inbox** (claimed by exactly one reader).
 - **escalation** — a message the manager posts on the `attention` topic to ask
   a person for something. It sits in the banner for seven days or until
   archived.
-- **archive** — quorum never deletes a record. `board ack` archives one
-  message, `board clear` a topic, `task inbox --clear` waiting guidance, and
-  `task prune` a whole task directory.
+- **archive** — quorum never deletes a record. `board clear --id` archives one
+  message, `board clear <topic>` a topic, `task inbox --clear` waiting
+  guidance, and `task prune` a whole task directory.
 - **agent** — anything quorum runs on a schedule. Three kinds: the **manager**
   (built in, supervises tasks), a **prompt agent** (a prompt file plus a
   schedule, created with `quorum agent create`), and a **plugin agent** (a
@@ -454,8 +452,8 @@ this guide all use.
 - **digest** — the situation summary a manager tick is built from. Each tick's
   digest is kept on disk so `agent log` can show what it saw.
 - **journal** — what an agent did, recorded by quorum as each command executes
-  rather than reported by the model. `quorum manager journal` prints it, and
-  the recent entries go back into the next digest.
+  rather than reported by the model. `quorum agent log <name> --actions`
+  prints it, and the recent entries go back into the next digest.
 - **intervention** — something an agent did about a task, or asked a person
   for: a nudge, a launch (or relaunch), a stop, or an escalation.
   `quorum agent interventions <name>` lists them from the journal with what
@@ -669,24 +667,6 @@ whose working directory holds uncommitted changes or unpushed commits
 task in that state `STRANDED-WORK`, which the default manager prompt answers
 by relaunching it with guidance to commit and push.
 
-**Auto-commit** is the safety net under that protocol, for a harness that
-crashes mid-edit or ignores its instructions:
-
-```toml
-[tasks]
-auto_commit = true
-```
-
-The runner then commits whatever a run left uncommitted onto the task branch,
-so it can be reviewed or reset later instead of vanishing with the worktree.
-It never pushes, never touches a `--no-worktree` task, leaves a task alone
-once its harness reported `done`, and declines a detached HEAD or a
-half-finished merge rather than commit something misleading — the tree then
-stays dirty and flagged as stranded. Each rescue, and each failure, is noted
-in the transcript and on the run's record. Under `[sandbox].use_nono = true`
-the sandboxed runner cannot run git at all after the harness exits, so the net
-skips with a note; rely on the stranded-work flag there.
-
 **Finishing and undoing.** A task that opens a PR reports the URL, which shows
 up in every view. `quorum task cancel <id>` ends the manager's attention
 (`--kill` also stops a live run, and asks first on an interactive shell —
@@ -796,37 +776,6 @@ run the manager relaunches. It counts *silence, not progress*, so set it well
 above the longest quiet stretch a healthy run has — a full test suite, a cold
 build, a long provider turn. It is off by default for that reason.
 
-### Perpetual tasks
-
-Some jobs never finish: watch CI and fix what breaks, keep the changelog
-current, groom the backlog. Queue those with `--perpetual`:
-
-```bash
-quorum task add my-api "watch CI on open PRs; fix what breaks, one at a time" --perpetual
-```
-
-Nothing about the machinery changes — it is still a task, still runs in a
-worktree, still reports free-form statuses. What changes is how three things
-read it. Its prompt gains a block (`prompts/task-perpetual.md`, yours to edit)
-telling it to work in **cycles**, commit and push at the end of *each* cycle
-rather than "before finishing", report a changing word per cycle (`cycle-4`,
-`idle`) so an unchanging one still means something, and never report `done`.
-The manager relaunches it whenever its run dies, and its prompt tells it never
-to read a long run count or a cycling status as stuck, and never to cancel it.
-And quorum withholds the `possible-loop` observation for it, since repetition
-is the job. Every view badges it `∞`.
-
-You end it, with `quorum task cancel <id>`. Three things to expect:
-
-- **it reuses one working directory and one session forever**, so the
-  harness's context grows every cycle. When that starts to bite, clear
-  `"session"` in `~/.quorum/tasks/<id>/task.json` and the next run starts
-  fresh in the same directory, keeping the work;
-- **the manager's schedule is the floor on cycle latency**, since nothing else
-  relaunches it — tighten the schedule if you need a tighter loop;
-- **it keeps the manager awake**, because a home with a perpetual task is
-  never idle, so expect one manager run per tick for as long as it lives.
-
 ### Dependencies and handoffs
 
 Some work only makes sense once other work has landed. `--after` says so:
@@ -843,8 +792,7 @@ quorum task add my-api "review the rate-limiting PR and fix what you find" \
 
 `--after` is repeatable and takes the same short ids as everything else; ids
 are global, so a task in one project may wait on a task in another. An unknown
-id fails the command — nothing is queued — and so does `--after` a
-[perpetual task](#perpetual-tasks), which never finishes.
+id fails the command — nothing is queued.
 
 While a dependency has not reached a terminal status, the dependent shows
 `waiting-on a3f2k9` in every view, the manager's digest marks the same thing
@@ -1099,7 +1047,7 @@ run is alive, how long it has been quiet, its recent reports and the tail of
 its output — then its own recent actions with their observed outcomes ("you
 nudged a3f2k9 at 14:02; status UNCHANGED since", recorded by quorum as the
 commands ran, so it never loops on an intervention that is not working), what
-its own runs have cost, and your guidance from `quorum manager tell`.
+its own runs have cost, and your guidance from `quorum agent tell manager`.
 
 A task's line carries whichever of these marks apply:
 
@@ -1112,7 +1060,7 @@ A task's line carries whichever of these marks apply:
 | `STRANDED-WORK` | a finished task never delivered its work |
 | `STALLED` | a live run has printed nothing for a long time; `stopped=` and `fresh_sessions=` say what has already been tried |
 | `BUDGET-EXCEEDED` | a run went past a budget you set, `(next run gated)` when it was the last one |
-| `perpetual=true`, `waiting-on=`, `DEP-FAILED`, `DEP-MISSING`, `handoff=true` | the marks the sections above describe |
+| `waiting-on=`, `DEP-FAILED`, `DEP-MISSING`, `handoff=true` | the marks the sections above describe |
 
 Every one of those is an observation. Nothing in quorum acts on one — a task
 ends at the harness's word, and no status is ever changed because a PR merged.
@@ -1132,8 +1080,8 @@ The manager acts through the same CLI you use — launching tasks, nudging them,
 cancelling them, queueing follow-up work — and every action is journaled:
 
 ```bash
-quorum manager tell "prioritize the api task; park the docs work"
-quorum manager journal                    # everything it has done, and why
+quorum agent tell manager "prioritize the api task; park the docs work"
+quorum agent log manager --actions        # everything it has done, and why
 quorum agent log manager                  # one tick end to end
 quorum agent show manager                 # schedule, last run, spend, notebook
 quorum manager notes                      # its notebook
@@ -1233,8 +1181,7 @@ updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 ### Prompts and overlays
 
 Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
-policy (`manager.md`), the task preamble (`task-preamble.md`), the perpetual
-block (`task-perpetual.md`), the spawn block (`task-spawn.md`), and one per
+policy (`manager.md`), the task preamble (`task-preamble.md`), and one per
 prompt agent. `quorum init` seeds
 them, and deleting one restores the packaged default. Re-run `quorum init`
 after upgrading quorum: a prompt you never edited is refreshed to the new
@@ -1261,7 +1208,7 @@ The difference between layers 2 and 3 is the one that matters:
   above the general guidance; `task-preamble.md` puts it after the delivery
   protocol. A template with no slot, one you rewrote yourself, gets the
   overlay prepended instead. An absent, empty or unreadable overlay renders as
-  nothing, and a bad one never breaks a run — `quorum prompt list` flags it.
+  nothing, and a bad one never breaks a run — `quorum doctor` flags it.
 - **Editing `<name>.md` still wins outright**, but an edited file is *yours*
   from then on: `quorum init` will never upgrade it, so every later
   improvement to the packaged default stops reaching this home. Init says so,
@@ -1270,23 +1217,13 @@ The difference between layers 2 and 3 is the one that matters:
 House rules ("run one task at a time", "always open draft PRs") belong in an
 overlay. Rewriting how supervision fundamentally works belongs in the file.
 
-```bash
-quorum prompt list                # each template's state, and its overlay
-quorum prompt diff manager        # your copy vs the packaged default
-```
+`quorum doctor` prints one line per template — packaged default, seeded,
+edited, or unreadable — plus a line per overlay saying where it lands, and
+`quorum prompt diff manager` shows your copy against the packaged default.
 
-`prompt list` names one of three states per template, the same three
-`quorum doctor` reports — both ask the seed record, so they cannot disagree:
-
-```
-  manager          seeded, matches the packaged default
-  task-perpetual   seeded by an older quorum, never edited — `quorum init` upgrades it
-  task-preamble    edited — `quorum prompt diff task-preamble` vs the packaged default
-```
-
-Only the third one is yours to deal with. The second is what a home looks like
-after upgrading quorum but not re-running `quorum init`, and one `quorum init`
-clears it.
+A template doctor calls "seeded by an older quorum, never edited" is what a
+home looks like after upgrading quorum but not re-running `quorum init`, and
+one `quorum init` clears it. An "edited" one is yours to deal with.
 
 **Migrating a home that already edited a prompt** — one step, and worth doing,
 because an edited `manager.md` from a few releases ago has no policy for
@@ -1318,14 +1255,12 @@ repo. Quorum only *reads* that file. Neither source is required: with nothing
 to say, the slot leaves no trace in the prompt. A file quorum cannot read is
 dropped rather than failing the run, exactly like a home overlay. And the
 block needs the `{project}` slot: if you rewrote `task-preamble.md` before
-this existed, it has nowhere to go. `quorum prompt list` reports both — it
-names every project that contributes an overlay and warns when your preamble
-has no slot for them:
+this existed, it has nowhere to go. `quorum doctor` reports both — it names
+every project that contributes an overlay and marks a preamble with no slot
+for them as a problem:
 
 ```
-  task-preamble    seeded, matches the packaged default
-  per-project overlay in task-preamble ({project} slot):
-    api            notes (registry) + .quorum/task-preamble.local.md
+  – api fills task-preamble's {project} slot: notes (registry) + .quorum/task-preamble.local.md
 ```
 
 ### Adopting a live session
@@ -1341,8 +1276,8 @@ quorum task adopt "refactoring the auth flow"    # from the session's directory
 Or do it from inside the session itself, with the shipped adapter for your
 harness. Install one with `quorum integration install <harness>` (codex and
 opencode; `claude-code` goes through Claude's plugin manager, and the command
-prints the exact invocation). `quorum integration list` shows what is bundled
-and what is installed; each `integrations/<harness>/README.md` has the details
+prints the exact invocation). `quorum integration install --list` shows what
+is bundled and what is installed; each `integrations/<harness>/README.md` has the details
 and the per-project variants.
 
 - **Claude Code** ([integrations/claude-code/](../integrations/claude-code/README.md)):
@@ -1422,9 +1357,9 @@ placeholder at the next tick:
 quorum agent tell standup "skip the retro section today"
 ```
 
-That is the same command as `quorum manager tell`, with the recipient named
-rather than assumed, and it is read once and consumed — `quorum manager
-remember --agent standup` is how to write something that stays. Useful
+It is the one guidance command for every agent, the manager included, and
+what it sends is read once and consumed — `quorum manager remember --agent
+standup` is how to write something that stays. Useful
 settings in `agents/<name>.toml`:
 
 ```toml
@@ -1450,18 +1385,19 @@ While `quorum up` is running you can steer its schedule without editing config
 or restarting:
 
 ```bash
-quorum agent run-now manager      # ask the running supervisor to tick it now
-quorum agent pause manager        # stop scheduling it
-quorum agent resume manager       # resume (also clears the failure streak)
+quorum agent reload manager       # re-read agents/<name>.toml after editing it
+quorum agent resume manager       # clear an auto-pause (and the failure streak)
 quorum agent run-once manager     # one tick in *this* shell, supervisor optional
 ```
 
-`run-now` and `run-once` are two mechanisms, not two spellings: `run-now` is a
-message to a running supervisor and returns before the tick does; `run-once`
-builds the agent in your shell and runs the tick in front of you, which is
-what to reach for with the supervisor stopped or when you want to watch it
-fail. Control messages ride the supervisor's own inbox and are applied within
-about fifteen seconds.
+To stop scheduling an agent, set `enabled = false` in `agents/<name>.toml` and
+`quorum agent reload` it: the file is the source of truth, and the reload is
+only a poke. `resume` is for the other kind of pause — the one the supervisor
+applies itself after repeated failures, which lands in the heartbeat and in no
+file you edit. `run-once` builds the agent in your shell and runs the tick in
+front of you, which is what to reach for with the supervisor stopped or when
+you want to watch it fail. Control messages ride the supervisor's own inbox
+and are applied within about fifteen seconds.
 
 An agent that fails five ticks in a row is auto-paused and announced on the
 `system` topic — unless its config sets `auto_pause = false`, as the manager's
@@ -1628,7 +1564,7 @@ lost**. That is the one destructive thing in this section;
 has no read-state. When you have dealt with them:
 
 ```bash
-quorum board ack 7c1af2                  # just this one
+quorum board clear --id 7c1af2           # just this one
 quorum board clear attention             # archive the topic, empty the banner
 quorum board clear tasks --before 30d    # or just the old part of one
 ```
@@ -1641,41 +1577,6 @@ quorum task inbox a3f2k9 --clear         # archive what is waiting, undelivered
 
 Both take `--dry-run`, and `--clear` only touches unclaimed messages — one a
 run is already holding is left alone.
-
-### Exporting a task
-
-To hand one task to someone — a colleague, a bug report, an issue comment —
-pack it into one archive:
-
-```bash
-quorum task export a3f2k9                        # ./quorum-task-a3f2k9.tar.gz
-quorum task export a3f2k9 --out ~/Desktop/run.tgz
-quorum task export a3f2k9 --with-worktree-diff   # + a patch of the worktree
-quorum task export a3f2k9 --redact               # drop what the tools returned
-```
-
-The archive unpacks to `quorum-task-<short-id>/` holding the task record, its
-reports, the transcript, the runner log, and the guidance it received: what is
-still waiting, what a run is holding, and what was already delivered, read
-back out of the message archive. An `export.json` says which task, when, and
-which options were on.
-
-**What it never contains** is anything from your project directory. The only
-code in an export is `worktree.diff`, and only with `--with-worktree-diff`:
-the task's own worktree against the branch it forked from, uncommitted and
-untracked files included. A task that ran in your checkout — `--no-worktree`,
-or one you adopted — is refused the diff outright rather than exporting your
-checkout. Apart from the archive itself, which is refused inside `~/.quorum`
-and over an existing file, the command writes nothing.
-
-**`--redact`.** Transcripts carry what the tools *returned* — file contents,
-command output, whatever a `cat` of the wrong file showed the model.
-`--redact` replaces every tool result with a marker and keeps the rest: the
-assistant's text, its reasoning, and each tool call with its arguments, so a
-reader can still follow what the run did. The transcript on disk is untouched.
-It understands the structured transcripts claude and codex emit; a harness
-that prints prose has nothing to redact, and the command tells you how many
-plain-text lines it kept verbatim, so read those before you share them.
 
 ### Getting notified
 
@@ -1840,7 +1741,7 @@ than sandboxing with less than you asked for. Check platform support with
 Two files in a project directory belong to quorum by convention, and it only
 ever *reads* either one (task writes happen in the worktree). A `.quorum.toml`
 marker (written with `quorum project add --marker`, or by hand) carries
-`name`, `deadline`, `tags` and `notes` with the repo across machines, merging
-over the registry at read time. `.quorum/task-preamble.local.md` is the
+`name`, `deadline` and `notes` with the repo across machines, merging over the
+registry at read time. `.quorum/task-preamble.local.md` is the
 project overlay described under
 [Prompts and overlays](#prompts-and-overlays).
