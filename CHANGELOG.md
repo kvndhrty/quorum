@@ -539,6 +539,15 @@ minute it is posted.
   counts, so each one can be acked; and `quorum down` asks an in-flight
   notification drain to stop after the message it is delivering instead of
   waiting for the whole batch.
+- A stream-json run whose nudge was answered *inside* the turn already
+  running never ended (#109). The guidance pump expected one `result` event
+  per delivered turn, but a CLI that drains queued input into the turn in
+  flight emits one result for both, so the close condition was never met:
+  stdin stayed open on an idle harness and `runner.lock` stayed held on a
+  task that had reported done — 35 minutes, until someone ran `task stop`.
+  The pump now tracks whether a turn is in flight rather than counting
+  deliveries, and closes stdin at the first result that leaves no turn open
+  and nothing waiting in the inbox.
 - The guidance pump could close a stream-json harness's stdin with a nudge
   in flight: a message was claimed (renamed out of `new/`) before it was
   counted as delivered, so a `result` event landing in that gap saw an

@@ -45,6 +45,13 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     below), which makes pump tests deterministic: the
                     message provably lands *during* the run, yet before the
                     runner could close an idle stdin.
+    inject_fold     inject, but with the mid-run message folded into the turn
+                    that is already running — what the real claude CLI does
+                    when a nudge lands mid-turn (#109): seed a nudge, read it
+                    off stdin *before* answering the prompt, then emit ONE
+                    `result` event for both turns and exit at EOF. The
+                    `inject` mode above answers each turn with its own
+                    result, which is why it never caught the hang.
     hang            sleep far past any test timeout (exercises run timeouts)
     stall           print one line, then go silent forever — the shape of a
                     hung session, and what the stall watchdog must end
@@ -71,6 +78,9 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                        that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
                              its own task, "tell" sends `manager tell`
+  FAKE_HARNESS_WATCHDOG      seconds an inject-mode harness waits for stdin to
+                             close before exiting 7 (default 30): a close bug
+                             must fail a test loudly, never wedge CI
   FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
 """
 
@@ -113,11 +123,12 @@ def task_id_from(prompt: str) -> str | None:
     return m.group(1) if m else None
 
 
-def inject_main() -> int:
+def inject_main(fold: bool = False) -> int:
     print(json.dumps({"argv": sys.argv[1:]}))
     print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
     # If the close logic ever regresses, die loudly instead of wedging CI.
-    watchdog = threading.Timer(30, lambda: os._exit(7))
+    grace = float(os.environ.get("FAKE_HARNESS_WATCHDOG", "30"))
+    watchdog = threading.Timer(grace, lambda: os._exit(7))
     watchdog.daemon = True
     watchdog.start()
     first = sys.stdin.readline().strip()
@@ -130,6 +141,26 @@ def inject_main() -> int:
         print(f"PROMPT| {line}")
     print(f"CWD| {os.getcwd()}")
 
+    result = {"type": "result", "subtype": "success", **(usage_block() or {})}
+    if fold:
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        quorum("task", "nudge", task_id, "switch to the fallback plan")
+        # Read the nudge while this turn is still running, the way a
+        # stream-json CLI drains queued input into the turn in flight...
+        queued = sys.stdin.readline().strip()
+        if not queued:
+            print("no mid-turn message arrived on stdin", file=sys.stderr)
+            return 4
+        print(json.dumps({"type": "stdin", "received": json.loads(queued)}), flush=True)
+        # ...and answer both turns with a single result event.
+        print(json.dumps(result), flush=True)
+        for _ in sys.stdin:
+            pass  # nothing further is owed a result; exit when stdin closes
+        return 0
+
     post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
     if post == "nudge":
         task_id = task_id_from(prompt)
@@ -139,7 +170,6 @@ def inject_main() -> int:
         quorum("task", "nudge", task_id, "switch to the fallback plan")
     elif post == "tell":
         quorum("manager", "tell", "pause new launches until tests pass")
-    result = {"type": "result", "subtype": "success", **(usage_block() or {})}
     print(json.dumps(result), flush=True)
     for line in sys.stdin:
         line = line.strip()
@@ -165,8 +195,8 @@ def main() -> int:
         print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
         time.sleep(600)
         return 0
-    if mode == "inject":
-        return inject_main()
+    if mode in ("inject", "inject_fold"):
+        return inject_main(fold=mode == "inject_fold")
     prompt = max(sys.argv[1:], key=len) if len(sys.argv) > 1 else ""
     scratch = os.environ.get("FAKE_HARNESS_WRITE")
     if scratch:
