@@ -933,9 +933,9 @@ def placeholder_evidence(ev: Evidence, name: str, templates: list[str]) -> str:
     if name == "issue":
         n = sum(1 for t in ev.tasks if t.get("issue_url"))
         return f"{n}/{len(ev.tasks)} tasks carry an issue"
-    if name == "perpetual":
-        n = sum(1 for t in ev.tasks if t.get("perpetual"))
-        return f"{n}/{len(ev.tasks)} tasks are perpetual"
+    if name == "spawn":
+        n = sum(1 for t in ev.tasks if t.get("allow_spawn"))
+        return f"{n}/{len(ev.tasks)} tasks may queue tasks of their own"
     if name in ("task_id", "project_path"):
         return f"substituted on every run ({len(ev.tasks)} tasks)"
     # a prompt-agent slot: only observable if an agent here runs that template

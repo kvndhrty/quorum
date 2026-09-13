@@ -1455,9 +1455,6 @@ def test_task_run_refuses_after_an_over_budget_run(home: Path, tmp_path: Path, m
     assert len(TaskStore(home).resolve(short).runs) == 2
 
 
-# -- perpetual tasks (#12) ---------------------------------------------------
-
-
 # -- the merged observation (#57) --------------------------------------------
 
 
@@ -1548,7 +1545,7 @@ def _wide_task_rows() -> list[dict]:
         },
         {
             "id_short": "a3f2k9", "project": "quorum", "status": "done",
-            "harness": "codex", "running": False, "attached": False, "perpetual": True,
+            "harness": "codex", "running": False, "attached": False,
             "last_report": "short", "pr_url": "", "git": None,
             "waiting_on": [], "dep_failed": [], "dep_missing": [], "dep_cycle": False,
             "usage_text": "1.2k tok", "budget_overages": [],
@@ -1604,7 +1601,7 @@ def test_task_table_drops_columns_nothing_fills(capsys):
     """A home with no PRs, flags or reported usage gets no blank headers."""
     from quorum.cli import _print_table, _task_table
 
-    row = dict(_wide_task_rows()[1], perpetual=False, usage_text="")
+    row = dict(_wide_task_rows()[1], usage_text="")
     _print_table(_task_table([row]))
     header = capsys.readouterr().out.split("\n")[0].split()
     assert header == ["id", "project", "status", "harness", "report"]

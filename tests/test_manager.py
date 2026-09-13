@@ -785,9 +785,6 @@ def test_the_digest_names_the_issue_a_task_came_from(home: Path, clock, project:
     assert "issue=" not in plain_line  # an ordinary task's line is unchanged
 
 
-# -- perpetual tasks (#12) ---------------------------------------------------
-
-
 # -- the notebook (a separate memory, #35) ----------------------------------
 
 

@@ -150,7 +150,7 @@ def test_overlays_render_into_their_slot(home: Path, name: str):
             "task_id": "a1b2c3",
             "project_path": "/tmp/wt",
             "issue": "",
-            "perpetual": "",
+            "spawn": "",
             "project": "",
         }
     )
