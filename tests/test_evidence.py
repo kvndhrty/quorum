@@ -22,7 +22,7 @@ import pytest
 from conftest import make_repo
 from quorum import fsio, runner, surfaces
 from quorum.actor import transcript_path
-from quorum.agent import AgentContext
+from quorum.agent import AgentContext, write_heartbeat
 from quorum.agents.manager import Manager
 from quorum.config import load_config
 from quorum.projects import ProjectRegistry
@@ -265,6 +265,62 @@ def test_the_report_renders_against_a_worked_home(worked_home: Path, capsys, mon
         assert heading in out
     assert "verdict" in out
     assert str(worked_home) in out
+
+
+def test_a_tick_that_ran_no_harness_is_told_apart_from_no_tick(home: Path, clock, capsys,
+                                                               monkeypatch):
+    """The manager returns before spending a harness run on an idle home, so
+    that tick writes no transcript and no snapshot. Read only the day table
+    and it looks like the manager never ticked — the claim a surface review
+    would then rest on. The heartbeat and the schedule are what keep the two
+    apart, so both have to reach the report."""
+    write_config(home)
+    config = load_config(home)
+    ctx = AgentContext(
+        home=home, name="manager",
+        settings=config.agents["manager"].settings, config=config, now=clock,
+    )
+    Manager(ctx).tick()  # nothing queued: the early return, no harness run
+    assert not transcript_path(home).exists()
+    # what the supervisor's tick wrapper writes around that early return
+    write_heartbeat(
+        home, "manager", status="idle", last_start="2026-09-11T04:15:58Z",
+        last_end="2026-09-11T04:15:58Z", next_run="2026-09-11T05:15:58Z", duration_ms=28,
+    )
+
+    ev = collect(home)
+    assert ev.by_day[("2026-09-11", "manager")] == 0  # no harness run that day
+    assert ev.schedules["manager"] == "every 5m"
+    assert ev.heartbeats["manager"]["last_start"] == "2026-09-11T04:15:58Z"
+    assert ev.harness_runs["manager"] == 0
+
+    monkeypatch.setattr(sys, "argv", ["evidence.py", str(home)])
+    evidence.main()
+    out = capsys.readouterr().out
+    assert "not** that it did not tick" in out  # the day table says so in words
+    assert "2026-09-11T04:15:58Z" in out and "28 ms" in out
+
+
+def test_a_day_the_supervisor_log_alone_records_is_not_an_idle_day(home: Path):
+    """`up` and `down` leave no journal entry and no transcript. A day whose
+    only record is the supervisor's log still has to appear, or the day table
+    reads as "nothing happened" on a day the scheduler was running."""
+    (home / "logs").mkdir(exist_ok=True)
+    (home / "logs" / "supervisor.log").write_text(
+        "2026-09-06T21:46:50Z INFO quorum.supervisor: supervisor up with 1 agent(s): manager\n"
+        "2026-09-06T21:46:53Z INFO quorum.supervisor: supervisor stopped\n"
+        "2026-09-07T20:15:58Z INFO quorum.supervisor: supervisor up with 1 agent(s): manager\n"
+    )
+    ev = collect(home)
+    assert ev.by_day[("2026-09-06", "supervisor")] == 2
+    assert ("2026-09-06", "supervisor") in ev.by_day and ("2026-09-07", "supervisor") in ev.by_day
+    # and the spans say which one is still running, which is when the
+    # schedules were firing
+    assert ev.supervisor_spans == [
+        ("2026-09-06T21:46:50Z", "2026-09-06T21:46:53Z"),
+        ("2026-09-07T20:15:58Z", ""),
+    ]
+    assert ["2026-09-07T20:15:58Z", "still up", "—"] in evidence.supervisor_rows(ev)
 
 
 def test_reading_the_home_writes_nothing(worked_home: Path):

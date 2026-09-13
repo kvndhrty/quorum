@@ -61,6 +61,13 @@ is the normal case.
    documented workflow use the installed `quorum`. In a home whose tasks are
    work *on quorum*, that distinction is most of the traffic, so it gets the
    `checkout` column and is excluded from use too.
+5. **A tick that ran no harness leaves no transcript.** The manager returns
+   before spending a harness run when no task is active and no directive is
+   waiting, so an empty cell in the day table means *no harness run that
+   day*, never *no tick*. The tick is recorded in the agent's heartbeat,
+   which holds only the last one, and in the supervisor's up/down spans,
+   which say when the schedule was firing. Both are printed under the day
+   table so the two cannot be confused.
 """
 
 from __future__ import annotations
@@ -82,7 +89,7 @@ REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "quorum"
 sys.path.insert(0, str(SRC.parent))
 
-from quorum import surfaces, transcript  # noqa: E402  (needs the src/ path above)
+from quorum import agent, surfaces, transcript  # noqa: E402  (needs the src/ path above)
 
 #: Actor classes, in the order their columns print.
 ACTORS = ("person", "manager", "agent", "task")
@@ -205,6 +212,11 @@ class Evidence:
     timestamps: list[str] = field(default_factory=list)
     by_day: Counter = field(default_factory=Counter)  # (day, channel) -> n
     sources: Counter = field(default_factory=Counter)
+    heartbeats: dict[str, dict] = field(default_factory=dict)  # agent -> heartbeat
+    schedules: dict[str, str] = field(default_factory=dict)  # agent -> schedule
+    harness_runs: Counter = field(default_factory=Counter)  # agent -> snapshots
+    #: (started, stopped or "") for each time the supervisor was up.
+    supervisor_spans: list[tuple[str, str]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -571,12 +583,17 @@ def collect(home: Path, command_paths: set[str], groups: set[str]) -> Evidence:
                            f"{task_dir.name}: attached=true")
             )
 
-    agents = [("manager", home / "state" / "manager")]
-    for agent_dir in sorted(p for p in (home / "state" / "agents").glob("*") if p.is_dir()):
-        if agent_dir.name != "manager":  # the manager keeps its spot at state/manager
-            agents.append((agent_dir.name, agent_dir))
-
     config = read_toml(home / "config.toml")
+    agents = [("manager", home / "state" / "manager")]
+    named = {
+        *(config.get("agents", {}) or {}),
+        *(f.stem for f in (home / "agents").glob("*.toml")),
+        *(p.name for p in (home / "state" / "agents").glob("*") if p.is_dir()),
+    }
+    for name in sorted(named):
+        if name != "manager":  # the manager keeps its spot at state/manager
+            agents.append((name, home / "state" / "agents" / name))
+
     for name, base in agents:
         actor = "manager" if name == "manager" else "agent"
         scan_transcript(
@@ -595,9 +612,19 @@ def collect(home: Path, command_paths: set[str], groups: set[str]) -> Evidence:
         texts = [t for t in ("\n".join(read_lines(p)) for p in sorted((base / "runs").glob("*.md"))) if t]
         ev.snapshots[name] = texts
         ev.sources[f"{name} run snapshots"] += len(texts)
-        declared = (config.get("agents", {}) or {}).get(name, {})
-        agent_type = str(declared.get("type") or read_toml(home / "agents" / f"{name}.toml").get("type") or "")
+        # `config.agents.update(_load_agent_files(home))`: an agents/<name>.toml
+        # replaces the config.toml table of the same name rather than merging.
+        declared = read_toml(home / "agents" / f"{name}.toml") or (
+            (config.get("agents", {}) or {}).get(name, {}) or {}
+        )
+        agent_type = str(declared.get("type") or "")
         ev.agent_template[name] = "manager.md" if agent_type == "manager" else f"{name}.md"
+        # A tick that spends no harness run writes no transcript and no
+        # snapshot, so the schedule and the heartbeat are the only record
+        # that it happened at all. `agent.read_heartbeat` is the one reader.
+        ev.schedules[name] = str(declared.get("schedule") or "every 1h")
+        ev.heartbeats[name] = agent.read_heartbeat(home, name)
+        ev.harness_runs[name] = len(texts)
 
     for entry in read_jsonl(home / "logs" / "actions.jsonl"):
         at = str(entry.get("at") or "")
@@ -611,14 +638,23 @@ def collect(home: Path, command_paths: set[str], groups: set[str]) -> Evidence:
     # (Ctrl-C is signal 2 and is nobody's command).
     for line in read_lines(home / "logs" / "supervisor.log"):
         stamp = re.match(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)", line)
-        if stamp:
-            ev.timestamps.append(stamp.group(1))
+        at = stamp.group(1) if stamp else ""
+        if at:
+            ev.timestamps.append(at)
+            # A day whose only record is this log is still a day the home was
+            # awake; leaving it out of the table reads as an idle day.
+            ev.by_day[(at[:10], "supervisor")] += 1
+        if "supervisor up with" in line:
+            ev.supervisor_spans.append((at, ""))
+        elif "supervisor stopped" in line and ev.supervisor_spans:
+            started, stopped = ev.supervisor_spans[-1]
+            if not stopped:
+                ev.supervisor_spans[-1] = (started, at)
         for marker, path in (("quorum supervisor starting", "up"),
                              ("received signal 15", "down")):
             if marker in line:
                 ev.invocations.append(
-                    Invocation(path, [], "person", stamp.group(1) if stamp else "",
-                               "logs/supervisor.log", line[:120])
+                    Invocation(path, [], "person", at, "logs/supervisor.log", line[:120])
                 )
     ev.sources["logs/supervisor.log"] += 1
 
@@ -910,6 +946,45 @@ def day_rows(ev: Evidence) -> list[list[str]]:
     ]
 
 
+def liveness_rows(ev: Evidence) -> list[list[str]]:
+    """One row per agent: what its schedule says, and what its heartbeat
+    recorded about the last tick.
+
+    This is the row that keeps "no tick" and "ticked and had nothing to do"
+    apart. A tick that spends a harness run writes a transcript and a run
+    snapshot; a tick that returns early writes neither, and the heartbeat is
+    the only thing it touches. `duration_ms` is the tell: a few milliseconds
+    is the early return, a harness run is seconds or minutes.
+    """
+    rows: list[list[str]] = []
+    for name in sorted(ev.schedules):
+        hb = ev.heartbeats.get(name, {})
+        duration = hb.get("duration_ms")
+        rows.append(
+            [
+                name,
+                ev.schedules[name],
+                str(hb.get("status") or "—"),
+                str(hb.get("last_start") or "—"),
+                f"{duration} ms" if isinstance(duration, int | float) else "—",
+                str(hb.get("next_run") or "—"),
+                str(ev.harness_runs[name]),
+            ]
+        )
+    return rows
+
+
+def supervisor_rows(ev: Evidence) -> list[list[str]]:
+    """When the scheduler was up, which is when every agent's schedule was
+    firing whether or not the tick spent a harness run."""
+    rows: list[list[str]] = []
+    for started, stopped in ev.supervisor_spans:
+        a, b = parse_time(started), parse_time(stopped)
+        hours = f"{(b - a).total_seconds() / 3600:.1f} h" if a and b else "—"
+        rows.append([started or "—", stopped or "still up", hours])
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("home", type=Path, help="the QUORUM_HOME to read (never written)")
@@ -943,9 +1018,27 @@ def main() -> None:
 
     print("\n## 0. When this home was awake\n")
     print(md_table(
-        ["day", "task transcript", "manager", "prompt agent", "journal", "supervisor"],
+        ["day", "task harness", "manager harness", "agent harness", "journal", "supervisor log"],
         day_rows(ev),
     ))
+    print(
+        "\nEvery column counts a *record written*. A blank `manager harness` cell "
+        "means the manager spent no harness run that day — **not** that it did not "
+        "tick: the manager returns before spending a run when no task is active "
+        "and no directive is waiting, and that tick writes no transcript and no "
+        "snapshot. The two tables below are where a tick with nothing to do shows "
+        "up: the heartbeat holds the last tick (a few milliseconds is the early "
+        "return), and the supervisor's spans say when the schedule was firing."
+    )
+
+    print("\n### Agent schedules and the last tick each one recorded\n")
+    print(md_table(
+        ["agent", "schedule", "status", "last tick", "tick took", "next run", "harness runs"],
+        liveness_rows(ev),
+    ))
+
+    print("\n### The supervisor's up/down spans\n")
+    print(md_table(["up at", "down at", "span"], supervisor_rows(ev)))
 
     rows, totals = command_rows(ev, commands)
     print(f"\n## 1. CLI commands ({counts['commands']} exposed)\n")
