@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -17,6 +18,7 @@ from ._common import (
     _RAW_OPT,
     _RUN_OPT,
     _VERBOSE_OPT,
+    SELF,
     _actor_guard,
     _agent_table,
     _confirm,
@@ -24,7 +26,9 @@ from ._common import (
     _fail,
     _follow,
     _load_config,
+    _parse_window,
     _print_table,
+    _resolve_self_agent,
     _verbatim_text,
     agent_app,
     get_home,
@@ -114,15 +118,58 @@ DEFAULT_JOURNAL_LINES = 20
 
 
 @agent_app.command("list")
-def agent_list() -> None:
+def agent_list(
+    json_out: bool = typer.Option(False, "--json", help="Emit rows as JSON."),
+) -> None:
     """List configured agents and their last heartbeat."""
     from .. import views
 
     rows = views.agent_rows(get_home())
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
     if not rows:
         typer.echo("no agents configured")
         return
     _print_table(_agent_table(rows, with_type=True))
+
+
+@agent_app.command("show")
+def agent_show(
+    name: str = typer.Argument(
+        ..., help="An agent name, or `self` from inside that agent's own run."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Dump those rows and the agent's row as JSON."
+    ),
+) -> None:
+    """Show one agent: its schedule, its last run, what its runs have cost
+    and its notebook. The manager is an agent like any other here.
+
+    `self` is the same record read from inside the run it describes, plus
+    what only that run can ask about itself: how much of its per-run action
+    cap it has used, and how full its notebook is. Reading the cap is not a
+    way around it — nothing here changes a cap, a budget or a schedule.
+    """
+    from .. import views
+    from ..actor import self_run
+
+    target = get_home()
+    # `self` resolves the actor tag (actor.py) and is the only way to get the
+    # run-scoped section; a name reads the record anyone can see.
+    is_self = name == SELF
+    if is_self:
+        name = _resolve_self_agent()
+    _check_agent_name(name)
+    rows = views.agent_detail_rows(target, name, run=self_run(target) if is_self else None)
+    if rows is None:
+        raise _fail(f"no agent {name!r} in config.toml or agents/ — `quorum agent list`") from None
+    if json_out:
+        row = next(r for r in views.agent_rows(target) if r["name"] == name)
+        typer.echo(json.dumps({**row, "detail": rows}, indent=2, ensure_ascii=False))
+        return
+    for row in rows:
+        typer.secho(views.detail_line(row), fg="yellow" if row.get("style") == "warning" else None)
 
 
 @agent_app.command("run-once")
@@ -228,6 +275,57 @@ def agent_log(
     _run_log(name, last, run, verbose, raw)
 
 
+@agent_app.command("interventions")
+def agent_interventions(
+    name: str,
+    since: str | None = typer.Option(
+        None, "--since", help="Only interventions made in the last 30d / 36h / 2w / 90m."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit the rows as JSON."),
+) -> None:
+    """What an agent's supervision did, and what happened next.
+
+    Every nudge, relaunch, stop and escalation the agent's journal records,
+    each with the target's status at the time, the next report the target
+    made after it and how long that took — the reads `agent log` makes for
+    one tick, made across ticks. The manager is an agent:
+    `quorum agent interventions manager`.
+
+    It shows the before, the action and the after; whether an intervention
+    worked is your call, so nothing here scores one. A pure reader over the
+    journal, the targets' reports and the board — the supervisor need not be
+    running. The journal is read as a bounded tail, and the last line says
+    how far back that reaches.
+    """
+    from .. import views
+
+    _check_agent_name(name)
+    target = get_home()
+    window = _parse_window(since) if since is not None else None
+    payload = views.agent_interventions(target, name, since=window)
+    if json_out:
+        typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    scope = (
+        f"since {payload['cutoff']} ({since.strip()})"
+        if window
+        else "everything the journal tail holds"
+    )
+    typer.echo(f"{name} interventions, {scope}")
+    for row in payload["rows"]:
+        typer.echo(views.intervention_line(row))
+    typer.echo(views.intervention_summary_line(payload["summary"]))
+    horizon = payload["horizon"]
+    if horizon is None:
+        typer.echo(f"{name} has journaled nothing yet")
+    elif payload["scrolled"]:
+        typer.echo(
+            f"the journal tail reaches back to {horizon}; anything older is not read"
+        )
+    else:
+        typer.echo(f"the journal starts at {horizon}")
+
+
 def _agent_command(name: str, command: str, note: str) -> None:
     target = get_home()
     config = _load_config(target)
@@ -236,6 +334,44 @@ def _agent_command(name: str, command: str, note: str) -> None:
     _actor_guard(target, f"agent.{command}", target=name)
     MessageBus(target).send("user", "supervisor", type=f"agent.{command}", payload={"agent": name})
     typer.echo(note)
+
+
+def tell_agent(name: str, text: str) -> None:
+    """Queue guidance in an agent's inbox — the one write path behind
+    `quorum agent tell`.
+
+    The recipient claims its inbox at the start of its next tick and renders
+    what it finds into its prompt: a prompt agent's `{directives}`
+    placeholder, the manager's digest. An agent that is not configured is
+    refused here, because guidance queued for an agent nothing schedules is
+    never read.
+
+    The sender is `current_actor()`, not `"user"`: a notebook may only be
+    written by its own agent, but guidance may come from anyone — a person,
+    the manager, another agent — and `guidance_note` renders `[from <actor>
+    at ...]`, which is what keeps agent-to-agent guidance legible. The
+    `_actor_guard` call is why an agent's guidance is journaled and counts
+    against its per-run action cap.
+    """
+    target = get_home()
+    if name not in _load_config(target).agents:
+        raise _fail(f"no agent {name!r} in config.toml or agents/ — `quorum agent list`") from None
+    _actor_guard(target, "agent.tell", target=name, args=text[:80])
+    MessageBus(target).send(current_actor(), name, type="guidance", text=text)
+    typer.secho(f"guidance queued for {name}'s next run", fg="green")
+
+
+@agent_app.command("tell")
+def agent_tell(name: str, text: str) -> None:
+    """Send an agent guidance; its next run starts with it.
+
+    Guidance is read once and then consumed; `quorum manager remember --agent
+    <name>` writes the kind that stays. The manager is an agent like any
+    other: `quorum agent tell manager "..."`.
+
+    Example: quorum agent tell standup "skip the retro section today"
+    """
+    tell_agent(name, text)
 
 
 @agent_app.command("resume")

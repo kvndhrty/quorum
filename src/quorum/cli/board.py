@@ -1,8 +1,8 @@
-"""`quorum board`: the message substrate's one CLI — the public board, and
-the direct inboxes `board post --to` delivers into."""
+"""`quorum board`: read, post to and empty the public message board."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -14,7 +14,6 @@ from ._common import (
     _actor_guard,
     _confirm,
     _fail,
-    _load_config,
     _parse_before,
     _parse_window,
     board_app,
@@ -26,65 +25,27 @@ from ._common import (
 
 @board_app.command("post")
 def board_post(
-    topic: str = typer.Argument(
-        "", metavar="TOPIC|TEXT", help="Board topic to post to (with --to: the message)."
-    ),
-    text: str = typer.Argument("", help="The message."),
-    to: str = typer.Option(
-        "", "--to",
-        help="Send into this agent's inbox instead of onto a topic (e.g. --to manager).",
-    ),
+    topic: str,
+    text: str,
     type: str = typer.Option("note", "--type", help="Message type tag."),
 ) -> None:
-    """Post a message — onto a board topic, or into one agent's inbox.
+    """Post a message to a board topic.
 
-    The board is public and anything may read it; `--to <agent>` is the other
-    channel of the same schema, a direct delivery that only that agent claims.
-    Guidance for the manager is `quorum board post --to manager "..."`, and
-    its next tick starts with it in the digest.
+    The board is the public channel: anything may read it, and nothing claims
+    it. To send one agent guidance that only it reads, use `quorum agent tell
+    <name> "..."` — the inbox half of the same schema.
     """
     target = get_home()
-    if to:
-        if text:
-            raise _fail("--to takes one argument: the message (quote it)")
-        if type != "note":
-            raise _fail("--type tags a board post; --to always sends guidance")
-        _tell(target, to, topic)
-        return
-    if not topic or not text:
-        raise _fail('post to a topic (`board post <topic> "<text>"`) or an inbox (--to <agent>)')
     _actor_guard(target, "board.post", args=f"{topic}: {text[:80]}")
-    msg = MessageBus(target).post(
-        sender=current_actor(), topic=topic, type=type, text=text
-    )
+    msg = MessageBus(target).post(sender=current_actor(), topic=topic, type=type, text=text)
     typer.echo(f"posted {msg.id} to {topic}")
-
-
-def _tell(home: Path, to: str, text: str) -> None:
-    """The inbox half of `board post`: a direct delivery to one agent.
-
-    The recipient is checked against the configured agents, because a topic
-    is free-form but an inbox is not: a misspelled `--to` would write a
-    maildir nobody ever claims, and the message would look sent.
-    """
-    if not text:
-        raise _fail("nothing to send — pass the message as the argument")
-    config = _load_config(home)
-    known = set(config.agents) | {"supervisor"}
-    if to not in known:
-        raise _fail(
-            f"no agent {to!r} to send to (known: {', '.join(sorted(known))}) — "
-            "a board topic is free-form, an inbox is not"
-        )
-    _actor_guard(home, "board.post", target=to, args=text[:80])
-    MessageBus(home).send(current_actor(), to, type="guidance", text=text)
-    typer.secho(f"guidance queued for {to}'s next run", fg="green")
 
 
 @board_app.command("read")
 def board_read(
     topic: str | None = typer.Argument(None, help="Topic to read (default: all topics)."),
     since: str = typer.Option("24h", "--since", help="Window like 90m, 24h or 7d."),
+    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON lines."),
 ) -> None:
     """Read recent board messages."""
     bus = MessageBus(get_home())
@@ -95,13 +56,16 @@ def board_read(
     for t in topics:
         for msg in bus.read_topic(t, since=floor):
             empty = False
-            created = fsio.display_ts(msg.created_at)
-            # the short id is here so `board clear --id` has something to name
-            typer.echo(
-                f"[{created}] {t} {msg.short_id} <{msg.sender}> "
-                f"{msg.type}: {msg.payload.get('text', '')}"
-            )
-    if empty:
+            if as_json:
+                typer.echo(json.dumps(msg.dump(), ensure_ascii=False))
+            else:
+                created = fsio.display_ts(msg.created_at)
+                # the short id is here so `board clear --id` has something to name
+                typer.echo(
+                    f"[{created}] {t} {msg.short_id} <{msg.sender}> "
+                    f"{msg.type}: {msg.payload.get('text', '')}"
+                )
+    if empty and not as_json:
         typer.echo(f"no messages in the last {since}")
 
 

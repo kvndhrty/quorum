@@ -26,7 +26,7 @@ project from the registry `notes` and from `.quorum/<name>.local.md`
 other project-dir read. It follows the `{local}` rules exactly: same
 fail-soft read, and an empty block takes its slot's line with it. It has no
 prepend fallback — a template that never mentions `{project}` simply has no
-place for it, and `quorum prompt list` says so rather than guessing.
+place for it, and `quorum doctor` says so rather than guessing.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def load_local(home: Path, name: str) -> str:
     Fail-soft, unlike `load`: an overlay that cannot be read or decoded
     renders as no overlay at all. `render` sits on the manager tick and on
     every task run, so one stray non-UTF-8 byte in a user-owned file must
-    not fail every tick forever. `quorum prompt list` is where an unreadable
+    not fail every tick forever. `quorum doctor` is where an unreadable
     overlay is reported.
     """
     overlay = local_path(home, name)

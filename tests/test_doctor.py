@@ -443,12 +443,24 @@ def test_prompts_check_lists_a_local_overlay_without_judging_it(home: Path):
 
 
 def test_prompts_check_agrees_with_home_classification(home: Path):
-    """Doctor and `quorum init`/`prompt list` must never disagree about what
+    """Doctor and `quorum init` must never disagree about what
     'edited' means — same function, so they cannot."""
     (home / "prompts" / "manager.md").write_text("mine\n", encoding="utf-8")
     states = home_mod.classify_prompts(home)
     assert states["manager.md"] == "edited"
     assert "edited" in find(doctor.check_prompts(home), "prompts.manager").summary
+
+
+def test_prompts_check_reports_a_prompt_it_cannot_read(home: Path):
+    """A prompt file quorum cannot decode is neither missing nor an edit, and
+    reading it must not raise inside the classifier: doctor exists to name
+    such a file, and doctor marks it from the same states."""
+    (home / "prompts" / "manager.md").write_bytes(b"\xff\xfe not utf-8\n")
+    assert home_mod.classify_prompts(home)["manager.md"] == "unreadable"
+    check = find(doctor.check_prompts(home), "prompts.manager")
+    assert check.status == PROBLEM
+    assert "cannot be read" in check.summary
+    assert "quorum init" in check.fix
 
 
 def test_prompts_check_notes_an_unseeded_prompt(home: Path):
@@ -690,7 +702,7 @@ def test_smoke_kills_the_whole_process_tree_not_just_the_wrapper(home: Path, tmp
 
 def test_smoke_never_points_the_harness_at_the_real_home(home: Path, tmp_path: Path):
     """The child inherits the environment, and a harness with quorum's own
-    integration hooks installed runs `quorum task hook-session-start` on
+    integration hooks installed runs `quorum task hook session-start` on
     startup. It must land in a throwaway home, never the live one."""
     seen = tmp_path / "seen-home"
     reporter = tmp_path / "reporter.py"

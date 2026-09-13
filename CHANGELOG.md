@@ -21,6 +21,78 @@ anyone editing files by hand, and every escalation should reach a person the
 minute it is posted.
 
 ### Added
+- Guidance for any agent (#129): `quorum agent tell <name> "..."` puts a
+  message in that agent's inbox, where a prompt agent's next tick renders it
+  into its `{directives}` placeholder — the capability the guide already
+  described, which until now meant calling `MessageBus.send` from Python. An
+  unconfigured recipient is refused. The manager takes guidance the same way
+  (`quorum agent tell manager "..."`), which also gives it the two things the
+  old `manager tell` lacked: the send is journaled and counted against a
+  sending agent's action cap, and it is attributed to the actual sender
+  instead of always to `user`. Every sender now writes `type = "guidance"`,
+  the one word the glossary fixes for it.
+- Tasks that spawn tasks (#43): a task queued with `task add --allow-spawn`
+  (or in a home with `[tasks].allow_spawn`) may run `quorum task add` itself,
+  and `--after self` inside a run queues the new work behind the task that
+  asked for it. The child records its `parent`, inherits the parent's
+  harness, and is queued like any other task — only the manager or a person
+  launches it, and nothing cascades when a parent is cancelled. The one new
+  decision in Python is a rate limit: `task add` from a task is refused
+  unless the task is spawn-enabled, over `[tasks].max_spawn_per_task` (5) or
+  beyond `[tasks].max_spawn_depth` (1), each refusal naming its setting and
+  telling the harness to put the idea in its report instead. Spawns and
+  refusals are journaled for the manager, marked `by=task-<id>` in its
+  digest so it does not read them as actions of its own; task lines gain
+  `parent=` / `spawned=` / `SPAWN-CAP`; `quorum status`, `task list`, the
+  TUI and `task show` show the link and a `⇗` badge.
+- The surface *use* extractor (#128): `scripts/evidence.py <QUORUM_HOME>` reads
+  a home — task transcripts live and archived, the manager's and each agent's
+  transcript and journal, run snapshots, heartbeats, `logs/`, `messages/`,
+  every `task.json`, `config.toml`, `agents/*.toml` and `prompts/` — and prints one
+  table per surface class with each observed CLI verb, option, config key, TUI
+  binding and prompt placeholder split by actor (person, manager, prompt agent,
+  task harness), with a blank `verdict` column. Read-only, and never counts as
+  use a call that named another home or went through `uv run quorum`. Beside
+  the day table it prints each agent's schedule and last heartbeat and the
+  supervisor's up/down spans, because a tick that spent no harness run writes
+  no transcript and would otherwise read as no tick at all. It is the evidence
+  half of round two of the surface review; the verdicts are recorded in #128.
+- The dogfood home as a worked example (#64): `examples/dogfood-home/`
+  ships the home that builds quorum — its real `config.toml` (the
+  `[harness.claude]` block with a comment on why each `--allowedTools` entry
+  is there, the hourly manager, a commented `[notify]` hook), the two prompt
+  overlays it runs on (`manager.local.md`: two tasks at a time, oldest
+  first, the human owns PRs; `task-preamble.local.md`: the delivery
+  conventions), and a README with the issue-driven loop in ten lines and
+  what a cycle cost, read off `quorum usage`. `tests/test_example_home.py`
+  installs it into a scaffolded home, loads the config and renders both
+  overlays, so a renamed option, prompt slot or CLI command cannot leave the
+  example quietly wrong. Linked from the README and the guide's setup.
+- A run can read its own record (#94): `quorum task show self` and
+  `quorum agent show self` resolve the actor tag the runner and the agents
+  set (`QUORUM_ACTOR`) and print the record any reader would see plus a
+  `this run:` section of the facts that only exist inside the run — the
+  per-run budget stated as a limit rather than as the refusal `task run`
+  raises once it is exceeded, what the last run spent, how full the notebook
+  is, whether a handoff is owed, and (for an agent) how much of
+  `max_actions_per_run` this run has used. `--json` dumps the same rows
+  under `detail`. `quorum agent show <name>` is the same record for a
+  person, the manager included. Read-only throughout: nothing here changes a
+  cap or a budget, and reading one is not a way around it. The task preamble
+  names the two moments worth a call — before a long tool-heavy step, and
+  before reporting `done`. Outside a tagged run, `self` is an error naming
+  the fix.
+- Intervention outcomes (#97): `quorum agent interventions <name> [--since 30d]
+  [--json]` lists every nudge, launch, stop and `attention` escalation an
+  agent journaled, each with the target's status at the time, the next report
+  the target made after it and how long that took, under a summary line
+  counting nudges followed by a report, launches whose task later reported
+  done and escalations that have left the board. A pure reader over
+  `state/<name>/journal.jsonl` and the targets' `reports.jsonl` that adds no
+  state and judges nothing — it shows the before, the action and the after —
+  and, since the journal is read as a bounded tail, says how far back it can
+  see. The manager is an agent like any other here, so there is no
+  `manager interventions` alias.
 - The surface inventory (#102): `scripts/surfaces.py` prints one table per
   class of thing quorum exposes — CLI commands, options and arguments,
   config keys, the home layout, TUI key bindings, prompt placeholders,
@@ -315,6 +387,16 @@ minute it is posted.
   could not classify. A new `export.py` holds the reader. (#98)
 
 ### Changed
+- One renderer for a task's record (#127): `views.task_detail(home, task)`
+  assembles every section `quorum task show` prints — the fields, both
+  directions of the dependency graph, the runs and their spend, the recent
+  reports, the notebook, the handoff — as rows, `views.detail_line` prints
+  one, and `task show --json` dumps them under `detail` beside the raw
+  record. The text is unchanged apart from its last line; the `--json`
+  omissions the #110 review found (`dependents:` and the handoff body,
+  printed but never dumped) are closed by construction, and the TUI's
+  transcript tab now lists reports through the same rows. `quorum status`
+  and the agent listing were left alone.
 - Docs restructured; one name per concept; glossary added (#102). The guide
   opens with a five-step path (install, register a project, queue a task,
   start the supervisor, read status), then Watching and Steering, then a
@@ -442,7 +524,7 @@ minute it is posted.
   commands were never called and no task among the 33 had a non-default
   `priority` or `held`. Ordering stays where the design already put it —
   the manager's judgement from the digest, steered by
-  `quorum manager tell` — and `task add --after <id>` remains the one
+  `quorum agent tell manager` — and `task add --after <id>` remains the one
   ordering constraint the substrate enforces.
 - The web dashboard (#102). `quorum web`, the `web` optional-dependency
   extra (fastapi, uvicorn), `src/quorum/web/` and its thirteen HTTP routes
@@ -477,10 +559,10 @@ minute it is posted.
   harness-driven manager under mode 2 needs that grant. Task runs are
   unaffected: `build_task_capabilities` leaves the network open as before.
 
-- Surface review round two (#128), executed against the evidence in
-  `scripts/evidence.py`: 55 commands to 42, 91 option declarations to 76, 35
-  config keys to 31, 9 prompt placeholders to 8. Removal was the default where
-  the dogfood home showed no use; pre-1.0, nothing is deprecated in place.
+- Surface review round two (#128), executed against the evidence
+  `scripts/evidence.py` read out of the dogfood home — thirteen days of
+  records, six of them active. Removal was the default where that window
+  showed no use; pre-1.0, nothing is deprecated in place.
   Commands removed outright, with what replaces each:
   `quorum agent pause X` → `enabled = false` in `agents/X.toml` plus
   `quorum agent reload X`, which is the file that was already the source of
@@ -495,19 +577,13 @@ minute it is posted.
   one message); `integration list` → `integration install --list`;
   `manager journal` → `agent log <name> --actions`, which reads any agent's
   journal rather than the manager's alone; `manager tell "..."` →
-  `board post --to manager "..."` (the inbox half of the one message schema,
-  and it refuses a name no agent answers to); `prompt list` → `quorum doctor`,
+  `agent tell manager "..."`, the one guidance command for every agent, which
+  refuses a name no agent answers to; `prompt list` → `quorum doctor`,
   which already classified every template through the same
   `home.classify_prompt` and now also reports overlays and per-project
   `{project}` blocks; `task history <id>` → `task show <id> --history`;
   `task hook-session-start` / `task hook-stop` / `task hook-session-end` →
   `task hook session-start|stop|session-end`.
-- `--json` on `agent list`, `board read`, `doctor`, `status`, `task list`,
-  `task show` and `usage`: no consumer in a year of the dogfood home, and
-  under the all-state-is-files invariant every payload it printed is already
-  a file. `views.overview`, `views.recent_actions` and `doctor.report`
-  existed only to build those payloads and go with them. `task adopt --json`
-  stays: the three shipped session adapters parse it.
 - `--tags` on `project add` and `project set`, with the `tags` field on the
   project record and in the `.quorum.toml` marker: written, carried into
   `views.project_rows`, rendered by nothing.
@@ -531,6 +607,34 @@ minute it is posted.
   reader and the manager both act on, written by the TUI's `c` binding too.
 
 ### Fixed
+- A message archive that decompresses to bytes which are not UTF-8 no longer
+  takes `quorum task history` (and the TUI tab that renders it) down: the
+  archive scan already treated a bad gzip header, a truncated stream and
+  corrupt deflate data as a skipped month, and a `UnicodeDecodeError` off the
+  text wrapper is the fourth shape of the same damage. Found by the existing
+  random-deflate test, which hits it a fraction of the time.
+- A damaged `reports.jsonl` no longer takes down the readers of a task. A
+  line torn mid-append is torn at a byte, so it can end inside a multi-byte
+  character; `fsio.read_jsonl` now decodes with `errors="replace"` like
+  `read_jsonl_tail` already did, so such a line costs itself and not the
+  read. `tasks.read_reports` also drops a line that is valid JSON and not an
+  object, which every caller reads with `.get()` — `views.task_detail`, the
+  task listing and the manager digest.
+- `quorum prompt list` no longer calls an unedited prompt "edited". It
+  compared the home copy's text to the packaged default, which has only two
+  answers, so a copy an earlier `quorum init` seeded and nobody ever touched
+  read as an edit while `quorum doctor` called it an upgradable seed — and
+  the one-command fix (`quorum init`) stayed hidden behind advice to
+  hand-merge. Both now render `home.classify_prompts`, which consults the
+  seed record: *seeded, matches the packaged default*, *seeded by an older
+  quorum, never edited* or *edited*. That classifier also no longer raises on
+  a prompt file it cannot decode — a non-UTF-8 `prompts/<name>.md` crashed
+  `quorum doctor` with a traceback; it is now a ✗ naming the file, a `?` in
+  `prompt list` and a line from `quorum init`, which leaves the file alone.
+  `quorum prompt diff` reads the same classifier for its closing advice: on
+  an unedited older seed it said "prompts/<name>.md is yours, so `quorum
+  init` never upgrades it", which was the opposite of the truth, and now
+  says init upgrades it in place. (#126)
 - A `runner.lock` holding valid JSON that is not an object (hand-edited, or
   truncated and refilled) no longer fails the manager tick. The liveness and
   stall readings called `.get()` / `["started_at"]` on whatever the file
@@ -592,6 +696,15 @@ minute it is posted.
   counts, so each one can be acked; and `quorum down` asks an in-flight
   notification drain to stop after the message it is delivering instead of
   waiting for the whole batch.
+- A stream-json run whose nudge was answered *inside* the turn already
+  running never ended (#109). The guidance pump expected one `result` event
+  per delivered turn, but a CLI that drains queued input into the turn in
+  flight emits one result for both, so the close condition was never met:
+  stdin stayed open on an idle harness and `runner.lock` stayed held on a
+  task that had reported done — 35 minutes, until someone ran `task stop`.
+  The pump now tracks whether a turn is in flight rather than counting
+  deliveries, and closes stdin at the first result that leaves no turn open
+  and nothing waiting in the inbox.
 - The guidance pump could close a stream-json harness's stdin with a nudge
   in flight: a message was claimed (renamed out of `new/`) before it was
   counted as delivered, so a `result` event landing in that gap saw an
@@ -611,7 +724,7 @@ minute it is posted.
   `quorum board ack ID` → `quorum board clear --id ID`;
   `quorum integration list` → `quorum integration install --list`;
   `quorum manager journal` → `quorum agent log manager --actions`;
-  `quorum manager tell "..."` → `quorum board post --to manager "..."`;
+  `quorum manager tell "..."` → `quorum agent tell manager "..."`;
   `quorum prompt list` → `quorum doctor`;
   `quorum task history X` → `quorum task show X --history`;
   `quorum task hook-stop` → `quorum task hook stop` (likewise
@@ -625,9 +738,9 @@ minute it is posted.
   adopted session stops receiving guidance.
 - Drop `timezone` from `[quorum]`, `profile` from `[sandbox]`, `auto_commit`
   from `[tasks]` and `timeout_seconds` from `[ci]` if your config.toml sets
-  them: config.toml is parsed strictly, so an unknown key fails the load. The
-  seeded config.toml never carried three of the four, and `quorum init` does
-  not rewrite yours.
+  them. Nothing breaks if you do not: unknown keys are ignored, so the file
+  still loads and the key simply does nothing. The seeded config.toml never
+  carried three of the four, and `quorum init` does not rewrite yours.
 - A task queued with `--perpetual` keeps running; the flag is simply ignored
   when its record loads, no `∞` badge appears, and the manager treats it as
   an ordinary task — a long run count on it may now read as stuck. Re-queue

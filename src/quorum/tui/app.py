@@ -2,7 +2,7 @@
 timer — works whether or not the supervisor is running, including over SSH.
 Its write affordances stay thin bus/store calls, the same ones the CLI and the
 CLI makes: `n` sends guidance into a task's inbox, `m` sends a
-guidance to the manager's inbox (`quorum board post --to manager`), `s` launches a
+guidance to the manager's inbox (`quorum agent tell manager`), `s` launches a
 detached run, `c` cancels a task — the one destructive binding, so it confirms
 first — and `a` acks an escalation off the #attention banner
 (`quorum board clear --id`).
@@ -32,7 +32,6 @@ from ..tasks import (
     Task,
     TaskStore,
     nudge,
-    read_reports,
     read_transcript_tail,
     runner_alive,
 )
@@ -271,7 +270,7 @@ class QuorumTUI(App):
         self._open_input("task", f"guidance for {task.short_id} — enter sends, esc cancels")
 
     def action_directive(self) -> None:
-        """`quorum manager tell`, from the dashboard: the manager's next run
+        """`quorum agent tell manager`, from the dashboard: the manager's next run
         starts with that guidance in its digest. No task selection needed."""
         self._open_input("manager", "guidance for the manager — enter sends, esc cancels")
 
@@ -650,7 +649,7 @@ class QuorumTUI(App):
         return self._history_lines
 
     def _task_history_lines(self, task_id: str) -> list[str]:
-        """The task's life as `quorum task history` prints it — the same
+        """The task's life as `quorum task show --history` prints it — the same
         rows, the same line per row."""
         task = TaskStore(self.home).get(task_id)
         if task is None:
@@ -661,9 +660,20 @@ class QuorumTUI(App):
         # the same renderer `quorum task log` uses, so the surfaces cannot
         # drift into two readings of one file
         lines = transcript.render(read_transcript_tail(self.home, task_id, limit=25))
-        reports = read_reports(self.home, task_id, limit=8)
+        # and the reports exactly as `quorum task show` prints them: the rows
+        # views assembles once (views.task_detail), through the one line
+        # formatter, rather than a second spelling of the same fact here.
+        task = TaskStore(self.home).get(task_id)
+        reports = (
+            [
+                row
+                for row in views.task_detail(self.home, task, reports=8)
+                if row["section"] == "reports" and row["kind"] == "body"
+            ]
+            if task is not None
+            else []
+        )
         if reports:
             lines.append("— reports —")
-            for r in reports:
-                lines.append(f"[{r.get('at', '')}] {r.get('status', '')}: {r.get('text', '')}")
+            lines += [views.detail_line(row) for row in reports]
         return lines

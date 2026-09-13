@@ -161,7 +161,7 @@ def auth_status(home: Path) -> bool | None:
 
     None is not a failure — it is the probe declining to answer: `[ci]` off
     (or an unreadable config, which means the same thing here), no CLI on
-    PATH, or a CLI that did not reply within `[ci].timeout_seconds`. An
+    PATH, or a CLI that did not reply within `TIMEOUT_SECONDS`. An
     offline machine must not be reported as a broken one, so only an
     explicit non-zero exit from a CLI that *did* answer is False.
     """

@@ -2,7 +2,7 @@
 itself.
 
 Reading an agent back is `quorum agent log` / `agent list`, and sending it
-guidance is `quorum board post --to <agent>`; what is left here is what a run
+guidance is `quorum agent tell`; what is left here is what a run
 writes down — why it did something (`note`) and what the next run needs
 (`remember` / `forget` / `notes`).
 """

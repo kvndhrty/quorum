@@ -179,9 +179,8 @@ def classify_prompt(existing: str | None, current: str, seeded: str | None) -> s
     has since moved on; also any differing copy with no record, since a
     lost record must never turn into an overwrite).
 
-    `existing` is None for a file that is not there *and* for one that
-    cannot be read — the caller tells them apart, because seeding over a
-    file quorum merely failed to decode would destroy it.
+    `classify_prompts` adds one more state over the same four, "unreadable",
+    for a copy it could not read at all.
     """
     if existing is None:
         return "missing"
@@ -193,8 +192,17 @@ def classify_prompt(existing: str | None, current: str, seeded: str | None) -> s
 
 
 def classify_prompts(home: Path) -> dict[str, str]:
-    """`classify_prompt` for every packaged default — the read-only view of
-    prompt staleness `quorum doctor` reports and `_seed_prompts` acts on."""
+    """`classify_prompt` for every packaged default — the one read-only view of
+    prompt staleness, shared by `quorum doctor`, `quorum init` and
+    `_seed_prompts`, so none of them can disagree about what "edited" means.
+
+    Adds one state `classify_prompt` cannot see, because it is a property of
+    the read rather than of the text: "unreadable", a file that is there but
+    cannot be decoded or opened. Every render of it fails, so it is neither
+    "missing" nor an edit, and reading it must not raise here — this runs in
+    `quorum doctor`, which exists to report such a file rather than crash on
+    it.
+    """
     target = Path(home) / "prompts"
     record = read_seeded_record(home)
     states = {}
@@ -203,9 +211,6 @@ def classify_prompts(home: Path) -> dict[str, str]:
         try:
             existing = dest.read_text(encoding="utf-8") if dest.is_file() else None
         except (OSError, UnicodeDecodeError):
-            # There *is* a file; quorum just cannot read it. Its own state,
-            # never "missing": every render of it fails, and seeding over it
-            # would silently destroy whatever it holds.
             states[filename] = "unreadable"
             continue
         states[filename] = classify_prompt(existing, current, record.get(filename))
@@ -221,10 +226,10 @@ def _seed_prompts(home: Path) -> dict[str, str]:
     has moved on it is reported as "edited" so the CLI can tell the user.
     Every file seeded, upgraded or found identical to the current default
     is (re)recorded in prompts/.seeded.json — so a home that predates the
-    record picks one up as long as its copies are pristine. A file quorum
-    cannot read is left exactly as it is and recorded under no hash. Returns
-    {filename: "seeded" | "upgraded" | "edited" | "unreadable"} covering only
-    files that changed or need attention.
+    record picks one up as long as its copies are pristine. A file that
+    cannot be read is left alone and not recorded, since nothing here knows
+    what it holds. Returns {filename: "seeded" | "upgraded" | "edited" |
+    "unreadable"} covering only files that changed or need attention.
     """
     target = home / "prompts"
     outcomes: dict[str, str] = {}
@@ -241,10 +246,8 @@ def _seed_prompts(home: Path) -> dict[str, str]:
         elif state == "upgradable":
             fsio.atomic_write_text(dest, current)
             outcomes[filename] = "upgraded"
-        elif state == "edited":
-            outcomes[filename] = "edited"
-        elif state == "unreadable":
-            outcomes[filename] = "unreadable"
+        elif state in ("edited", "unreadable"):
+            outcomes[filename] = state
         if state not in ("edited", "unreadable"):
             recorded[filename] = _sha256(current)
     if recorded != record:

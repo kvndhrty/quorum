@@ -204,7 +204,7 @@ def test_an_undecodable_project_file_renders_as_no_block(home: Path, tmp_path: P
 def test_a_project_block_needs_a_slot_and_is_never_prepended(home: Path):
     """Unlike the home overlay: an overlay is policy the home already had, so
     prepending it is a rescue; a project block is new, and guessing where it
-    goes in a rewritten template would be worse than `quorum prompt list`
+    goes in a rewritten template would be worse than `quorum doctor`
     saying it is not rendered."""
     write(home, "policy.md", "my own rewritten preamble\n")
 

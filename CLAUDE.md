@@ -98,7 +98,8 @@ Each entry says what the module owns and the rules a change must respect.
   Archival is the janitor's per-message path exposed (`archive_board_message`,
   `ack_board_message`, `archive_topic`, `clear_inbox`) — **archive, never a
   read-state flag**, which is what keeps the board free of consumption marks.
-  `archived_records` is the one scan of `messages/archive/*.jsonl.gz`.
+  `archived_records` is the one scan of `messages/archive/*.jsonl.gz`, by inbox
+  (`to=`) or by board topic (`topic=`) — exactly one, the rule a `Message` obeys.
 - `tasks.py` — the task substrate: `Task`/`TaskStore` over `tasks/<id>/task.json`,
   `report()` (the harness's return channel), and the path helpers runner, manager,
   views and CLI share. **Status is a free-form reported string**; only
@@ -174,9 +175,18 @@ Each entry says what the module owns and the rules a change must respect.
   and the TUI read it and nothing else, which is why they cannot disagree. It also
   renders a task row's marks once for every surface (`task_marker`, `task_badges`,
   `task_flags`, `usage_badge`), described by `status --legend`: a surface chooses
-  where to put them, never how to spell them. `task_history` is the post-hoc reader
-  over every file that records part of a task's life — bounded, fail-soft, records
-  nothing. Write affordances (TUI `n`, `m`, `s`, `c`, `a`) are thin calls into the
+  where to put them, never how to spell them. `task_detail` is the one assembly of
+  a task's whole record — `task show` prints its rows through `detail_line` and
+  `--json` dumps them, so text and JSON cannot disagree; `task_self_detail` and
+  `agent_detail_rows` are the same rows plus the `self` section a run gets about
+  itself, rendered from an `actor.SelfRun` it is handed so this stays a pure file
+  reader. The two post-hoc readers live here too — `task_history` over every
+  file that records part of a task's life, and `agent_interventions` over an
+  agent's journal read against its targets' reports (`quorum agent interventions
+  <name>`, no `manager` alias) — all bounded, fail-soft, recording nothing, and
+  **judging nothing**: the summary counts facts (a report happened, a `done`
+  report happened, a message is no longer live), never whether an intervention
+  worked. Write affordances (TUI `n`, `m`, `s`, `c`, `a`) are thin calls into the
   same code the CLI uses — **never view-local write logic** — and all go through
   `_write`, so an unwritable home notifies instead of taking the dashboard down.
 - `cli/` — one module per command group (`task`, `agent`, `manager`, `board`,
@@ -190,7 +200,12 @@ Each entry says what the module owns and the rules a change must respect.
   `current_actor()` for journalling and message attribution, and the runner strips
   the launcher's tag before setting the task's own (`QUORUM_ACTOR=task-<id>`,
   identity only — no journal, no cap). Owns `journal_path` / `notes_path` /
-  `transcript_path` and the two per-run agent defaults.
+  `transcript_path` and the two per-run agent defaults. It also owns the **read**
+  side of the tag (`show self`): `self_task_id` / `self_agent_name` split it so
+  exactly one answers, and `self_run` bundles the run-scoped facts as a `SelfRun`
+  for views to render — resolution here, rendering there, and `actions_used` is
+  the one count both the cap guard and `show self` read. **Read-only**: nothing
+  on this path changes a cap or a budget.
 - `notes.py` — the notebook: an agent's or a task's *standing* memory, a separate
   buffer from the journal (a bounded tail of one run) and the board (which anything
   may post to). Append-only `notes.jsonl` plus tombstones; `Notebook.render` gets
@@ -276,6 +291,12 @@ Each entry says what the module owns and the rules a change must respect.
 - `examples/steward.py` — the one shipped example plugin (a file organizer with
   undo), loaded by path in `tests/test_example_steward.py` so the worked example in
   the guide stays true. Not a builtin; users copy it into `plugins/`.
+- `examples/dogfood-home/` — the shipped example *home*: the config, the two
+  prompt overlays and the issue-driven loop that build quorum itself, minus all
+  machine-written state. `tests/test_example_home.py` installs it into a
+  scaffolded home and runs it through `load_config` and `prompts.render`, so a
+  renamed option, slot or command cannot leave it quietly wrong. Keep it a
+  *copy* of the live home's person-written parts, never a second scaffold.
 
 ### Adding an agent
 

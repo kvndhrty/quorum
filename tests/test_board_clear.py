@@ -173,7 +173,7 @@ def test_board_read_prints_the_handle_an_ack_needs(home: Path):
 
 
 def test_an_agents_ack_lands_in_its_journal(home: Path, monkeypatch):
-    """`board ack` mutates, so a harness-driven actor journals it like every
+    """`board clear --id` mutates, so a harness-driven actor journals it like every
     other mutating command — the manager acking its own escalation is exactly
     the case the journal exists to make visible."""
     msg = MessageBus(home).post("manager", "attention", "escalation", text="handled")

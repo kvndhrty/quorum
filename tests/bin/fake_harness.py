@@ -45,11 +45,23 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                     below), which makes pump tests deterministic: the
                     message provably lands *during* the run, yet before the
                     runner could close an idle stdin.
+    inject_fold     inject, but with the mid-run message folded into the turn
+                    that is already running — what the real claude CLI does
+                    when a nudge lands mid-turn (#109): seed a nudge, read it
+                    off stdin *before* answering the prompt, then emit ONE
+                    `result` event for both turns and exit at EOF. The
+                    `inject` mode above answers each turn with its own
+                    result, which is why it never caught the hang.
     hang            sleep far past any test timeout (exercises run timeouts)
     stall           print one line, then go silent forever — the shape of a
                     hung session, and what the stall watchdog must end
     ignore_sigterm  print one line, ignore SIGTERM, then sleep forever: the
                     harness `task stop` has to escalate to SIGKILL for
+    task_spawn      echo + act like a task that found work of its own: call
+                    `quorum task add` under the actor tag the runner set,
+                    once plainly and once with `--after self`, printing each
+                    exit code and any refusal. FAKE_HARNESS_SPAWN_PROJECT
+                    names the project to queue them on.
     manager_restart echo + act like a manager following the hung-session
                     policy in prompts/manager.md, one step per run, reading
                     which step it is at off the digest's own marks: STALLED
@@ -70,13 +82,23 @@ field, so a fake *task* harness and a fake *manager* harness coexist:
                        i.e. leave the working tree dirty the way a harness
                        that crashed (or ignored the delivery protocol) does
   FAKE_HARNESS_INJECT_POST   inject-mode knob: "nudge" sends `task nudge` to
-                             its own task, "tell" sends `board post --to manager`
+                             its own task, "tell" sends `agent tell manager`
+  FAKE_HARNESS_WATCHDOG      seconds an inject-mode harness waits for stdin to
+                             close before exiting 7 (default 30): a close bug
+                             must fail a test loudly, never wedge CI
   FAKE_HARNESS_NOTE    manager_remember mode: the text to remember
+  FAKE_HARNESS_SPAWN_PROJECT   task_spawn mode: the project slug to queue the
+                               new tasks on
+
+Every mode that calls back into the CLI prints the command first, as
+`RUN| quorum <argv>`, the way a real harness's transcript carries the shell
+line it ran.
 """
 
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -103,6 +125,11 @@ def usage_block() -> dict | None:
 
 
 def quorum(*args) -> subprocess.CompletedProcess:
+    # Announce the command on stdout before running it, the way a real
+    # harness's transcript shows the shell line it executed. That line is
+    # what anything reading a transcript for "which quorum verbs did this
+    # run reach for" has to work from (scripts/evidence.py).
+    print("RUN| quorum " + " ".join(shlex.quote(a) for a in args), flush=True)
     return subprocess.run(
         [sys.executable, "-m", "quorum", *args], capture_output=True, text=True
     )
@@ -113,11 +140,12 @@ def task_id_from(prompt: str) -> str | None:
     return m.group(1) if m else None
 
 
-def inject_main() -> int:
+def inject_main(fold: bool = False) -> int:
     print(json.dumps({"argv": sys.argv[1:]}))
     print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
     # If the close logic ever regresses, die loudly instead of wedging CI.
-    watchdog = threading.Timer(30, lambda: os._exit(7))
+    grace = float(os.environ.get("FAKE_HARNESS_WATCHDOG", "30"))
+    watchdog = threading.Timer(grace, lambda: os._exit(7))
     watchdog.daemon = True
     watchdog.start()
     first = sys.stdin.readline().strip()
@@ -130,6 +158,26 @@ def inject_main() -> int:
         print(f"PROMPT| {line}")
     print(f"CWD| {os.getcwd()}")
 
+    result = {"type": "result", "subtype": "success", **(usage_block() or {})}
+    if fold:
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        quorum("task", "nudge", task_id, "switch to the fallback plan")
+        # Read the nudge while this turn is still running, the way a
+        # stream-json CLI drains queued input into the turn in flight...
+        queued = sys.stdin.readline().strip()
+        if not queued:
+            print("no mid-turn message arrived on stdin", file=sys.stderr)
+            return 4
+        print(json.dumps({"type": "stdin", "received": json.loads(queued)}), flush=True)
+        # ...and answer both turns with a single result event.
+        print(json.dumps(result), flush=True)
+        for _ in sys.stdin:
+            pass  # nothing further is owed a result; exit when stdin closes
+        return 0
+
     post = os.environ.get("FAKE_HARNESS_INJECT_POST", "")
     if post == "nudge":
         task_id = task_id_from(prompt)
@@ -138,8 +186,7 @@ def inject_main() -> int:
             return 4
         quorum("task", "nudge", task_id, "switch to the fallback plan")
     elif post == "tell":
-        quorum("board", "post", "pause new launches until tests pass", "--to", "manager")
-    result = {"type": "result", "subtype": "success", **(usage_block() or {})}
+        quorum("agent", "tell", "manager", "pause new launches until tests pass")
     print(json.dumps(result), flush=True)
     for line in sys.stdin:
         line = line.strip()
@@ -165,8 +212,8 @@ def main() -> int:
         print(json.dumps({"type": "system", "session_id": "sess-fake-123"}), flush=True)
         time.sleep(600)
         return 0
-    if mode == "inject":
-        return inject_main()
+    if mode in ("inject", "inject_fold"):
+        return inject_main(fold=mode == "inject_fold")
     prompt = max(sys.argv[1:], key=len) if len(sys.argv) > 1 else ""
     scratch = os.environ.get("FAKE_HARNESS_WRITE")
     if scratch:
@@ -248,6 +295,19 @@ def main() -> int:
         print(f"ACT| manager remember -> exit {r.returncode}")
         if r.returncode != 0 and r.stderr.strip():
             print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
+        print(f"ACTOR| {os.environ.get('QUORUM_ACTOR', '')}")
+
+    elif mode == "task_spawn":
+        task_id = task_id_from(prompt)
+        if not task_id:
+            print("no task id found in prompt", file=sys.stderr)
+            return 4
+        project = os.environ.get("FAKE_HARNESS_SPAWN_PROJECT", "proj")
+        for extra in ([], ["--after", "self"]):
+            r = quorum("task", "add", project, "work this run found", *extra)
+            print(f"ACT| task add {' '.join(extra)} -> exit {r.returncode}")
+            if r.returncode != 0 and r.stderr.strip():
+                print(f"REFUSED| {r.stderr.strip().splitlines()[0]}")
         print(f"ACTOR| {os.environ.get('QUORUM_ACTOR', '')}")
 
     elif mode == "manager_restart":

@@ -112,7 +112,7 @@ def test_opencode_plugin_adopts_and_delivers_guidance(
     assert task.session == session and task.workdir == str(repo)
     assert task.prompt == "fix the flaky auth test"
 
-    # idle with guidance queued: hook-stop output injected as a user turn
+    # idle with guidance queued: `task hook stop` output injected as a user turn
     bus = MessageBus(home)
     bus.send("manager", inbox_name(task.id), type="guidance", text="run the tests before pushing")
     out = drive(node, quorum_bin, home, "idle", repo, session)

@@ -36,8 +36,13 @@ quorum tui                              # the same, live
 ```
 
 From there: `quorum task log <id> -f` follows a run, `quorum task nudge <id>
-"..."` steers one, and `quorum board post --to manager "..."` steers the
+"..."` steers one, and `quorum agent tell manager "..."` steers the
 manager.
+
+For a home that is already working rather than a scaffold to fill in, copy
+[examples/dogfood-home/](https://github.com/kvndhrty/quorum/tree/main/examples/dogfood-home) —
+the home that builds quorum itself: its config, its manager's house rules, the
+issue-driven loop, and what a development cycle cost.
 
 ![quorum terminal dashboard](https://raw.githubusercontent.com/kvndhrty/quorum/main/docs/images/tui.png)
 

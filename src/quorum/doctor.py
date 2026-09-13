@@ -90,6 +90,14 @@ class Check:
     def glyph(self) -> str:
         return GLYPH[self.status]
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "summary": self.summary,
+            "fix": self.fix,
+        }
+
 
 def ok(name: str, summary: str, fix: str = "") -> Check:
     return Check(name=name, status=OK, summary=summary, fix=fix)
@@ -632,16 +640,6 @@ def check_prompts(home: Path) -> list[Check]:
                     "`quorum init` seeds an editable copy",
                 )
             )
-        elif state == "unreadable":
-            checks.append(
-                problem(
-                    name,
-                    f"prompts/{filename} cannot be read (not UTF-8, or no permission) — "
-                    "every render of it fails",
-                    "fix the encoding or permissions, or delete it to fall back to the "
-                    "packaged default",
-                )
-            )
         elif state == "upgradable":
             checks.append(
                 problem(
@@ -649,6 +647,16 @@ def check_prompts(home: Path) -> list[Check]:
                     f"prompts/{filename} is an older packaged default, never edited — "
                     "this home is running last release's policy",
                     "run `quorum init`: it upgrades unedited seeds in place",
+                )
+            )
+        elif state == "unreadable":
+            checks.append(
+                problem(
+                    name,
+                    f"prompts/{filename} cannot be read (not UTF-8, or no permission) — "
+                    "every render of it fails",
+                    "fix the file, or delete it and run `quorum init` to seed the "
+                    "packaged default again",
                 )
             )
         else:  # "edited"
@@ -1174,3 +1182,7 @@ def tally(checks: list[Check]) -> dict[str, int]:
         "na": sum(1 for c in checks if c.status == NA),
     }
 
+
+def report(home: Path, checks: list[Check]) -> dict[str, Any]:
+    """The `--json` shape: the same lines a human sees, plus the tally."""
+    return {"home": str(home), "checks": [c.as_dict() for c in checks], **tally(checks)}

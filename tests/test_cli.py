@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from conftest import harness_table, install_gh, make_repo
+from conftest import (
+    cli_command_names,
+    harness_table,
+    install_gh,
+    make_repo,
+    names_a_real_command,
+    quorum_invocations,
+)
 from quorum import fsio, views
 from quorum.cli import app
 
@@ -382,6 +389,43 @@ def test_agent_control_commands_land_in_supervisor_inbox(home: Path):
     assert msg["type"] == "agent.resume" and msg["payload"]["agent"] == "manager"
 
 
+def test_agent_tell_queues_guidance_and_refuses_an_unknown_agent(home: Path, monkeypatch):
+    """`quorum agent tell` is the CLI half of a prompt agent's `{directives}`
+    (#129). It is also the manager's guidance path, so the two defects it
+    fixed there are asserted here: the send is journaled and capped like any
+    other agent action, and the sender is the actor, not always "user"."""
+    from quorum import fsio
+    from quorum.actor import journal_path
+    from quorum.messages import MessageBus
+
+    r = runner.invoke(app, [
+        "agent", "create", "standup", "post a standup note", "--harness", "fake",
+    ])
+    assert r.exit_code == 0, r.output
+
+    r = runner.invoke(app, ["agent", "tell", "standup", "skip the retro section"])
+    assert r.exit_code == 0, r.output
+    msgs = [fsio.read_json(p) for p in fsio.sorted_entries(MessageBus(home).inbox_dir / "standup" / "new")]
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "guidance" and msgs[0]["from"] == "user"
+    assert msgs[0]["payload"]["text"] == "skip the retro section"
+
+    # an agent nothing schedules would never read it: refused, and nothing sent
+    r = runner.invoke(app, ["agent", "tell", "ghost", "hello?"])
+    assert r.exit_code == 1 and "no agent 'ghost'" in r.output
+    assert not (MessageBus(home).inbox_dir / "ghost").exists()
+
+    # a manager-tagged call is attributed to the manager and journaled
+    monkeypatch.setenv("QUORUM_ACTOR", "manager")
+    monkeypatch.setenv("QUORUM_ACTOR_RUN", "01TELLRUN")
+    r = runner.invoke(app, ["agent", "tell", "standup", "and keep it short"])
+    assert r.exit_code == 0, r.output
+    msgs = [fsio.read_json(p) for p in fsio.sorted_entries(MessageBus(home).inbox_dir / "standup" / "new")]
+    assert [m["from"] for m in msgs] == ["user", "manager"]
+    entries = fsio.read_jsonl(journal_path(home, "manager"))
+    assert [(e["action"], e["target"]) for e in entries] == [("agent.tell", "standup")]
+
+
 def test_agent_create_remove_and_reload(home: Path):
     from quorum import fsio
     from quorum.messages import MessageBus
@@ -442,22 +486,18 @@ def test_run_once_respects_the_tick_lock(home: Path):
 # -- manager ---------------------------------------------------------------
 
 
-def test_board_post_to_an_inbox_note_and_the_action_journal(home: Path):
+def test_agent_tell_manager_note_and_the_action_journal(home: Path):
     from quorum import fsio
     from quorum.agents.manager import journal_path
     from quorum.messages import MessageBus
 
-    r = runner.invoke(app, ["board", "post", "focus on the api task", "--to", "manager"])
+    r = runner.invoke(app, ["agent", "tell", "manager", "focus on the api task"])
     assert r.exit_code == 0, r.output
     inbox = MessageBus(home).inbox_dir / "manager" / "new"
-    assert len(fsio.sorted_entries(inbox)) == 1
-    assert fsio.read_json(fsio.sorted_entries(inbox)[0])["type"] == "guidance"
-
-    # an inbox is not a topic: a name no agent answers to is refused rather
-    # than written to a maildir nobody ever claims
-    r = runner.invoke(app, ["board", "post", "hello", "--to", "ghost"])
-    assert r.exit_code == 1 and "no agent 'ghost'" in r.output
-    assert len(fsio.sorted_entries(inbox)) == 1
+    entries = fsio.sorted_entries(inbox)
+    assert len(entries) == 1
+    # the manager is an agent like any other: one write path, one vocabulary
+    assert fsio.read_json(entries[0])["type"] == "guidance"
 
     r = runner.invoke(app, ["manager", "note", "human-added context"])
     assert r.exit_code == 0
@@ -466,6 +506,23 @@ def test_board_post_to_an_inbox_note_and_the_action_journal(home: Path):
 
     r = runner.invoke(app, ["agent", "log", "manager", "--actions"])
     assert "human-added context" in r.output
+
+
+def test_agent_tell_refuses_a_home_with_no_manager_agent(home: Path):
+    """`agent tell` refuses a recipient no config declares, and the manager is
+    not exempt: a home whose config declares no `[agents.manager]` schedules
+    no manager, so the message would sit in a maildir nothing ever claims."""
+    from quorum import fsio
+    from quorum.messages import MessageBus
+
+    config = (home / "config.toml").read_text()
+    head, _, _ = config.partition("[agents.manager]")
+    (home / "config.toml").write_text(head)
+
+    r = runner.invoke(app, ["agent", "tell", "manager", "focus on the api task"])
+    assert r.exit_code == 1
+    assert "no agent 'manager'" in r.output
+    assert not fsio.sorted_entries(MessageBus(home).inbox_dir / "manager" / "new")
 
 
 def test_mutating_commands_journal_only_for_the_manager_actor(
@@ -684,6 +741,79 @@ def test_prompt_layers_degrade_over_an_unreadable_file(home: Path):
     assert "cannot be read" in _plain(r.output)
     assert "Traceback" not in r.output
 
+    # ...and neither does it take doctor down: the classifier both commands
+    # read must report such a file, not raise on it
+    r = runner.invoke(app, ["doctor", "--json"])
+    checks = {c["name"]: c for c in json.loads(r.output)["checks"]}
+    assert checks["prompts.manager"]["status"] == "problem"
+    assert "cannot be read" in checks["prompts.manager"]["summary"]
+
+    # init says so and leaves the file alone: it cannot know what it holds
+    from quorum import home as home_mod
+
+    r = runner.invoke(app, ["init"])
+    assert r.exit_code == 0, r.output
+    assert "prompts/manager.md: cannot be read" in _plain(r.output)
+    assert (home / "prompts" / "manager.md").read_bytes() == b"\xff\xfe not utf-8\n"
+    assert home_mod.classify_prompts(home)["manager.md"] == "unreadable"
+
+
+@pytest.mark.parametrize(
+    ("edit", "state", "doctor_status", "doctor_says", "diff_says"),
+    [
+        pytest.param(False, "default", "ok", "matches", "identical to the packaged default",
+                     id="default"),
+        pytest.param(False, "upgradable", "problem", "older packaged default, never edited",
+                     "`quorum init` upgrades it in place", id="upgradable"),
+        pytest.param(True, "edited", "na", "is edited",
+                     "is yours, so `quorum init` never upgrades it", id="edited"),
+    ],
+)
+def test_doctor_and_prompt_diff_agree_on_every_prompt_state(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: bool,
+    state: str,
+    doctor_status: str,
+    doctor_says: str,
+    diff_says: str,
+):
+    """The listing that preceded doctor's prompt lines classified with `text
+    == default`, so a copy an older `quorum init` seeded and nobody ever
+    touched read as "edited" there while doctor called it an upgradable seed —
+    and the fix init was offering stayed hidden (#126). One classifier
+    (`home.classify_prompts`) now answers for all three states, and so does
+    the closing advice of `quorum prompt diff` — which used to call an
+    untouched older seed "yours" and say init would never upgrade it, the same
+    false claim one command further on."""
+    from quorum import home as home_mod
+    from quorum import prompts as prompts_mod
+
+    copy = home / "prompts" / "manager.md"
+    seeded = copy.read_text(encoding="utf-8")
+    if edit:
+        copy.write_text("my own manager policy\n", encoding="utf-8")
+    if state != "default":
+        # A later release of quorum ships a changed manager prompt. Two
+        # functions read the packaged defaults, and both readers under test go
+        # through one of them, so the fake has to cover both.
+        packaged = dict(home_mod.packaged_prompts())
+        packaged["manager.md"] = seeded + "\nA rule a later release added.\n"
+        monkeypatch.setattr(home_mod, "packaged_prompts", lambda: packaged)
+        monkeypatch.setattr(prompts_mod, "packaged", lambda name: packaged.get(f"{name}.md"))
+    assert home_mod.classify_prompts(home)["manager.md"] == state
+
+    r = runner.invoke(app, ["doctor", "--json"])
+    check = {c["name"]: c for c in json.loads(r.output)["checks"]}["prompts.manager"]
+    assert check["status"] == doctor_status
+    assert doctor_says in check["summary"]
+
+    r = runner.invoke(app, ["prompt", "diff", "manager"])
+    assert r.exit_code == 0, r.output
+    assert diff_says in _plain(r.output)
+    if state == "upgradable":
+        assert "is yours" not in _plain(r.output)
+
 
 def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     """The babysitter example ships as a packaged prompt; creating an agent
@@ -711,81 +841,20 @@ def test_agent_create_can_reuse_a_shipped_prompt(home: Path):
     assert r.exit_code == 1 and "drop the prompt argument" in r.output
 
 
-def _quorum_invocations(text: str) -> list[str]:
-    """Every `quorum ...` command a prompt or a doc names: inline code spans,
-    list-item tool lines, and indented example blocks.
-
-    A code span may be wrapped across a line break in prose, so newlines
-    inside one are folded away rather than ending it — a command that only
-    reads as a command once its two lines are joined is still a command.
-    Fenced blocks are cut out before that, or their own ``` fences would
-    pair with the spans around them; their lines are read below anyway."""
-    import re
-
-    prose = re.sub(r"^```.*?^```", "", text, flags=re.MULTILINE | re.DOTALL)
-    found = [
-        flat
-        for span in re.findall(r"`([^`]+)`", prose)
-        if (flat := " ".join(span.split())).startswith("quorum ")
-    ]
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            stripped = stripped[2:]
-        if stripped.startswith("quorum "):
-            found.append(stripped)
-    return found
-
-
-def _known_commands() -> set[str]:
-    """Every spelling the CLI answers to: a root `verb`, or a `group verb`."""
-
-    def cmd_name(info) -> str:
-        # An unnamed @app.command() takes its name from the callback.
-        return info.name or info.callback.__name__.rstrip("_").replace("_", "-")
-
-    known = {cmd_name(c) for c in app.registered_commands}
-    for group in app.registered_groups:
-        known |= {
-            f"{group.name} {cmd_name(c)}" for c in group.typer_instance.registered_commands
-        }
-    return known
-
-
-def _named_command(invocation: str) -> str:
-    """The command an invocation names: its leading word tokens, at most two
-    (a group and its verb), stopping at the first option or argument.
-
-    `--home` is the one option that comes *before* the command, so it and its
-    value are stepped over rather than read as the verb."""
-    import re
-
-    tokens = invocation.split()[1:]
-    if tokens[:1] == ["--home"]:
-        tokens = tokens[2:]
-    words: list[str] = []
-    for token in tokens:
-        if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
-            break
-        words.append(token)
-    return " ".join(words)
-
-
 def test_shipped_prompts_only_name_real_cli_commands():
     """The packaged prompts ARE the product's policy layer; a command that
     was renamed out from under one fails silently at 3am, in a transcript
-    nobody reads."""
+    nobody reads. The example home gets the same check in
+    tests/test_example_home.py."""
     from importlib import resources
 
-    known = _known_commands()
+    known = cli_command_names(app)
     checked = 0
     for entry in (resources.files("quorum") / "default_prompts").iterdir():
         if not entry.name.endswith(".md"):
             continue
-        for invocation in _quorum_invocations(entry.read_text(encoding="utf-8")):
-            named = _named_command(invocation)
-            assert named, f"{entry.name}: bare `quorum` in {invocation!r}"
-            assert named in known or named.split()[0] in known, (
+        for invocation in quorum_invocations(entry.read_text(encoding="utf-8")):
+            assert names_a_real_command(invocation, known), (
                 f"{entry.name} names a command that does not exist: {invocation!r}"
             )
             checked += 1
@@ -799,7 +868,9 @@ def test_user_facing_docs_only_name_real_cli_commands():
     of a person, where the prompts' version of this is one in front of a
     model. The CHANGELOG is exempt — naming the old spelling beside the new
     one is exactly what its Upgrading notes are for."""
-    known = _known_commands()
+    import re
+
+    known = cli_command_names(app)
     groups = {group.name for group in app.registered_groups}
     root = Path(__file__).parent.parent
     docs = [
@@ -809,17 +880,21 @@ def test_user_facing_docs_only_name_real_cli_commands():
     ]
     checked = 0
     for doc in docs:
-        for invocation in _quorum_invocations(doc.read_text(encoding="utf-8")):
-            named = _named_command(invocation)
-            first = named.split()[0] if named else ""
-            if first not in groups:
+        for invocation in quorum_invocations(doc.read_text(encoding="utf-8")):
+            words: list[str] = []
+            for token in invocation.split()[1:]:
+                if len(words) == 2 or not re.fullmatch(r"[a-z][a-z-]*", token):
+                    break
+                words.append(token)
+            if not words or words[0] not in groups:
                 # a root command with its arguments, or — since these files are
                 # prose and a code span may hold a sentence — not an
                 # invocation at all
                 continue
+            named = " ".join(words)
             # every command a group can name is `group verb`; a bare group is
             # a reference to the group itself
-            assert named == first or named in known, (
+            assert named == words[0] or named in known, (
                 f"{doc.name} names a command that does not exist: {invocation!r}"
             )
             checked += 1
@@ -992,19 +1067,52 @@ def test_task_show_is_words_not_a_record_dump(home: Path, tmp_path: Path):
     assert "project:  " + slug in r.output
     assert "tidy the docs" in r.output
     assert not r.output.lstrip().startswith("{")
-    assert "task.json" in r.output  # where the raw record lives
+
+    r = runner.invoke(app, ["task", "show", short, "--json"])
+    record = json.loads(r.output)
+    # the raw record stays at the top level — the babysitter prompt reads
+    # `workdir` straight off it
+    assert record["prompt"] == "tidy the docs"
 
 
-def test_the_listings_are_tables_not_payloads(home: Path, tmp_path: Path):
+def test_task_show_prints_the_rows_its_json_carries(home: Path, tmp_path: Path):
+    """Text and `--json` are one assembly (`views.task_detail`) rendered two
+    ways, so the omissions the #110 review found — `dependents:` and the
+    handoff body, printed but not dumped — cannot come back: every line of
+    the text is a row of the JSON, and every row carries its fact as a
+    field of its own as well."""
+    from quorum import views
+
+    slug = setup_task_env(home, tmp_path)
+    upstream = _queue(home, slug, "build it")
+    dependent = _queue(home, slug, "review it", "--after", upstream)
+    handoff = tmp_path / "handoff.md"
+    handoff.write_text("Changed: the thing.\nCheck first: tests/\n", encoding="utf-8")
+    runner.invoke(
+        app,
+        ["task", "report", upstream, "shipped", "--status", "done", "--handoff", str(handoff)],
+    )
+
+    text = runner.invoke(app, ["task", "show", upstream])
+    dumped = json.loads(runner.invoke(app, ["task", "show", upstream, "--json"]).output)
+    rows = dumped["detail"]
+    assert text.output.splitlines() == [views.detail_line(row) for row in rows]
+
+    by_label = {r["label"]: r for r in rows if r["kind"] == "field"}
+    assert by_label["dependents"]["dependents"] == [dependent]
+    handoff_rows = [r for r in rows if r["section"] == "handoff"]
+    assert handoff_rows[0]["handoff"] == "Changed: the thing.\nCheck first: tests/\n"
+
+
+def test_list_commands_emit_json(home: Path, tmp_path: Path):
     slug = setup_task_env(home, tmp_path)
     runner.invoke(app, ["task", "add", slug, "a task", "--harness", "fake"])
-    for argv in (["task", "list"], ["agent", "list"], ["status"]):
-        r = runner.invoke(app, argv)
-        assert r.exit_code == 0, r.output
-        assert not r.output.lstrip().startswith(("{", "["))
-    assert slug in runner.invoke(app, ["task", "list"]).output
-    assert "manager" in runner.invoke(app, ["agent", "list"]).output
-    assert slug in runner.invoke(app, ["status"]).output
+    tasks = json.loads(runner.invoke(app, ["task", "list", "--json"]).output)
+    assert tasks[0]["project"] == slug
+    agents = json.loads(runner.invoke(app, ["agent", "list", "--json"]).output)
+    assert any(a["name"] == "manager" for a in agents)
+    overview = json.loads(runner.invoke(app, ["status", "--json"]).output)
+    assert overview["attention"]["count"] == 0
 
 
 def test_status_and_task_show_surface_what_a_run_spent(
