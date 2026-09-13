@@ -181,11 +181,13 @@ Each entry says what the module owns and the rules a change must respect.
   and the TUI read it and nothing else, which is why they cannot disagree. It also
   renders a task row's marks once for every surface (`task_marker`, `task_badges`,
   `task_flags`, `usage_badge`), described by `status --legend`: a surface chooses
-  where to put them, never how to spell them. The two post-hoc readers live here
-  — `task_history` over every file that records part of a task's life, and
-  `agent_interventions` over an agent's journal read against its targets'
-  reports (`quorum agent interventions <name>`, no `manager` alias) — both
-  bounded, fail-soft, recording nothing, and **judging nothing**: the summary
+  where to put them, never how to spell them. `task_detail` is the one assembly of
+  a task's whole record — `task show` prints its rows through `detail_line` and
+  `--json` dumps them, so text and JSON cannot disagree. The two post-hoc readers
+  live here too — `task_history` over every file that records part of a task's
+  life, and `agent_interventions` over an agent's journal read against its
+  targets' reports (`quorum agent interventions <name>`, no `manager` alias) —
+  all bounded, fail-soft, recording nothing, and **judging nothing**: the summary
   counts facts (a report happened, a `done` report happened, a message is no
   longer live), never whether an intervention worked. Write affordances (TUI
   `n`, `m`, `s`, `c`, `a`) are thin calls into the same code the CLI uses —
