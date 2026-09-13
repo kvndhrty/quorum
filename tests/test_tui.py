@@ -543,6 +543,31 @@ def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path, t
     tui(home, script)
 
 
+def test_the_transcript_tab_lists_reports_the_way_task_show_does(home: Path, tui):
+    """The one fact the detail pane and `quorum task show` both display is a
+    task's recent reports, so the pane renders the rows views assembles
+    (`views.task_detail`) through the same line formatter instead of
+    spelling the line a second time."""
+    from quorum import views
+
+    ids = populate(home)
+    tasks.report(home, ids[1], status="executing", text="on it")
+
+    async def script(app, pilot):
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — transcript")
+        rows = [
+            r
+            for r in views.task_detail(home, TaskStore(home).get(ids[1]))
+            if r["section"] == "reports" and r["kind"] == "body"
+        ]
+        assert app._log_lines[-2:] == ["— reports —", views.detail_line(rows[0])]
+        assert "executing: on it" in app._log_lines[-1]
+
+    tui(home, script)
+
+
 def test_t_opens_the_highlighted_tasks_history_and_toggles_back(home: Path, tui):
     """`t` is the detail pane's second tab: the task's life, oldest first,
     rendered by the same rows `quorum task history` prints. Pressed again it

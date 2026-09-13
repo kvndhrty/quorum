@@ -48,6 +48,18 @@ def test_jsonl_roundtrip_tolerates_torn_line(tmp_path: Path):
     assert fsio.read_jsonl(log) == [{"n": 1}, {"n": 2}]
 
 
+def test_jsonl_tolerates_a_line_torn_inside_a_character(tmp_path: Path):
+    """A write cut mid-append is cut at a byte, so a torn line can end inside
+    a multi-byte character and leave bytes that are not UTF-8. That costs the
+    line, like any other torn one — decoding strictly would raise out of every
+    reader of the log instead."""
+    log = tmp_path / "log.jsonl"
+    fsio.append_jsonl(log, {"n": 1})
+    with open(log, "ab") as f:
+        f.write('{"n": "café'.encode()[:-1])
+    assert fsio.read_jsonl(log) == [{"n": 1}]
+
+
 def test_pid_lock_conflict_and_stale_takeover(tmp_path: Path):
     lock = tmp_path / "supervisor.lock"
     fsio.acquire_pid_lock(lock)
