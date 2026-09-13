@@ -525,6 +525,8 @@ def task_show(
 
     target = get_home()
     if history:
+        if json_out:
+            raise _fail("--history prints the task's life; --json dumps the record")
         if task_id == SELF:
             task_id = _resolve_self_task(target).id
         _task_history(target, task_id)

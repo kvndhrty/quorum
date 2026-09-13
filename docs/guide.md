@@ -565,6 +565,7 @@ that goes and looks.
 
 ```bash
 quorum doctor                  # one line per check; exits 1 if anything is ✗
+quorum doctor --json           # the same checks, for scripts
 quorum doctor --smoke          # ...and run the default harness once, for real
 quorum doctor --smoke codex    # ...that one instead
 ```
@@ -1020,7 +1021,8 @@ total             7       3/7     8       1  $11.31   22.0M     6  3/5 (60%)    
   manager and every prompt agent, off their usage logs: runs, how many raised
   or timed out, spend, median run time). `--since 7d` / `36h` / `2w` keeps the
   tasks queued in that window — a task belongs to the moment it was queued, so
-  a window is a set of tasks, never runs sliced mid-task.
+  a window is a set of tasks, never runs sliced mid-task. `--json` gives every
+  figure unrounded.
 - The `reported` column says how many of the row's tasks the `$` figure
   covers, and is shown only when that differs from `tasks`: a row mixing
   claude with codex has fewer tasks behind its `$` than behind its tokens.

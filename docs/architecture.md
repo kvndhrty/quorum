@@ -327,7 +327,7 @@ store.
 answer "what did this run cost"; the questions asked after a week are
 aggregate — what did this project cost, is one harness cheaper per merged
 PR, how long from queue to merge. `quorum usage [--by
-project|harness|week|agent] [--since 7d]` answers them as a **pure
+project|harness|week|agent] [--since 7d] [--json]` answers them as a **pure
 reader with no cache** (#88): it opens `tasks/<id>/task.json`, each task's
 `reports.jsonl` and the agent usage logs, recomputed on every call, so it
 works with the supervisor stopped. `reports.jsonl` is read for one fact —
@@ -1745,7 +1745,7 @@ looks. Three rails, and they are the whole design:
 3. **Three states, no fourth.** `ok` / `problem` / `na` (✓ / ✗ / –), where
    `na` covers "you turned this off" and "there is nothing configured to
    check". Only `problem` sets a non-zero exit, which is what makes `quorum
-   doctor` usable in a script and keeps a `–` from training anyone to
+   doctor --json` usable in a script and keeps a `–` from training anyone to
    ignore the output. A fresh `quorum init` home — no `[harness.*]` table,
    no `default_harness` — is one `–` line rather than two ✗ for one unmade
    decision, and a `gh` that never answered is `–` too, because an offline
