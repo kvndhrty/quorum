@@ -731,7 +731,13 @@ def read_transcript_tail(
 
 
 def read_reports(home: Path, task_id: str, limit: int | None = None) -> list[dict]:
+    """The task's reports, oldest first. Objects only: a hand-edited or
+    future-version line that is valid JSON and not an object is skipped here
+    rather than at each call site, because every caller reads it with
+    `.get()` — the manager digest, `views.task_detail`, the task listing —
+    and one scalar line would otherwise raise out of all three."""
     entries = fsio.read_jsonl(reports_path(home, task_id))
+    entries = [e for e in entries if isinstance(e, dict)]
     return entries[-limit:] if limit else entries
 
 

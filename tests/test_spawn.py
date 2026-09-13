@@ -507,12 +507,33 @@ def test_task_list_and_show_carry_the_family(home: Path, tmp_path: Path, monkeyp
     assert listed.exit_code == 0, listed.output
     assert f"parent {parent.short_id}" in listed.output and "⇗" in listed.output
 
+    # One assembly of the record (views.task_detail), printed by `task show`
+    # and dumped under `detail` by --json: assert the rows, then the lines
+    # they render to, so the two surfaces cannot drift apart.
+    rows = {r.get("label"): r for r in views.task_detail(home, store.get(parent.id))}
+    assert rows["spawned"]["spawned"] == [child.short_id]
+    assert rows["spawn"]["allow_spawn"] and rows["spawn"]["spawn_used"] == 1
+    assert rows["spawn"]["spawn_max"] == 5 and rows["spawn"]["spawn_capped"] is False
+    assert "⇗" in rows["status"]["text"]
+    assert views.detail_line(rows["spawned"]) == f"  spawned:  {child.short_id}"
+    assert views.detail_line(rows["spawn"]) == "  spawn:    allowed — 1/5 used"
+
     shown = runner.invoke(app, ["task", "show", parent.short_id])
     assert f"spawned:  {child.short_id}" in shown.output
     assert "spawn:    allowed — 1/5 used" in shown.output
     assert f"parent:   {parent.short_id}" in runner.invoke(
         app, ["task", "show", child.short_id]
     ).output
+
+    # The same facts in --json, under `detail`, so text and JSON say the same
+    # thing about a family.
+    dumped = runner.invoke(app, ["task", "show", parent.short_id, "--json"])
+    detail = json.loads(dumped.output)["detail"]
+    assert [r for r in detail if r.get("spawned") == [child.short_id]]
+    child_detail = json.loads(
+        runner.invoke(app, ["task", "show", child.short_id, "--json"]).output
+    )["detail"]
+    assert [r for r in child_detail if r.get("parent") == parent.short_id]
 
     legend = runner.invoke(app, ["status", "--legend"])
     assert "⇗" in legend.output and "SPAWN-CAP" in legend.output
