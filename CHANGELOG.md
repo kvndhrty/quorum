@@ -35,6 +35,18 @@ minute it is posted.
   digest so it does not read them as actions of its own; task lines gain
   `parent=` / `spawned=` / `SPAWN-CAP`; `quorum status`, `task list`, the
   TUI and `task show` show the link and a `⇗` badge.
+- The surface *use* extractor (#128): `scripts/evidence.py <QUORUM_HOME>` reads
+  a home — task transcripts live and archived, the manager's and each agent's
+  transcript and journal, run snapshots, heartbeats, `logs/`, `messages/`,
+  every `task.json`, `config.toml`, `agents/*.toml` and `prompts/` — and prints one
+  table per surface class with each observed CLI verb, option, config key, TUI
+  binding and prompt placeholder split by actor (person, manager, prompt agent,
+  task harness), with a blank `verdict` column. Read-only, and never counts as
+  use a call that named another home or went through `uv run quorum`. Beside
+  the day table it prints each agent's schedule and last heartbeat and the
+  supervisor's up/down spans, because a tick that spent no harness run writes
+  no transcript and would otherwise read as no tick at all. It is the evidence
+  half of round two of the surface review; the verdicts are recorded in #128.
 - The dogfood home as a worked example (#64): `examples/dogfood-home/`
   ships the home that builds quorum — its real `config.toml` (the
   `[harness.claude]` block with a comment on why each `--allowedTools` entry
