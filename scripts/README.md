@@ -10,3 +10,14 @@ Development scripts. Not shipped in the wheel and not imported by quorum.
   after each surface change so growth stays visible; the command, option and
   config-key counts come from `quorum.surfaces`, the module behind
   `quorum doctor`'s `surfaces` line, so the two cannot disagree.
+- `evidence.py` — the other half: `uv run python scripts/evidence.py <QUORUM_HOME>`
+  reads a home and prints, per surface class, what that home records as actually
+  *used* — every CLI verb, option, config key, TUI binding and prompt
+  placeholder, split by actor (person, manager, prompt agent, task harness),
+  beside the counts `surfaces.py` reports, with a blank `verdict` column. Read
+  only: it never writes to the home and never runs a quorum command against it.
+  A call that named another home or went through `uv run quorum` is counted in
+  its own column and never as use, and a day's blank cell means no harness run
+  rather than no tick — the agent heartbeats and the supervisor's up/down spans
+  printed beside it are what say when a schedule was firing. Issue #128 is the
+  review it was written for.

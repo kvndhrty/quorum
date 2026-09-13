@@ -51,9 +51,12 @@ def test_numeric_options_reads_int_and_float_defaults_and_skips_switches():
         "max_cost_per_run": 0.0,
         "max_tokens_per_run": 0,
         "run_stall_timeout_seconds": 0.0,
+        "max_spawn_per_task": 5,
+        "max_spawn_depth": 1,
     }
     assert "worktree" not in found  # bool is an int subclass; a switch is not a dial
     assert "auto_commit" not in found
+    assert "allow_spawn" not in found  # the same, for the spawn opt-in
 
 
 def test_numeric_options_unwraps_optional_numeric_annotations():
@@ -96,9 +99,14 @@ def test_current_reads_defaults_from_an_untouched_config(home: Path):
     assert values["max_actions_per_run"] == "no agents configured"
     assert values["budget"] == "max_cost_per_run 0 (off), max_tokens_per_run 0 (off)"
     assert values["run_stall_timeout_seconds"] == "0 (off)"
+    assert values["spawn"].startswith("allow_spawn off")
+    assert "max_spawn_per_task 5, max_spawn_depth 1" in values["spawn"]
     assert values["cadence"] == "no manager agent configured"
     assert "#83" in values["launcher"]
-    assert "#43" in values["decomposer"]
+    # who decomposes is a real dial now (#43): a person, the manager, and a
+    # spawn-enabled task under the cap
+    assert values["decomposer"].startswith("a person and the manager")
+    assert "max_spawn_per_task 5" in values["decomposer"]
     assert values["merge_gate"].startswith("a person")
 
 
@@ -106,7 +114,12 @@ def test_current_reads_a_loosened_config(home: Path):
     (home / "prompts" / "manager.local.md").write_text("- run at most TWO tasks\n")
     config = Config(
         tasks=TasksConfig(
-            max_cost_per_run=5.0, max_tokens_per_run=250_000, run_stall_timeout_seconds=1800
+            max_cost_per_run=5.0,
+            max_tokens_per_run=250_000,
+            run_stall_timeout_seconds=1800,
+            allow_spawn=True,
+            max_spawn_per_task=8,
+            max_spawn_depth=2,
         ),
         agents={
             "manager": AgentConfig(
@@ -123,6 +136,7 @@ def test_current_reads_a_loosened_config(home: Path):
     assert values["run_timeout_seconds"] == "manager 300 (default), standup 900"
     assert values["budget"] == "max_cost_per_run 5, max_tokens_per_run 250000"
     assert values["run_stall_timeout_seconds"] == "1800"
+    assert values["spawn"] == "allow_spawn on, max_spawn_per_task 8, max_spawn_depth 2"
     assert values["cadence"] == "every 1h"
 
 

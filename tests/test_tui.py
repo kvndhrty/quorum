@@ -119,6 +119,22 @@ def test_task_table_shows_waiting_on_dependencies(home: Path, tui):
     tui(home, script)
 
 
+def test_task_table_shows_the_spawn_link_and_badge(home: Path, tui):
+    """Lineage reaches the TUI through the same two renderers the CLI uses
+    (#43): the badge follows the status word, the link trails it."""
+    store = TaskStore(home)
+    parent = store.add("proj-a", "the work", "fake", allow_spawn=True)
+    store.add("proj-a", "the follow-up", "fake", parent=parent.id)
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
+        assert any("⇗" in c for c in cells)
+        assert any(f"parent {parent.short_id}" in c for c in cells)
+
+    tui(home, script)
+
+
 def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path, tui):
     ids = populate(home)
 
@@ -539,6 +555,31 @@ def test_acking_a_vanished_escalation_notifies_instead_of_crashing(home: Path, t
         assert app.is_running
         assert [n.severity for n in app._notifications] == ["error"]
         assert MessageBus(home).read_topic("attention") == []
+
+    tui(home, script)
+
+
+def test_the_transcript_tab_lists_reports_the_way_task_show_does(home: Path, tui):
+    """The one fact the detail pane and `quorum task show` both display is a
+    task's recent reports, so the pane renders the rows views assembles
+    (`views.task_detail`) through the same line formatter instead of
+    spelling the line a second time."""
+    from quorum import views
+
+    ids = populate(home)
+    tasks.report(home, ids[1], status="executing", text="on it")
+
+    async def script(app, pilot):
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        assert mode_text(app).startswith(f"task {ids[1][-6:].lower()} — transcript")
+        rows = [
+            r
+            for r in views.task_detail(home, TaskStore(home).get(ids[1]))
+            if r["section"] == "reports" and r["kind"] == "body"
+        ]
+        assert app._log_lines[-2:] == ["— reports —", views.detail_line(rows[0])]
+        assert "executing: on it" in app._log_lines[-1]
 
     tui(home, script)
 

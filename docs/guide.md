@@ -53,6 +53,11 @@ Then check the setup against reality:
 quorum doctor          # one line per check; exit 1 if anything is ✗
 ```
 
+A finished home is easier to read than a scaffold full of comments:
+[examples/dogfood-home/](../examples/dogfood-home/) is the one that builds
+quorum itself — its real `config.toml`, the house rules its manager follows,
+and the issue-driven loop they serve, with what a cycle cost.
+
 ### 2. Register a project
 
 A project is a directory, usually a git repo. Tasks run against projects.
@@ -164,7 +169,7 @@ a lock.
 ```bash
 quorum status                 # supervisor, agents, tasks, projects
 quorum task list              # every task, one line each
-quorum task show a3f2k9       # one task in full (--json for the raw record)
+quorum task show a3f2k9       # one task in full (--json for the same rows plus the record)
 quorum task log a3f2k9        # one run, rendered readably (-f follows a live one)
 quorum task history a3f2k9    # one task's whole life, oldest first
 quorum tui                    # all of it, live, in the terminal
@@ -276,6 +281,48 @@ follows the tick running now, and the same command reads any agent
 (`quorum agent log babysitter`). A prompt agent has no digest, so what it saw
 is its rendered prompt.
 
+### Is supervision doing anything
+
+`agent log` reads one tick. The question across ticks is whether the
+supervision is changing anything: does a nudge change the next report, does a
+relaunch finish the task, does an escalation get acted on. That decides how
+much supervision to run at all, and `quorum agent interventions` answers it
+from the same journal, read against each target's reports:
+
+```
+$ quorum agent interventions manager --since 7d
+manager interventions, since 2026-09-05T09:00:00Z (7d)
+[2026-09-05 10:14:02] nudge -> a3f2k9 · status then executing · “use the retry helper” · reported reviewing after 8m12s · status now done
+[2026-09-06 03:20:04] launch -> 5yqg9f · status then blocked · no report since · status now blocked
+[2026-09-07 11:02:11] escalation -> #attention · “a secret I cannot read” · acked — archived (7c1af2)
+1 nudge, 1 followed by a report · 1 launch, 0 later reported done · 1 escalation, 1 acked
+the journal starts at 2026-09-01T08:00:12Z
+```
+
+Every nudge, launch (`task run`), stop and escalation the agent journaled,
+each with the target's status at the time, the next report the target made
+after it and how long that took. A `task run` reads as `launch` because the
+journal does not say whether it was the first one; the status it recorded
+does — `queued` was a first launch, anything else a relaunch. The summary
+counts only what the files state: a report happened, a `done` report happened,
+a message is no longer live. Nothing here decides whether an intervention
+worked — that reading is yours, which is also why there is no "within N
+hours" threshold to tune.
+
+Four things to know before you read much into a line. A nudge's text is the
+first 80 characters of it, which is all the journal keeps. An escalation is
+matched to its post by text, since the journal line is written before the
+message exists, so a post whose text you have edited since reads as
+`no matching post`. `acked` means the message has left the board — which
+`board ack` does, and so does the janitor's retention sweep, so over a long
+window an escalation nobody saw can read as acked. And the journal is read as
+a bounded tail: the last line says how far back that reaches, and says so
+explicitly when the file is larger than the window read.
+
+`--json` gives the same rows with their raw fields. The manager is an agent
+like any other, so this reads a prompt agent too
+(`quorum agent interventions babysitter`).
+
 ## Steering
 
 Three channels, and you and the manager use all three identically.
@@ -374,6 +421,11 @@ this guide all use.
 - **dependency** — a task listed with `task add --after <id>`, which must
   finish before this one starts.
 - **perpetual task** — one queued with `--perpetual`, not meant to finish.
+- **spawned task** — a task created by another task's run (`task add` from
+  inside a task queued with `--allow-spawn`). It records its **parent**: the
+  full id of the task whose run created it. An ordinary queued task in every
+  other respect — nothing cascades from parent to child, and the manager or
+  you still launch it.
 - **attached task** — a task whose work is a live interactive session you are
   driving, created with `quorum task adopt`. Quorum observes it and never runs
   it.
@@ -404,6 +456,10 @@ this guide all use.
 - **journal** — what an agent did, recorded by quorum as each command executes
   rather than reported by the model. `quorum manager journal` prints it, and
   the recent entries go back into the next digest.
+- **intervention** — something an agent did about a task, or asked a person
+  for: a nudge, a launch (or relaunch), a stop, or an escalation.
+  `quorum agent interventions <name>` lists them from the journal with what
+  the target did next.
 - **transcript** — everything the harness printed during a run, one JSON line
   per event. Read it with `task log` or `agent log`.
 - **usage log** — one line per agent run saying what it cost and how it ended.
@@ -418,6 +474,15 @@ this guide all use.
   cap, the budget gate, and the substrate refusals that protect a checkout (a
   live run's lock, an attached task, unfinished dependencies). A rail limits a
   rate; it never vetoes a particular choice.
+- **actor** — who a `quorum` command is acting as, taken from the
+  `QUORUM_ACTOR` tag the runner and the agents set on the harnesses they
+  spawn: `task-<id>` for a task run, the agent's name for an agent run, and
+  nobody for a command you typed. It is what the journal attributes, what a
+  notebook checks before accepting a note, and what `self` resolves.
+- **self** — the handle a run passes in place of its own id:
+  `quorum task show self`, `quorum agent show self`. It resolves the actor
+  tag, so it can only ever name the process that typed it, and outside a
+  tagged run it is an error.
 - **preamble** — the template prepended to every task run's prompt
   (`prompts/task-preamble.md`), which teaches the report, memory and delivery
   protocols.
@@ -627,6 +692,65 @@ up in every view. `quorum task cancel <id>` ends the manager's attention
 (`--kill` also stops a live run, and asks first on an interactive shell —
 `--yes` skips). The work lives on the `quorum/<short-id>` branch either way.
 
+#### Knowing your own limits
+
+A task can read its own record from inside its own run:
+
+```bash
+quorum task show self
+```
+
+`self` resolves the actor tag the runner set on the harness, so it names the
+run that typed it and nothing else. What comes back is the record anyone
+would see — status, prompt, dependencies, runs, reports, notebook, handoff —
+plus a `this run:` section holding the facts that only exist inside the run:
+
+```
+this run:
+  actor:    task-01J8Z4K2QF7N3B6MRT9V0XWDHS
+  actions:  not capped for a task run — the runner is the rail, and reports.jsonl
+            plus the transcript are the record of what this run did
+  limits:   max_cost_per_run $2.00, max_tokens_per_run off — `task run` refuses
+            the next run when the last one exceeds either
+  spent:    last run $1.24 · 310.2k tok; this run's own spend is recorded when it ends
+  notebook: 4 note(s), 812 of 6000 bytes and 4 of 30 entries
+  handoff:  1 task(s) depend on this one (b7c1x4) and no handoff is written —
+            `quorum task report a3f2k9 --status done --handoff <file>`
+```
+
+The preamble names two moments worth a call. Before a long, tool-heavy step,
+read `limits:` and `spent:` — a run that ends over budget means the *next*
+run of that task is refused until you force it, so an expensive step is
+better split across runs than discovered at the gate. Before reporting
+`done`, read `handoff:` — it says whether anything is waiting and whether
+anything has been left for it.
+
+It is read-only. Reading a cap is not a way around it: nothing about this
+command changes a budget, a cap or a schedule, and it writes no journal line
+of its own. `--json` gives the same rows for a harness to parse, under
+`detail`, beside the raw record.
+
+Agents have the same command, and for an agent it also answers the question
+a task cannot ask — how much of the per-run action cap is left:
+
+```bash
+quorum agent show self      # from inside an agent's own run
+quorum agent show manager   # the same record, read by you
+```
+
+```
+this run:
+  actor:    manager (run 01J8Z4K2QF7N3B6MRT9V0XWDHS)
+  actions:  7 of 20 used this run, 13 left — a refused action waits for your
+            next scheduled run
+  notebook: 6 note(s), 1204 of 4000 bytes and 6 of 20 entries
+```
+
+Typed in the wrong place, `self` is an error naming the fix: an agent run
+asking for a task is pointed at `quorum agent show self`, a task run asking
+for an agent at `quorum task show self`, and a command you typed yourself at
+the id or name it needs instead.
+
 #### When a run hangs
 
 Harness sessions hang: blocked on stdin, waiting on a provider turn that never
@@ -784,6 +908,80 @@ The common recipe is a review task queued behind an implementation task
 `gh pr diff`, fix what you find on its branch, and report done"). The reviewer
 cannot start before the PR exists, so it never spends a run reviewing nothing.
 
+### Letting tasks create work
+
+A run often finds work it should not do here: something out of scope that
+needs its own branch, a follow-up someone should do once this lands, an
+experiment worth running separately. By default a task cannot queue that — it
+can only say so in a report. `--allow-spawn` lets it queue the work instead:
+
+```bash
+quorum task add my-api "migrate the test suite to pytest" --allow-spawn
+```
+
+Inside such a task's run, the preamble gains a section teaching `task add`,
+and the CLI does the rest:
+
+```bash
+quorum task add my-api "delete the unittest compatibility shims"
+# → queued task c4d8e1 on my-api
+#   spawned by task a3f2k9: it is queued like any other task, and only the
+#   manager or a human starts it
+
+quorum task add my-api "benchmark the new suite" --after self
+```
+
+`--after self` is the post-task: it names the task making the call, so the new
+work waits for that task to finish and reads its
+[handoff](#dependencies-and-handoffs) when it runs. It only means something
+inside a run — outside one it is an error, not a guess.
+
+**What the new task is.** An ordinary queued task, with one extra field:
+`parent`, the full id of the task whose run created it. It inherits that
+task's harness unless `--harness` says otherwise, it is *not* itself allowed
+to spawn unless `--allow-spawn` was passed again, and nobody launches it — the
+manager decides, under the same house rules as everything else, and you still
+merge. Every view shows the link: `parent c4d8e1` in the flags column,
+`⇗` beside the status of a task that may spawn, `parent:` and `spawned:` lines
+in `quorum task show`, and `parent=` / `spawned=` on the manager's digest
+lines.
+
+**The three refusals.** `quorum task add` run from inside a task is refused
+when the task was not queued with `--allow-spawn`, when the parent has already
+created `[tasks].max_spawn_per_task` tasks (5 by default), and when the chain
+is already `[tasks].max_spawn_depth` deep (1 by default, so a spawned task may
+not spawn again). They are rate limits, of the same family as the action cap
+and the budget gate: they never judge the work, and each refusal tells the
+harness to put the idea in its report instead, where the manager and you will
+see it. A refused spawn — and every spawn — is journalled, so the next digest
+carries it, and a parent that hit its cap is flagged `SPAWN-CAP` for the
+manager to read.
+
+These refusals know which task is calling because the run's harness carries
+`QUORUM_ACTOR=task-<id>` in its environment, which a determined harness could
+clear — they are a convention against an accident, not a security boundary,
+the same as the [notebook's](#notebooks). What actually confines a run is
+[sandboxing](#sandboxing). So `--allow-spawn` is about legibility and pace: a
+task queued without it will not grow the queue by mistake, and one queued with
+it grows it in a way you and the manager can see.
+
+**Nothing cascades.** Cancelling a parent does not touch its children: once
+queued they are independent work, and whether a child still makes sense
+without its parent is a judgement, which means it belongs to the manager or to
+you, not to Python. A child queued `--after self` behind a cancelled parent
+shows `DEP-FAILED` like any other unsatisfiable dependency.
+
+```toml
+[tasks]
+allow_spawn = true        # every task queued here may spawn (default: false)
+max_spawn_per_task = 5    # children per parent, across all its runs
+max_spawn_depth = 1       # 1 = a spawned task may not spawn; 0 = nobody may
+```
+
+Start with it off, turn it on for one task, and read what it queues before
+raising anything — see
+[Loosening the rails](#loosening-the-rails-as-trust-is-earned).
+
 ### Notebooks
 
 A session is not durable: models compact their own context, a resumed session
@@ -937,6 +1135,7 @@ cancelling them, queueing follow-up work — and every action is journaled:
 quorum manager tell "prioritize the api task; park the docs work"
 quorum manager journal                    # everything it has done, and why
 quorum agent log manager                  # one tick end to end
+quorum agent show manager                 # schedule, last run, spend, notebook
 quorum manager notes                      # its notebook
 ```
 
@@ -982,11 +1181,12 @@ home's posture is visible in the same place as its health.
 | concurrent launches | `prompts/manager.local.md` house rule | none | rate-limit headroom, `overlaps=` rare |
 | actions per agent run (`max_actions_per_run`) | `[agents.<name>.settings]` | 20 | `cap.hit` on legitimate work |
 | seconds per agent run (`run_timeout_seconds`) | `[agents.<name>.settings]` | 300 | `TIMEOUT` on runs that progressed |
-| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account; before #43 (not built) |
+| per-run budget (`max_cost_per_run` / `max_tokens_per_run`) | `[tasks]` | 0 (off) | set on a metered account, and before letting tasks spawn tasks |
 | stall watchdog (`run_stall_timeout_seconds`) | `[tasks]` | 0 (off) | a healthy run is silent for longer |
+| tasks that spawn tasks (`allow_spawn` / `max_spawn_per_task` / `max_spawn_depth`) | `[tasks]` | off, 5, 1 | spawned tasks earn their keep; deeper chains stay legible |
 | manager cadence | `[agents.manager]` `schedule` | `every 5m` (dogfood: `every 1h`) | events carry the facts (#83, not built) |
 | who launches | `prompts/manager.md` | the manager | tasks self-schedule (#83, not built) |
-| who decomposes | a person | a person | a spawn cap exists (#43, not built) |
+| who decomposes | a person, the manager, and spawn-enabled tasks | a person | the queue a run grows is worth running |
 | merge gate | a person | a person | never removed; may move later |
 
 Four of the rows need a word more than the table has room for. Quorum counts
@@ -994,11 +1194,12 @@ no **concurrent launches** at all — the cap is a house rule you write into the
 manager's overlay, and the dogfood home says two. The **stall watchdog**
 measures the harness rather than your trust in it, since it counts silence and
 not progress, so it belongs above the longest quiet step a healthy run has.
-**Manager cadence** is spend: every tick is one harness run. And the last three
-rows are not settings at all — who launches is a sentence in
-`prompts/manager.md`, and who decomposes and who merges are conventions a
-person keeps, the merge gate permanently so, because quorum has no forge write
-path.
+**Manager cadence** is spend: every tick is one harness run. **Who decomposes**
+is half a setting: a person and the manager always may, and a task may only
+where it was queued with `--allow-spawn` (or the home defaults that on), within
+the two caps beside it. Who launches is a sentence in `prompts/manager.md`, and
+who merges is a convention a person keeps, permanently so, because quorum has
+no forge write path.
 
 **What does not move.** These are the constraints the dials sit inside. They
 encode the environment, not the model, and a more capable model does not
@@ -1033,7 +1234,8 @@ updates `CLAUDE.md` and `docs/architecture.md` in the same commit.
 
 Every prompt quorum uses is a file in `~/.quorum/prompts/`: the manager's
 policy (`manager.md`), the task preamble (`task-preamble.md`), the perpetual
-block (`task-perpetual.md`), and one per prompt agent. `quorum init` seeds
+block (`task-perpetual.md`), the spawn block (`task-spawn.md`), and one per
+prompt agent. `quorum init` seeds
 them, and deleting one restores the packaged default. Re-run `quorum init`
 after upgrading quorum: a prompt you never edited is refreshed to the new
 packaged default (init keeps a record of what it seeded, so an untouched copy
@@ -1069,9 +1271,22 @@ House rules ("run one task at a time", "always open draft PRs") belong in an
 overlay. Rewriting how supervision fundamentally works belongs in the file.
 
 ```bash
-quorum prompt list                # each template: default, seeded, or edited (+ overlay)
+quorum prompt list                # each template's state, and its overlay
 quorum prompt diff manager        # your copy vs the packaged default
 ```
+
+`prompt list` names one of three states per template, the same three
+`quorum doctor` reports — both ask the seed record, so they cannot disagree:
+
+```
+  manager          seeded, matches the packaged default
+  task-perpetual   seeded by an older quorum, never edited — `quorum init` upgrades it
+  task-preamble    edited — `quorum prompt diff task-preamble` vs the packaged default
+```
+
+Only the third one is yours to deal with. The second is what a home looks like
+after upgrading quorum but not re-running `quorum init`, and one `quorum init`
+clears it.
 
 **Migrating a home that already edited a prompt** — one step, and worth doing,
 because an edited `manager.md` from a few releases ago has no policy for
@@ -1196,8 +1411,12 @@ Each tick a prompt agent renders its prompt and runs your harness over it,
 with the same authority and the same rails as the manager: every mutating
 `quorum` command it issues is journaled to
 `state/agents/<name>/journal.jsonl` and capped per run
-(`max_actions_per_run`, default 20). Send it guidance through its own inbox
-and it appears in its `{directives}` placeholder at the next tick:
+(`max_actions_per_run`, default 20). From inside its own run it can read how
+much of that cap is left with `quorum agent show self`
+([Knowing your own limits](#knowing-your-own-limits)); from outside,
+`quorum agent show <name>` prints the same record without that section. Send
+it guidance through its own inbox and it appears in its `{directives}`
+placeholder at the next tick:
 
 ```bash
 quorum agent tell standup "skip the retro section today"

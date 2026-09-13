@@ -152,6 +152,17 @@ def _read_stall(home: Path, config: Config) -> str:
     return _off(config.tasks.run_stall_timeout_seconds)
 
 
+def _read_spawn(home: Path, config: Config) -> str:
+    """Tasks that spawn tasks: whether this home queues them spawn-enabled by
+    default, and the two rails on the ones that are."""
+    t = config.tasks
+    default = "on" if t.allow_spawn else "off (per-task --allow-spawn)"
+    return (
+        f"allow_spawn {default}, max_spawn_per_task {_fmt(t.max_spawn_per_task)}, "
+        f"max_spawn_depth {_fmt(t.max_spawn_depth)}"
+    )
+
+
 def _read_cadence(home: Path, config: Config) -> str:
     manager = config.agents.get("manager")
     if manager is None:
@@ -165,7 +176,10 @@ def _read_launcher(home: Path, config: Config) -> str:
 
 
 def _read_decomposer(home: Path, config: Config) -> str:
-    return "a person, with `task add` (task-spawned tasks, #43, are not built)"
+    """Who may turn one piece of work into several: a person always, the
+    manager from its prompt, and — where a task was queued with
+    `--allow-spawn` — the task's own run, under the spawn rails."""
+    return f"a person and the manager, with `task add`; tasks: {_read_spawn(home, config)}"
 
 
 def _read_merge_gate(home: Path, config: Config) -> str:
@@ -207,6 +221,13 @@ DIALS: tuple[Dial, ...] = (
         lives_in="[tasks] run_stall_timeout_seconds",
         default="0 (off)",
         read=_read_stall,
+    ),
+    Dial(
+        key="spawn",
+        label="tasks that spawn tasks",
+        lives_in="[tasks] allow_spawn / max_spawn_per_task / max_spawn_depth",
+        default="off, 5, 1",
+        read=_read_spawn,
     ),
     Dial(
         key="cadence",

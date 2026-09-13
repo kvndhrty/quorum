@@ -174,10 +174,12 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
     harness posts a nudge and then emits its `result`; the pump claims the
     nudge (rename out of new/) and only *then* counts the delivery. A result
     landing in that gap saw "answered, nothing pending" and closed stdin
-    with the nudge in flight — one result event instead of two, and the
-    nudge bounced back to new/. This forces that interleaving: the result
-    arrives while the claim is mid-way, on another thread, exactly as the
-    transcript reader delivers it."""
+    with the nudge in flight — the write hit a closed pipe and the nudge
+    bounced back to new/. This forces that interleaving: the result arrives
+    while the claim is mid-way, on another thread, exactly as the transcript
+    reader delivers it. What the claim window guarantees is that the message
+    is *written*; whether that write opened a turn of its own or folded into
+    the one already running is the close rule's business, tested below."""
     bus = MessageBus(home)
     inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
     bus.send("user", inbox, text="switch to the fallback plan")
@@ -206,7 +208,6 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
             time.sleep(0.01)
         assert len(stdin.turns) == 2, stdin.turns  # prompt turn, then the nudge
         assert "switch to the fallback plan" in stdin.turns[1]
-        assert not stdin.closed  # the nudge's answer is still owed
         inbox_dir = bus.inbox_dir / inbox
         assert fsio.sorted_entries(inbox_dir / "new") == []  # delivered, not bounced
         while fsio.sorted_entries(inbox_dir / "cur") and time.monotonic() < deadline:
@@ -217,6 +218,47 @@ def test_pump_never_closes_stdin_with_a_claimed_message_in_flight(home: Path):
         assert stdin.closed  # now the run is idle: every turn answered
     finally:
         pump.stop()
+
+
+def test_pump_holds_stdin_open_for_a_turn_written_to_an_idle_harness(home: Path):
+    """Half the close rule, and the half the #109 fix must not break: a
+    message written *after* the last result reached an idle harness, which
+    answers it in a turn of its own, so stdin stays open until that turn's
+    result arrives. Driven turn by turn on one thread — the pump has exactly
+    one delivering thread, so this is its real order of operations."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    assert pump._write_turn(pump._prompt)  # the opening turn
+    bus.send("user", inbox, text="switch to the fallback plan")
+    pump.on_event({"type": "result"})  # that turn ends, the nudge still in new/
+    assert not stdin.closed  # pending guidance is never closed out
+
+    pump._deliver_pending()  # written to an idle harness: a turn of its own
+    assert len(stdin.turns) == 2 and not stdin.closed
+    pump.on_event({"type": "result"})  # the answer that turn is owed
+    assert stdin.closed
+
+
+def test_pump_expects_no_second_result_for_a_turn_written_mid_turn(home: Path):
+    """The other half, and the #109 hang in one unit: a message written
+    while a turn is still running is drained into it, so the run's one
+    `result` answers both turns and ends the run. Counting a result per
+    delivery left stdin open on a harness with nothing left to do."""
+    bus = MessageBus(home)
+    inbox = tasks.inbox_name("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    stdin = _PipeEnd()
+    pump = runner.GuidancePump(home, inbox, stdin, "the prompt")
+
+    assert pump._write_turn(pump._prompt)  # the opening turn, still running
+    bus.send("user", inbox, text="switch to the fallback plan")
+    pump._deliver_pending()  # written mid-turn: folded into the one in flight
+    assert len(stdin.turns) == 2 and not stdin.closed
+
+    pump.on_event({"type": "result"})  # one result covers both turns
+    assert stdin.closed
 
 
 def test_build_harness_argv_strips_prompt_for_inject_harnesses():
@@ -264,6 +306,36 @@ def test_inject_pump_closes_an_idle_run(home: Path, project: str, monkeypatch):
     assert run_task(home, config, task.id) == 0
     fresh = TaskStore(home).get(task.id)
     assert fresh.runs[0].exit_code == 0
+
+
+def test_inject_pump_closes_a_run_whose_nudge_was_folded_into_its_turn(
+    home: Path, project: str, monkeypatch
+):
+    """The #109 hang: a real stream-json CLI drains a nudge that arrives
+    mid-turn into the turn already running and emits ONE `result` for both.
+    The pump counted one result per delivery, so `results >= 1 + delivered`
+    was never satisfied, stdin stayed open on an idle harness, and
+    `runner.lock` stayed held on a task that had already reported done until
+    someone ran `task stop`. The run has to end on its own."""
+    monkeypatch.setattr(runner, "GUIDANCE_POLL_SECONDS", 0.05)
+    monkeypatch.setenv("FAKE_HARNESS_MODE", "inject_fold")
+    monkeypatch.setenv("FAKE_HARNESS_WATCHDOG", "15")  # a stuck pump fails, not wedges
+    harness_config(home, extra='inject = "stream-json"\n')
+    config = load_config(home)
+    task = TaskStore(home).add(project, "x", "fake")
+
+    assert run_task(home, config, task.id) == 0  # exit 7 = the harness's watchdog
+
+    fresh = TaskStore(home).get(task.id)
+    assert fresh.runs[0].exit_code == 0
+    assert not tasks.runner_lock_path(home, task.id).exists()  # released
+    entries = fsio.read_jsonl(tasks.transcript_path(home, task.id))
+    results = [e for e in entries if e.get("event", {}).get("type") == "result"]
+    assert len(results) == 1  # one result covered the prompt turn and the nudge
+    assert "switch to the fallback plan" in transcript_text(home, task.id)
+    inbox = MessageBus(home).inbox_dir / tasks.inbox_name(task.id)
+    assert fsio.sorted_entries(inbox / "new") == []  # delivered, not bounced back
+    assert fsio.sorted_entries(inbox / "cur") == []  # ...and acked
 
 
 def test_run_records_the_usage_the_harness_reported(home: Path, project: str, monkeypatch):
@@ -1575,3 +1647,123 @@ def test_the_preamble_tells_a_task_how_to_leave_a_handoff(home: Path, project: s
     # runner's guidance pump, so `--handoff -` from inside a run would block.
     assert f"quorum task report {task.short_id} --status done --handoff <file>" in text
     assert "--handoff <file|->" not in text
+
+
+# -- the task record as rows (#127) ------------------------------------------
+
+
+def detail_by_label(rows: list[dict]) -> dict[str, dict]:
+    return {r["label"]: r for r in rows if r["kind"] == "field"}
+
+
+def test_task_detail_covers_every_section_of_a_task_that_has_everything(
+    home: Path, project: str
+):
+    """The record as `task show` prints it: fields, both directions of the
+    dependency graph, the runs and what they spent, the reports, the
+    notebook and the handoff — each row carrying its fact as well as its
+    line, so a consumer never parses the text back."""
+    from quorum import notes, views
+
+    harness_config(home)
+    store = TaskStore(home)
+    upstream = store.add(project, "build it", "fake", issue_url=ISSUE_URL)
+    dependent = store.add(project, "review it", "fake", depends_on=[upstream.id])
+    tasks.report(home, upstream.id, "pr", "opened", pr_url="https://x/pr/7")
+    tasks.record_pr_state(home, store.get(upstream.id), "merged")
+    tasks.write_handoff(home, upstream.id, "Changed: the thing.\nCheck first: tests/\n")
+    notes.task_notebook(home, upstream.id).remember("the auth fixture is the slow one")
+
+    rows = views.task_detail(home, store.get(upstream.id))
+    fields = detail_by_label(rows)
+    assert fields["project"]["project"] == project
+    assert fields["status"]["status"] == "pr" and fields["status"]["running"] is False
+    assert fields["issue"]["issue_url"] == ISSUE_URL
+    assert fields["pr"]["pr_url"] == "https://x/pr/7"
+    assert fields["pr state"]["pr_state"] == "merged"
+    # the reverse read of `depends_on`, which the JSON used to omit entirely
+    assert fields["dependents"]["dependents"] == [dependent.short_id]
+    assert fields["updated"]["updated_at"] == store.get(upstream.id).updated_at
+
+    sections = {r["section"] for r in rows}
+    assert sections == {"record", "reports", "notebook", "handoff", "more"}
+    reports = [r for r in rows if r["section"] == "reports" and r["kind"] == "body"]
+    assert [r["status"] for r in reports] == ["pr"]
+    assert reports[0]["pr_url"] == "https://x/pr/7"
+    # the handoff body in full, on the heading row and line by line under it
+    handoff = [r for r in rows if r["section"] == "handoff"]
+    assert handoff[0]["handoff"] == "Changed: the thing.\nCheck first: tests/\n"
+    assert [r["text"] for r in handoff[1:]] == ["Changed: the thing.", "Check first: tests/"]
+    assert any("the auth fixture" in r["text"] for r in rows if r["section"] == "notebook")
+
+    # the other direction: the dependent names what it waits on
+    waiting = detail_by_label(views.task_detail(home, store.get(dependent.id)))["after"]
+    assert waiting["waiting_on"] == [upstream.short_id]
+    assert waiting["depends_on"] == [upstream.short_id]
+
+
+def test_task_detail_omits_the_sections_a_bare_task_has_nothing_for(
+    home: Path, project: str
+):
+    """The failing half of every optional row: a task queued and left alone
+    has no session, no issue, no PR, no dependencies, no runs and no
+    handoff, and prints none of those lines — an empty notebook is the one
+    absence that still says something, because it names the command."""
+    from quorum import views
+
+    task = TaskStore(home).add(project, "do it", "fake")
+    rows = views.task_detail(home, task)
+    labels = set(detail_by_label(rows))
+    assert labels == {"project", "status", "harness", "prompt", "workdir", "updated", "notebook"}
+    assert {r["section"] for r in rows} == {"record", "notebook", "more"}
+    assert "task remember" in detail_by_label(rows)["notebook"]["text"]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(b'{"at": "2026-01-01T00:00:00Z", "status": "do', id="torn-json"),
+        pytest.param('{"at": "2026-01-01T00:00:00Z", "text": "café'.encode()[:-1], id="torn-char"),
+        pytest.param(b'"a report that is not an object"\n', id="not-an-object"),
+    ],
+)
+def test_task_detail_is_fail_soft_over_a_damaged_reports_file(
+    home: Path, project: str, damage: bytes
+):
+    """Views degrade rather than fail: a bad reports line costs its own row,
+    never the record — `task show` is how a person finds out what happened to
+    a task whose files are in a bad way. Three shapes of the same damage, and
+    two of them are not JSON errors: a write cut mid-append can end inside a
+    multi-byte character, and a line that parses need not be an object."""
+    from quorum import views
+
+    task = TaskStore(home).add(project, "do it", "fake")
+    tasks.report(home, task.id, "executing", "working")
+    with open(tasks.reports_path(home, task.id), "ab") as f:
+        f.write(damage)
+
+    rows = views.task_detail(home, task)
+    reports = [r for r in rows if r["section"] == "reports" and r["kind"] == "body"]
+    assert [r["status"] for r in reports] == ["executing"]
+
+
+def test_task_detail_marks_the_budget_rows_for_the_surface_to_colour(
+    home: Path, project: str
+):
+    from quorum import views
+    from quorum.config import load_config
+
+    harness_config(home)
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[tasks]", "[tasks]\nmax_cost_per_run = 0.10"))
+    store = TaskStore(home)
+    task = store.add(project, "spendy", "fake")
+    run = tasks.TaskRun(started_at=fsio.iso(fsio.utc_now()), usage={"cost_usd": 0.42})
+    task = store.update(task.id, runs=[run])
+
+    rows = views.task_detail(home, task, config=load_config(home))
+    fields = detail_by_label(rows)
+    assert fields["usage"]["usage"]["cost_usd"] == 0.42
+    assert fields["budget"]["style"] == "warning"
+    # the last run is the one over budget, so the runner will refuse the next
+    assert fields["gated"]["budget_gated"] is True
