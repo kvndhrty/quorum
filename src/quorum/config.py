@@ -87,8 +87,26 @@ class TasksConfig(BaseModel):
     # well above the longest silent step your harness has (a full test run, a
     # cold build) or it will kill healthy work.
     run_stall_timeout_seconds: float = 0.0
+    # Tasks that spawn tasks (#43). Off by default: only a task queued with
+    # `task add --allow-spawn` may create work of its own, and this is the
+    # home default for that flag — `true` says every task queued here is
+    # trusted to grow the queue. The two numbers below are the rails on it,
+    # of the rate-limit family the action cap and the budget gate belong to:
+    # how many children one parent may create across all its runs, and how
+    # deep the chain may go (1 = a spawned task may not spawn again, 0 =
+    # nothing may spawn at all). Children are queued, never launched — only
+    # the manager or a person starts one.
+    allow_spawn: bool = False
+    max_spawn_per_task: int = 5
+    max_spawn_depth: int = 1
 
-    @field_validator("max_cost_per_run", "max_tokens_per_run", "run_stall_timeout_seconds")
+    @field_validator(
+        "max_cost_per_run",
+        "max_tokens_per_run",
+        "run_stall_timeout_seconds",
+        "max_spawn_per_task",
+        "max_spawn_depth",
+    )
     @classmethod
     def _nonnegative(cls, v, info):
         if v < 0:

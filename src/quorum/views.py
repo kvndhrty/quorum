@@ -29,6 +29,7 @@ from .tasks import (
     read_reports,
     runner_alive,
     short_handle,
+    spawn_states,
     task_dir,
     workdir_git_state,
 )
@@ -180,6 +181,10 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
     # One pass over the listing we already have: dependencies are read, never
     # materialized, so every view stays a pure file reader.
     deps = dependency_states(all_tasks)
+    # The same shape for the other relation a task can be in: who spawned it,
+    # what it spawned, and whether it has used up its share (#43). Read from
+    # the same listing, so the views stay pure file readers.
+    spawn = spawn_states(all_tasks, budget.max_spawn_per_task)
     for t in all_tasks:
         last = read_reports(home, t.id, limit=1)
         git_state = None
@@ -248,6 +253,18 @@ def task_rows(home: Path, config: Config | None = None) -> list[dict[str, Any]]:
                 "dep_failed": deps.get(t.id, {}).get("failed", []),
                 "dep_missing": deps.get(t.id, {}).get("missing", []),
                 "dep_cycle": deps.get(t.id, {}).get("cycle", False),
+                # Lineage (#43), short ids like the dependency fields above:
+                # the task whose run queued this one ("" when a person or an
+                # agent did), and the tasks this one queued. `spawn_capped`
+                # says it reached [tasks].max_spawn_per_task — an observation
+                # that it wanted more work than its share, never a rail.
+                "parent": spawn.get(t.id, {}).get("parent", ""),
+                "spawned": spawn.get(t.id, {}).get("children", []),
+                "spawn_capped": spawn.get(t.id, {}).get("capped", False),
+                # Whether this task's harness may queue tasks at all
+                # (`task add --allow-spawn`): badged, so who can grow the
+                # queue is visible without opening the record.
+                "allow_spawn": t.allow_spawn,
                 "git": git_state,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,
@@ -289,12 +306,17 @@ def task_badges(row: dict[str, Any]) -> str:
     badges one.
     """
     marks = " ∞" if row.get("perpetual") else ""
+    # Who may grow the queue: a task queued with `--allow-spawn` may call
+    # `task add` from inside its run. A badge rather than a flag — it is a
+    # standing property of the task, not something to decide about.
+    marks += " ⇗" if row.get("allow_spawn") else ""
     return marks + {"merged": " ✔", "closed": " ⊘"}.get(row.get("pr_state") or "", "")
 
 
 def task_flags(row: dict[str, Any]) -> str:
-    """Stranded work and unsatisfied dependencies: the observations that ask
-    a reader (or the manager) to decide something.
+    """Stranded work, unsatisfied dependencies and lineage: the observations
+    that ask a reader (or the manager) to decide something, plus the `parent`
+    link that says where a task came from.
 
     Only `waiting-on` blocks a run. `DEP-FAILED` / `DEP-MISSING` /
     `DEP-CYCLE` name dependencies that can never finish, so nothing waits on
@@ -317,6 +339,13 @@ def task_flags(row: dict[str, Any]) -> str:
         flags.append(f"DEP-MISSING {','.join(row['dep_missing'])}")
     if row.get("dep_cycle"):
         flags.append("DEP-CYCLE")
+    # Lineage: where this task came from, and — on a parent that used up its
+    # share — that it wanted more work than `[tasks].max_spawn_per_task`
+    # allows. Both are observations; neither stops anything.
+    if row.get("parent"):
+        flags.append(f"parent {row['parent']}")
+    if row.get("spawn_capped"):
+        flags.append("SPAWN-CAP")
     return "  ".join(flags)
 
 
@@ -412,7 +441,13 @@ def task_detail(
     # The badges every listing shows, then the words this surface has room
     # for. `task_badges` reads a row, and the two fields it wants are on the
     # task itself.
-    state = task.status + task_badges({"perpetual": task.perpetual, "pr_state": task.pr_state})
+    state = task.status + task_badges(
+        {
+            "perpetual": task.perpetual,
+            "pr_state": task.pr_state,
+            "allow_spawn": task.allow_spawn,
+        }
+    )
     if task.attached:
         state += " (attached to a live session)"
     elif running:
@@ -494,6 +529,42 @@ def task_detail(
             f"{', '.join(dependents)}  (leave them a handoff: "
             f"`task report {task.short_id} --status done --handoff <file|->`)",
             dependents=dependents,
+        )
+    # Lineage (#43), both directions, off the same pass the listings read
+    # (`spawn_states` over the listing already loaded above): who asked for
+    # this task, what it asked for itself, and — on a task queued with
+    # `--allow-spawn` — how much of its share it has used. Observations, not
+    # rails: cancelling either end changes nothing about the other.
+    lineage = spawn_states(all_tasks, config.tasks.max_spawn_per_task).get(task.id, {})
+    if lineage.get("parent"):
+        add(
+            "record",
+            "field",
+            "parent",
+            f"{lineage['parent']}  (this task was spawned by it)",
+            parent=lineage["parent"],
+        )
+    if lineage.get("children"):
+        add(
+            "record",
+            "field",
+            "spawned",
+            ", ".join(lineage["children"]),
+            spawned=lineage["children"],
+            spawn_capped=lineage.get("capped", False),
+        )
+    if task.allow_spawn:
+        used = len(lineage.get("children", []))
+        cap = config.tasks.max_spawn_per_task
+        add(
+            "record",
+            "field",
+            "spawn",
+            f"allowed — {used}/{cap} used",
+            allow_spawn=True,
+            spawn_used=used,
+            spawn_max=cap,
+            spawn_capped=lineage.get("capped", False),
         )
     if task.runs:
         last = task.runs[-1]

@@ -119,6 +119,22 @@ def test_task_table_shows_waiting_on_dependencies(home: Path, tui):
     tui(home, script)
 
 
+def test_task_table_shows_the_spawn_link_and_badge(home: Path, tui):
+    """Lineage reaches the TUI through the same two renderers the CLI uses
+    (#43): the badge follows the status word, the link trails it."""
+    store = TaskStore(home)
+    parent = store.add("proj-a", "the work", "fake", allow_spawn=True)
+    store.add("proj-a", "the follow-up", "fake", parent=parent.id)
+
+    async def script(app, pilot):
+        table = app.query_one("#tasks", DataTable)
+        cells = [str(table.get_row_at(r)[2]) for r in range(table.row_count)]
+        assert any("⇗" in c for c in cells)
+        assert any(f"parent {parent.short_id}" in c for c in cells)
+
+    tui(home, script)
+
+
 def test_escape_while_typing_cancels_the_box_but_keeps_the_task(home: Path, tui):
     ids = populate(home)
 
